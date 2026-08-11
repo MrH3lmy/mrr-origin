@@ -14,11 +14,15 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -391,6 +395,58 @@ class EventIngestionIntegrationTests {
         assertThat(count("tracking_event_envelopes")).isOne();
     }
 
+    @ParameterizedTest(name = "rejects malformed identify payload: {0}")
+    @MethodSource("malformedIdentifyPayloads")
+    void rejectsMalformedIdentifyPayloadsWithoutWrites(String description, String payload) throws Exception {
+        Fixture fixture = fixture("malformed-identify", "app.example");
+
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatchWithPayload("malformed-batch", "malformed-event", payload)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("invalid_identify_payload"));
+
+        assertThat(count("tracking_ingestion_batches")).isZero();
+        assertThat(count("tracking_event_envelopes")).isZero();
+        assertThat(count("visitors")).isZero();
+        assertThat(count("tracking_sessions")).isZero();
+        assertThat(count("external_identities")).isZero();
+        assertThat(count("visitor_aliases")).isZero();
+    }
+
+    @Test
+    void malformedIdentifyLateInMixedBatchRollsBackEarlierWrites() throws Exception {
+        Fixture fixture = fixture("late-malformed-identify", "app.example");
+        String mixedBatch = """
+                {"version":1,"batchId":"mixed-malformed","events":[
+                  %s,
+                  {"eventId":"bad-identify","visitorId":"visitor-2","sessionId":"session-2",\
+                   "type":"identify","occurredAt":"2026-08-11T12:00:01Z","payload":{}}
+                ]}
+                """.formatted(event("accepted-first"));
+
+        mvc.perform(request(fixture.key(), "https://app.example", mixedBatch))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("invalid_identify_payload"));
+
+        assertThat(count("tracking_ingestion_batches")).isZero();
+        assertThat(count("tracking_event_envelopes")).isZero();
+        assertThat(count("visitors")).isZero();
+        assertThat(count("tracking_sessions")).isZero();
+        assertThat(count("external_identities")).isZero();
+        assertThat(count("visitor_aliases")).isZero();
+    }
+
+    private static Stream<Arguments> malformedIdentifyPayloads() {
+        return Stream.of(
+                Arguments.of("missing externalUserId", "{}"),
+                Arguments.of("non-string externalUserId", "{\"externalUserId\":42}"),
+                Arguments.of("blank externalUserId", "{\"externalUserId\":\"   \"}"),
+                Arguments.of("externalUserId over 160 characters",
+                        "{\"externalUserId\":\"" + "x".repeat(161) + "\"}"),
+                Arguments.of("externalUserId with surrounding whitespace",
+                        "{\"externalUserId\":\" user-42 \"}"));
+    }
+
     private Fixture fixture(String suffix, String domain) {
         UUID workspaceId = UUID.randomUUID();
         UUID projectId = UUID.randomUUID();
@@ -477,6 +533,15 @@ class EventIngestionIntegrationTests {
                    "occurredAt":"2026-08-11T12:00:00Z","payload":{"externalUserId":"%s"}}
                 ]}
                 """.formatted(batchId, eventId, visitorId, sessionId, externalUserId);
+    }
+
+    private static String identifyBatchWithPayload(String batchId, String eventId, String payload) {
+        return """
+                {"version":1,"batchId":"%s","events":[
+                  {"eventId":"%s","visitorId":"visitor","sessionId":"session","type":"identify",\
+                   "occurredAt":"2026-08-11T12:00:00Z","payload":%s}
+                ]}
+                """.formatted(batchId, eventId, payload);
     }
 
     private static String event(String eventId) {
