@@ -15,6 +15,8 @@ public record StripeConnectProperties(
         String testSecretKey,
         String liveClientId,
         String liveSecretKey,
+        String testWebhookSecret,
+        String liveWebhookSecret,
         String redirectUri,
         Duration stateTtl,
         String authorizeUri,
@@ -36,6 +38,15 @@ public record StripeConnectProperties(
 
     String secretKey(StripeConnectionMode mode) {
         return mode == StripeConnectionMode.LIVE ? liveSecretKey : testSecretKey;
+    }
+
+    /** Per ADR-0003, test and live webhook endpoints each have their own signing secret; never interchangeable. */
+    String webhookSecret(StripeConnectionMode mode) {
+        return mode == StripeConnectionMode.LIVE ? liveWebhookSecret : testWebhookSecret;
+    }
+
+    boolean isWebhookConfigured(StripeConnectionMode mode) {
+        return isPresent(webhookSecret(mode));
     }
 
     boolean isConfigured(StripeConnectionMode mode) {
