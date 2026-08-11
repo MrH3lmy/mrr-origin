@@ -21,7 +21,8 @@ public class SecurityConfiguration {
                                 "/actuator/info",
                                 "/error",
                                 "/api/public/v1/events",
-                                "/api/stripe/connections/oauth/callback")
+                                "/api/stripe/connections/oauth/callback",
+                                "/api/stripe/webhooks/*")
                         .permitAll()
                         .anyRequest()
                         .authenticated())

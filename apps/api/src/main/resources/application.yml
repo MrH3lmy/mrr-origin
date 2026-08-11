@@ -34,6 +34,10 @@ mrrorigin:
       test-secret-key: ${STRIPE_CONNECT_TEST_SECRET_KEY:}
       live-client-id: ${STRIPE_CONNECT_LIVE_CLIENT_ID:}
       live-secret-key: ${STRIPE_CONNECT_LIVE_SECRET_KEY:}
+      # Per ADR-0003, the Connect webhook signing secret is centrally managed, per mode, and is
+      # never a per-workspace value. Test and live deliveries are verified against distinct secrets.
+      test-webhook-secret: ${STRIPE_CONNECT_TEST_WEBHOOK_SECRET:}
+      live-webhook-secret: ${STRIPE_CONNECT_LIVE_WEBHOOK_SECRET:}
       redirect-uri: ${STRIPE_CONNECT_REDIRECT_URI:}
       state-ttl: ${STRIPE_CONNECT_STATE_TTL:PT15M}
 
