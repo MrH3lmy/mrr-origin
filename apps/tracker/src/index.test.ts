@@ -41,6 +41,16 @@ function harness(storage: Storage = new MemoryStorage()) {
 }
 
 describe("browser session capture", () => {
+  it("keeps an unemitted touchpoint pending across a reload", () => {
+    const h = harness();
+    const first = h.make();
+    const reload = h.make();
+
+    expect(reload.visitorId).toBe(first.visitorId);
+    expect(reload.sessionId).toBe(first.sessionId);
+    expect(reload.page().payload.touchpoint).toEqual(first.firstTouch);
+  });
+
   it("preserves the visitor and active session across reloads", () => {
     const h = harness();
     const first = h.make();
@@ -51,6 +61,14 @@ describe("browser session capture", () => {
     expect(reload.visitorId).toBe(first.visitorId);
     expect(reload.sessionId).toBe(first.sessionId);
     expect(reload.firstTouch).toEqual(first.firstTouch);
+    expect(reload.page().payload.touchpoint).toBeUndefined();
+  });
+
+  it("does not re-emit a touchpoint after reloading", () => {
+    const h = harness();
+    h.make().page();
+
+    const reload = h.make("https://app.example/next");
     expect(reload.page().payload.touchpoint).toBeUndefined();
   });
 
@@ -86,6 +104,22 @@ describe("browser session capture", () => {
       later.page("https://app.example/signup").payload.touchpoint,
     ).toBeUndefined();
     expect(later.firstTouch.utmSource).toBe("Search");
+  });
+
+  it("emits exactly one touchpoint per session", () => {
+    const h = harness();
+    const tracker = h.make();
+    const events = [
+      tracker.page(),
+      tracker.page("https://app.example/two"),
+      tracker.track("clicked"),
+    ];
+    expect(events.filter((event) => event.payload.touchpoint)).toHaveLength(1);
+
+    h.advance(30 * 60 * 1000);
+    events.push(tracker.page("https://app.example/return"));
+    events.push(tracker.track("returned"));
+    expect(events.filter((event) => event.payload.touchpoint)).toHaveLength(2);
   });
 
   it("queues pageviews and custom events with unique deterministic IDs", () => {
@@ -134,6 +168,34 @@ describe("browser session capture", () => {
     expect(event.payload.touchpoint?.landingUrl).toBe(
       "https://app.example/return",
     );
+  });
+
+  it("uses the explicit URL and referrer when page rolls over a session", () => {
+    const h = harness();
+    const tracker = h.make();
+    tracker.page();
+    h.advance(30 * 60 * 1000);
+
+    const event = tracker.page(
+      "https://app.example/return?utm_medium=email",
+      "https://newsletter.example/campaign#recipient",
+    );
+    expect(event.payload.touchpoint).toMatchObject({
+      landingUrl: "https://app.example/return?utm_medium=email",
+      referrerUrl: "https://newsletter.example/campaign",
+      utmMedium: "email",
+    });
+  });
+
+  it("expires at the exact timeout boundary", () => {
+    const h = harness();
+    const tracker = h.make();
+    tracker.page();
+    const originalSession = tracker.sessionId;
+    h.advance(30 * 60 * 1000 - 1);
+    expect(tracker.page().sessionId).toBe(originalSession);
+    h.advance(30 * 60 * 1000);
+    expect(tracker.page().sessionId).not.toBe(originalSession);
   });
 });
 
@@ -198,9 +260,21 @@ describe("defineTrackerConfig", () => {
       sessionTimeoutMs: 60_000,
     });
   });
-  it("requires callers to select the currently undefined timeout policy", () => {
+  it("defaults the session timeout to 30 minutes", () => {
+    expect(defineTrackerConfig({ publicKey: "key" }).sessionTimeoutMs).toBe(
+      30 * 60 * 1000,
+    );
+  });
+  it("accepts a custom timeout override and rejects invalid overrides", () => {
+    expect(
+      defineTrackerConfig({ publicKey: "key", sessionTimeoutMs: 1234 })
+        .sessionTimeoutMs,
+    ).toBe(1234);
     expect(() =>
       defineTrackerConfig({ publicKey: "key", sessionTimeoutMs: 0 }),
+    ).toThrow("positive session timeout");
+    expect(() =>
+      defineTrackerConfig({ publicKey: "key", sessionTimeoutMs: 1.5 }),
     ).toThrow("positive session timeout");
   });
   it("rejects blank keys and insecure endpoints", () => {

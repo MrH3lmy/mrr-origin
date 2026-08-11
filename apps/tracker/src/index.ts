@@ -3,8 +3,8 @@ export const TRACKER_VERSION = "0.0.0-development";
 export interface TrackerConfig {
   publicKey: string;
   endpoint?: string;
-  /** Required until the product session-timeout policy is approved. */
-  sessionTimeoutMs: number;
+  /** Session inactivity timeout. Defaults to 30 minutes. */
+  sessionTimeoutMs?: number;
   storage?: Storage;
   now?: () => number;
   generateId?: () => string;
@@ -58,6 +58,7 @@ export type ValidatedTrackerConfig = Readonly<
 >;
 
 const DEFAULT_ENDPOINT = "https://events.mrrorigin.com";
+export const DEFAULT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const STORAGE_PREFIX = "mrrorigin:v1:";
 
 interface StoredState {
@@ -67,6 +68,8 @@ interface StoredState {
   sessionStartedAt: number;
   lastActivityAt: number;
   firstTouch: Touchpoint;
+  sessionTouchpoint: Touchpoint;
+  touchpointEmitted: boolean;
 }
 
 export function defineTrackerConfig(
@@ -78,8 +81,9 @@ export function defineTrackerConfig(
     throw new Error("MRROrigin tracker requires a public project key");
   }
   if (
-    !Number.isSafeInteger(config.sessionTimeoutMs) ||
-    config.sessionTimeoutMs <= 0
+    config.sessionTimeoutMs !== undefined &&
+    (!Number.isSafeInteger(config.sessionTimeoutMs) ||
+      config.sessionTimeoutMs <= 0)
   ) {
     throw new Error("MRROrigin tracker requires a positive session timeout");
   }
@@ -94,7 +98,7 @@ export function defineTrackerConfig(
   return Object.freeze({
     publicKey,
     endpoint: endpoint.toString().replace(/\/$/, ""),
-    sessionTimeoutMs: config.sessionTimeoutMs,
+    sessionTimeoutMs: config.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS,
   });
 }
 
@@ -119,6 +123,9 @@ export function createTracker(config: TrackerConfig): Tracker {
   let pendingTouchpoint: Touchpoint | undefined;
   if (restored && isActive) {
     state = { ...restored, lastActivityAt: timestamp };
+    pendingTouchpoint = restored.touchpointEmitted
+      ? undefined
+      : restored.sessionTouchpoint;
   } else {
     const acquisition = parseAcquisition(
       currentPage,
@@ -137,6 +144,8 @@ export function createTracker(config: TrackerConfig): Tracker {
       sessionStartedAt: timestamp,
       lastActivityAt: timestamp,
       firstTouch: restored?.firstTouch ?? touchpoint,
+      sessionTouchpoint: touchpoint,
+      touchpointEmitted: false,
     };
     pendingTouchpoint = touchpoint;
   }
@@ -146,6 +155,7 @@ export function createTracker(config: TrackerConfig): Tracker {
     eventType: TrackerEvent["eventType"],
     name?: string,
     properties?: Readonly<Record<string, string | number | boolean | null>>,
+    rolloverReferrer = browserDocument?.referrer ?? "",
   ): TrackerEvent {
     const occurredAtMs = now();
     if (
@@ -154,15 +164,16 @@ export function createTracker(config: TrackerConfig): Tracker {
     ) {
       const sessionId = generateId();
       pendingTouchpoint = {
-        ...parseAcquisition(currentPage, browserDocument?.referrer ?? ""),
+        ...parseAcquisition(currentPage, rolloverReferrer),
         occurredAt: new Date(occurredAtMs).toISOString(),
         sessionId,
       };
       state.sessionId = sessionId;
       state.sessionStartedAt = occurredAtMs;
+      state.sessionTouchpoint = pendingTouchpoint;
+      state.touchpointEmitted = false;
     }
     state.lastActivityAt = occurredAtMs;
-    writeState(storage, storageKey, state);
     const event: TrackerEvent = Object.freeze({
       externalEventId: generateId(),
       eventType,
@@ -178,7 +189,9 @@ export function createTracker(config: TrackerConfig): Tracker {
           : { touchpoint: pendingTouchpoint }),
       }),
     });
+    if (pendingTouchpoint !== undefined) state.touchpointEmitted = true;
     pendingTouchpoint = undefined;
+    writeState(storage, storageKey, state);
     queue.push(event);
     return event;
   }
@@ -196,7 +209,12 @@ export function createTracker(config: TrackerConfig): Tracker {
           state.firstTouch = pendingTouchpoint;
         }
       }
-      return createEvent("page_view");
+      return createEvent(
+        "page_view",
+        undefined,
+        undefined,
+        referrer ?? browserDocument?.referrer ?? "",
+      );
     },
     track(name, properties) {
       const normalizedName = name.trim();
@@ -303,6 +321,11 @@ function isStoredState(value: unknown): value is StoredState {
     !!state.firstTouch &&
     typeof state.firstTouch.landingUrl === "string" &&
     typeof state.firstTouch.occurredAt === "string" &&
-    typeof state.firstTouch.sessionId === "string"
+    typeof state.firstTouch.sessionId === "string" &&
+    !!state.sessionTouchpoint &&
+    typeof state.sessionTouchpoint.landingUrl === "string" &&
+    typeof state.sessionTouchpoint.occurredAt === "string" &&
+    typeof state.sessionTouchpoint.sessionId === "string" &&
+    typeof state.touchpointEmitted === "boolean"
   );
 }

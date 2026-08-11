@@ -1,18 +1,17 @@
 # Browser tracker
 
 The tracker captures deterministic acquisition evidence without browser
-fingerprinting. Callers must supply the project's session inactivity timeout
-because the product-wide default is not yet documented. The tracker currently
-uses first-party `localStorage` when it is available; callers can provide a
-different `Storage` implementation for consent-controlled use. The configured
-storage mode and retention policy remain deferred architecture decisions.
+fingerprinting. Sessions expire after 30 minutes of inactivity by default;
+callers may provide a positive safe-integer `sessionTimeoutMs` override. The
+tracker currently uses first-party `localStorage` when it is available; callers
+can provide a different `Storage` implementation. Consent, storage-mode, and
+retention policy remain deferred architecture decisions.
 
 ```ts
 import { createTracker } from "@mrr-origin/tracker";
 
 const tracker = createTracker({
   publicKey: "project_public_key",
-  sessionTimeoutMs: configuredSessionTimeout,
 });
 
 tracker.page();
@@ -31,6 +30,5 @@ Storage reads, parsing, and writes are best-effort. If browser storage is
 missing, denied, or corrupted, capture continues with in-memory identity for the
 life of that tracker instance.
 
-No bundle-size budget is currently documented. Measure the minified artifact
-and its gzip-compressed size after every production build until a budget is
-approved.
+The production tracker bundle must remain at or below **5 KB gzip**. Measure the
+minified artifact and its gzip-compressed size after every production build.
