@@ -20,6 +20,7 @@ public class SecurityConfiguration {
                                 "/actuator/health/**",
                                 "/actuator/info",
                                 "/error",
+                                "/api/public/v1/events",
                                 "/api/stripe/connections/oauth/callback")
                         .permitAll()
                         .anyRequest()
