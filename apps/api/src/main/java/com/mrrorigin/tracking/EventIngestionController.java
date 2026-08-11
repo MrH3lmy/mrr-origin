@@ -62,7 +62,7 @@ public class EventIngestionController {
     ResponseEntity<Map<String, String>> unreadableBody(HttpMessageNotReadableException error) {
         if (IngestionBodyLimitFilter.causedByBodyLimit(error)) {
             return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
-                    .body(Map.of("code", "request_too_large", "message", "Request body exceeds 262144 bytes"));
+                    .body(Map.of("code", "request_too_large", "message", "Request body exceeds 1048576 bytes"));
         }
         return ResponseEntity.badRequest().body(Map.of("code", "invalid_envelope", "message", "Envelope is not valid JSON"));
     }

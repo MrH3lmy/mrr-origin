@@ -13,10 +13,10 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-/** Enforces the public ingestion contract's 256 KiB wire-level request-body limit. */
+/** Enforces the public ingestion contract's 1 MiB wire-level request-body limit. */
 @Component
 final class IngestionBodyLimitFilter extends OncePerRequestFilter {
-    static final int MAX_BODY_BYTES = 256 * 1024;
+    static final int MAX_BODY_BYTES = 1024 * 1024;
     private static final String INGESTION_PATH = "/api/public/v1/events";
 
     @Override
@@ -37,7 +37,7 @@ final class IngestionBodyLimitFilter extends OncePerRequestFilter {
     static void writeTooLarge(HttpServletResponse response) throws IOException {
         response.setStatus(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-        response.getWriter().write("{\"code\":\"request_too_large\",\"message\":\"Request body exceeds 262144 bytes\"}");
+        response.getWriter().write("{\"code\":\"request_too_large\",\"message\":\"Request body exceeds 1048576 bytes\"}");
     }
 
     static boolean causedByBodyLimit(Throwable error) {

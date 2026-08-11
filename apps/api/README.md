@@ -9,7 +9,7 @@ and project. The `Origin` host is normalized with the same lowercase, IDN, and
 trailing-dot policy used for configured allowed domains, then checked against
 that key's project.
 
-Requests are limited to **256 KiB before JSON deserialization** and **100 events**.
+Requests are limited to **1 MiB before JSON deserialization** and **100 events**.
 Each event timestamp may be exactly 30 days old through exactly 5 minutes in the
 future, relative to API receipt time. Older or later timestamps are rejected.
 
@@ -31,7 +31,7 @@ Status codes are:
 - `401` for unknown or revoked ingestion keys;
 - `403` for malformed or unlisted origins;
 - `409` for batch-ID/content or session/visitor conflicts; and
-- `413` when the raw request body exceeds 256 KiB.
+- `413` when the raw request body exceeds 1 MiB.
 
 Clients may retry network failures and ambiguous responses with the same batch
 ID and unchanged body. They must generate a new batch ID when changing content.

@@ -26,6 +26,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.web.servlet.MockMvc;
@@ -172,7 +173,14 @@ class EventIngestionIntegrationTests {
                 .replace("\"events\"", "\"projectId\":\"" + bob.projectId() + "\",\"events\"");
 
         mvc.perform(request(alice.key(), "https://alice.example", guessedProject))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("invalid_envelope"));
+
+        String guessedProjectOnEvent = batch("batch-event-guess", "event-guess")
+                .replace("\"type\"", "\"projectId\":\"" + bob.projectId() + "\",\"type\"");
+        mvc.perform(request(alice.key(), "https://alice.example", guessedProjectOnEvent))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("invalid_envelope"));
         mvc.perform(request(alice.key(), "https://bob.example", batch("batch-guess", "event-guess")))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("origin_not_allowed"));
@@ -229,11 +237,27 @@ class EventIngestionIntegrationTests {
     }
 
     @Test
-    void rejectsRequestBodyOverByteLimitBeforeDeserialization() throws Exception {
+    void rejectsKnownLengthRequestBodyOverByteLimitBeforeDeserialization() throws Exception {
         Fixture fixture = fixture("body-limit", "app.example");
         String body = "x".repeat(IngestionBodyLimitFilter.MAX_BODY_BYTES + 1);
 
         mvc.perform(request(fixture.key(), "https://app.example", body))
+                .andExpect(status().isPayloadTooLarge())
+                .andExpect(jsonPath("$.code").value("request_too_large"));
+        assertThat(count("tracking_ingestion_batches")).isZero();
+    }
+
+    @Test
+    void rejectsChunkedRequestBodyOverByteLimitBeforeDeserialization() throws Exception {
+        Fixture fixture = fixture("chunked-body-limit", "app.example");
+        String body = "x".repeat(IngestionBodyLimitFilter.MAX_BODY_BYTES + 1);
+
+        mvc.perform(request(fixture.key(), "https://app.example", body)
+                        .header(HttpHeaders.TRANSFER_ENCODING, "chunked")
+                        .with(request -> {
+                            request.setContentLength(-1);
+                            return request;
+                        }))
                 .andExpect(status().isPayloadTooLarge())
                 .andExpect(jsonPath("$.code").value("request_too_large"));
         assertThat(count("tracking_ingestion_batches")).isZero();
@@ -285,14 +309,15 @@ class EventIngestionIntegrationTests {
     private Fixture fixture(String suffix, String domain) {
         UUID workspaceId = UUID.randomUUID();
         UUID projectId = UUID.randomUUID();
+        String normalizedDomain = AllowedDomainService.normalize(domain);
         jdbc.sql("INSERT INTO workspaces (id, name, slug) VALUES (:id, :name, :slug)")
                 .param("id", workspaceId).param("name", "Tenant " + suffix).param("slug", "tenant-" + suffix).update();
         jdbc.sql("""
                         INSERT INTO projects (id, workspace_id, name, domain, public_key)
                         VALUES (:id, :workspaceId, :name, :domain, :publicKey)
-                        """)
+                """)
                 .param("id", projectId).param("workspaceId", workspaceId).param("name", "Project " + suffix)
-                .param("domain", domain).param("publicKey", "pk_" + UUID.randomUUID()).update();
+                .param("domain", normalizedDomain).param("publicKey", "pk_" + UUID.randomUUID()).update();
         IngestionKeyService.IssuedKey key = keys.issue(workspaceId, projectId);
         domains.add(workspaceId, projectId, domain);
         return new Fixture(workspaceId, projectId, key.id(), key.secret());
