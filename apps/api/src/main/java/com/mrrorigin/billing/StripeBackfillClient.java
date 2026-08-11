@@ -45,7 +45,28 @@ class StripeBackfillClient {
     }
 
     StripePage listSubscriptions(StripeConnectionMode mode, String stripeAccountId, String startingAfter) {
-        return listPage(mode, stripeAccountId, "/v1/subscriptions", startingAfter, Map.of("status", "all"));
+        // expand[] requests full Discount objects in the subscription-level `discounts` array
+        // rather than bare coupon/discount ID strings, per
+        // https://docs.stripe.com/api/subscriptions/object -- without this, discounts would arrive
+        // unexpanded and StripeBillingObjectParser would have nothing to normalize them from.
+        return listPage(
+                mode,
+                stripeAccountId,
+                "/v1/subscriptions",
+                startingAfter,
+                Map.of("status", "all", "expand[]", "data.discounts"));
+    }
+
+    /**
+     * Fetches a page of a single subscription's items directly, for completing a subscription
+     * whose embedded {@code items} page was itself paginated ({@code has_more=true}). Per
+     * https://docs.stripe.com/api/subscriptions/object, the embedded page is not guaranteed
+     * complete, and replacing a subscription's full stored item set from a partial page would
+     * silently drop items.
+     */
+    StripePage listSubscriptionItems(StripeConnectionMode mode, String stripeAccountId, String stripeSubscriptionId, String startingAfter) {
+        return listPage(
+                mode, stripeAccountId, "/v1/subscription_items", startingAfter, Map.of("subscription", stripeSubscriptionId));
     }
 
     StripePage listInvoices(StripeConnectionMode mode, String stripeAccountId, String startingAfter) {

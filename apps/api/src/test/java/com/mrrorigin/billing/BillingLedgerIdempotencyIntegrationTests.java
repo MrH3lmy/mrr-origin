@@ -6,7 +6,11 @@ import java.time.Instant;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.utility.DockerImageName;
 
 /**
  * #12's duplicate-delivery and out-of-order guarantees at the normalization layer: reprocessing
@@ -15,6 +19,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  */
 @Testcontainers
 class BillingLedgerIdempotencyIntegrationTests extends AbstractBillingLedgerIntegrationTest {
+
+    @Container
+    @ServiceConnection
+    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(DockerImageName.parse("postgres:17-alpine"));
 
     @Test
     void duplicateWebhookDeliveryOfTheSameEventNormalizesExactlyOnce() {

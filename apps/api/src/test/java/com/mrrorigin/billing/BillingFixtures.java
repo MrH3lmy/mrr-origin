@@ -35,9 +35,14 @@ final class BillingFixtures {
     }
 
     static String subscriptionItem(String id, String priceId, int quantity) {
+        return subscriptionItem(id, priceId, quantity, null);
+    }
+
+    /** @param discountsJoinedOrNull comma-joined item-level discount JSON objects (see {@link #discount}), or null for none */
+    static String subscriptionItem(String id, String priceId, int quantity, String discountsJoinedOrNull) {
         return """
-                {"id":"%s","object":"subscription_item","price":"%s","quantity":%d}"""
-                .formatted(id, priceId, quantity);
+                {"id":"%s","object":"subscription_item","price":"%s","quantity":%d,"discounts":[%s]}"""
+                .formatted(id, priceId, quantity, arrayContents(discountsJoinedOrNull));
     }
 
     static String subscription(
@@ -51,9 +56,37 @@ final class BillingFixtures {
             Long trialStart,
             Long trialEnd,
             String itemsJoined,
-            String discountJsonOrNull) {
+            String discountsJoinedOrNull) {
+        return subscription(
+                id, customerId, status, currency, currentPeriodStart, currentPeriodEnd, cancelAtPeriodEnd, trialStart,
+                trialEnd, itemsJoined, false, discountsJoinedOrNull);
+    }
+
+    /**
+     * @param itemsJoined comma-joined embedded {@code items.data} entries (see {@link
+     *     #subscriptionItem}); pass only a subset with {@code itemsHasMore=true} to simulate a
+     *     paginated embedded items page that requires a supplemental {@code GET
+     *     /v1/subscription_items} fetch to complete.
+     * @param discountsJoinedOrNull comma-joined subscription-level discount JSON objects (see
+     *     {@link #discount}), or null for none -- per
+     *     https://docs.stripe.com/api/subscriptions/object this is a plural, possibly-multi-entry
+     *     array, unlike Customer's singular {@code discount} field.
+     */
+    static String subscription(
+            String id,
+            String customerId,
+            String status,
+            String currency,
+            long currentPeriodStart,
+            long currentPeriodEnd,
+            boolean cancelAtPeriodEnd,
+            Long trialStart,
+            Long trialEnd,
+            String itemsJoined,
+            boolean itemsHasMore,
+            String discountsJoinedOrNull) {
         return """
-                {"id":"%s","object":"subscription","customer":"%s","status":"%s","currency":"%s","current_period_start":%d,"current_period_end":%d,"cancel_at_period_end":%b,"cancel_at":null,"canceled_at":null,"ended_at":null,"trial_start":%s,"trial_end":%s,"collection_method":"charge_automatically","items":{"object":"list","data":[%s],"has_more":false}%s}"""
+                {"id":"%s","object":"subscription","customer":"%s","status":"%s","currency":"%s","current_period_start":%d,"current_period_end":%d,"cancel_at_period_end":%b,"cancel_at":null,"canceled_at":null,"ended_at":null,"trial_start":%s,"trial_end":%s,"collection_method":"charge_automatically","items":{"object":"list","data":[%s],"has_more":%b},"discounts":[%s]}"""
                 .formatted(
                         id,
                         customerId,
@@ -65,7 +98,8 @@ final class BillingFixtures {
                         epochOrNull(trialStart),
                         epochOrNull(trialEnd),
                         itemsJoined,
-                        trailingField("discount", discountJsonOrNull));
+                        itemsHasMore,
+                        arrayContents(discountsJoinedOrNull));
     }
 
     static String invoice(
@@ -170,5 +204,9 @@ final class BillingFixtures {
 
     private static String trailingField(String name, String rawJsonValueOrNull) {
         return rawJsonValueOrNull == null ? "" : ",\"" + name + "\":" + rawJsonValueOrNull;
+    }
+
+    private static String arrayContents(String joinedOrNull) {
+        return joinedOrNull == null ? "" : joinedOrNull;
     }
 }

@@ -1,6 +1,8 @@
 package com.mrrorigin.billing;
 
 import java.util.List;
+import java.util.Objects;
+import java.util.UUID;
 import java.util.function.Consumer;
 
 import org.springframework.http.HttpStatus;
@@ -37,21 +39,43 @@ class StripeBackfillPageRunner {
 
     @Transactional
     PageApplyOutcome applyPage(
-            java.util.UUID connectionId,
+            UUID connectionId,
             StripeBackfillPhase expectedPhase,
+            String expectedCursor,
             List<JsonNode> items,
             boolean hasMore,
             Consumer<JsonNode> normalizeOne) {
         StripeConnection connection = connections
                 .findByIdForUpdate(connectionId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Stripe connection not found"));
+
+        // Re-checked under the same lock that guards the checkpoint write: a page fetched while the
+        // connection was ACTIVE/VERIFIED must never apply after it was disconnected or revoked out
+        // from under an in-flight backfill run.
+        if (connection.status() != StripeConnectionStatus.ACTIVE || connection.verificationStatus() != StripeVerificationStatus.VERIFIED) {
+            StripeBackfillCheckpoint current = StripeBackfillCheckpoint.parse(objectMapper, connection.syncCheckpoint());
+            return PageApplyOutcome.connectionIneligible(current.phase(), current.isComplete());
+        }
+
         StripeBackfillCheckpoint checkpoint = StripeBackfillCheckpoint.parse(objectMapper, connection.syncCheckpoint());
 
-        if (checkpoint.phase() != expectedPhase) {
-            // The checkpoint moved past this page (already applied by a concurrent run, or the
-            // phase already completed) between when the caller decided what to fetch and now.
-            // Discard this page rather than reapplying/overwriting newer progress.
-            return new PageApplyOutcome(checkpoint.phase(), checkpoint.isComplete());
+        // Both dimensions must match the position this page was fetched from -- phase alone is not
+        // enough: a slow/retried fetch of an earlier page, arriving after a faster concurrent fetch
+        // has already advanced the cursor within the SAME phase, must never be allowed to move the
+        // checkpoint backwards (which would silently discard forward progress and could re-open an
+        // already-completed page range indefinitely).
+        if (checkpoint.phase() != expectedPhase || !Objects.equals(checkpoint.cursor(), expectedCursor)) {
+            return PageApplyOutcome.stale(checkpoint.phase(), checkpoint.isComplete());
+        }
+
+        if (hasMore && lastIdOf(items) == null) {
+            // Stripe said more pages exist but gave us nothing to resume from (an empty page, or a
+            // trailing item with no usable id): treating this as phase-complete would silently skip
+            // the remainder of the phase, and treating it as "no cursor change" would infinite-loop.
+            // Reject the whole page instead -- checkpoint and normalized rows both stay untouched --
+            // so the caller sees a clear failure rather than either silent outcome.
+            throw new StripeBackfillException(
+                    "Stripe page reported has_more=true but supplied no valid cursor for phase " + expectedPhase);
         }
 
         for (JsonNode item : items) {
@@ -63,7 +87,7 @@ class StripeBackfillPageRunner {
                 hasMore && lastId != null ? checkpoint.advancedTo(lastId) : checkpoint.advancedToNextPhase();
         connection.applySyncCheckpoint(advanced.serialize(objectMapper));
         connections.saveAndFlush(connection);
-        return new PageApplyOutcome(advanced.phase(), advanced.isComplete());
+        return PageApplyOutcome.applied(advanced.phase(), advanced.isComplete());
     }
 
     private static String lastIdOf(List<JsonNode> items) {
@@ -74,5 +98,24 @@ class StripeBackfillPageRunner {
         return id == null ? null : id.textValue();
     }
 
-    record PageApplyOutcome(StripeBackfillPhase phase, boolean complete) {}
+    enum PageApplyStatus {
+        APPLIED,
+        STALE,
+        CONNECTION_INELIGIBLE
+    }
+
+    record PageApplyOutcome(PageApplyStatus status, StripeBackfillPhase phase, boolean complete) {
+
+        static PageApplyOutcome applied(StripeBackfillPhase phase, boolean complete) {
+            return new PageApplyOutcome(PageApplyStatus.APPLIED, phase, complete);
+        }
+
+        static PageApplyOutcome stale(StripeBackfillPhase phase, boolean complete) {
+            return new PageApplyOutcome(PageApplyStatus.STALE, phase, complete);
+        }
+
+        static PageApplyOutcome connectionIneligible(StripeBackfillPhase phase, boolean complete) {
+            return new PageApplyOutcome(PageApplyStatus.CONNECTION_INELIGIBLE, phase, complete);
+        }
+    }
 }

@@ -31,6 +31,9 @@ import com.mrrorigin.billing.StripeBillingObjects.ParsedSubscriptionItem;
 @Transactional
 class BillingLedgerUpsertService {
 
+    /** Namespaces this service's Postgres advisory locks; distinct from StripeConnectionService's. */
+    private static final int SUBSCRIPTION_LOCK_NAMESPACE = 914_101;
+
     private final JdbcClient jdbc;
 
     BillingLedgerUpsertService(JdbcClient jdbc) {
@@ -113,47 +116,71 @@ class BillingLedgerUpsertService {
                 .update();
     }
 
+    /**
+     * Locks this subscription (a Postgres advisory lock, held for the rest of the transaction) so
+     * concurrent upserts for the same subscription fully serialize, including the very first
+     * creation race -- not just the row-level lock {@code INSERT ... ON CONFLICT} already takes
+     * once a row exists. This is what makes {@code previousStatus} below always accurate: no other
+     * transaction can be mid-upsert of this same subscription between the plain SELECT that reads
+     * it and the INSERT that changes it.
+     *
+     * <p>A plain sibling-CTE {@code SELECT ... FOR UPDATE} was tried first and rejected: Postgres
+     * evaluates a read-only CTE's own snapshot independently of a data-modifying sibling CTE in the
+     * same statement, and combining {@code FOR UPDATE} there returned stale/empty results even
+     * outside of any concurrency (verified against a real Postgres instance). Two separate
+     * statements under an advisory lock avoids that entirely.
+     */
+    private void lockSubscriptionForUpsert(UUID workspaceId, String stripeSubscriptionId) {
+        jdbc.sql("SELECT 1 FROM (SELECT pg_advisory_xact_lock(:namespace, hashtext(:key))) AS lock_acquired")
+                .param("namespace", SUBSCRIPTION_LOCK_NAMESPACE)
+                .param("key", workspaceId + ":" + stripeSubscriptionId)
+                .query(Integer.class)
+                .single();
+    }
+
     void upsertSubscription(
             UUID workspaceId, ParsedSubscription subscription, long sourceVersion, BillingLedgerSource source) {
         OffsetDateTime now = now();
+        lockSubscriptionForUpsert(workspaceId, subscription.stripeSubscriptionId());
+
+        String previousStatus = jdbc.sql(
+                        "SELECT status FROM billing_subscriptions WHERE workspace_id = :workspaceId AND stripe_subscription_id = :stripeSubscriptionId")
+                .param("workspaceId", workspaceId)
+                .param("stripeSubscriptionId", subscription.stripeSubscriptionId())
+                .query(String.class)
+                .optional()
+                .orElse(null);
+
         Optional<SubscriptionUpsertOutcome> outcome = jdbc.sql(
                         """
-                        WITH previous AS (
-                            SELECT status FROM billing_subscriptions
-                            WHERE workspace_id = :workspaceId AND stripe_subscription_id = :stripeSubscriptionId
-                        ),
-                        upserted AS (
-                            INSERT INTO billing_subscriptions
-                                (id, workspace_id, stripe_subscription_id, stripe_customer_id, status, currency,
-                                 current_period_start, current_period_end, cancel_at_period_end, cancel_at,
-                                 canceled_at, ended_at, trial_start, trial_end, collection_method, source,
-                                 source_version, updated_at)
-                            VALUES
-                                (:id, :workspaceId, :stripeSubscriptionId, :stripeCustomerId, :status, :currency,
-                                 :currentPeriodStart, :currentPeriodEnd, :cancelAtPeriodEnd, :cancelAt,
-                                 :canceledAt, :endedAt, :trialStart, :trialEnd, :collectionMethod, :source,
-                                 :sourceVersion, :updatedAt)
-                            ON CONFLICT (workspace_id, stripe_subscription_id) DO UPDATE SET
-                                stripe_customer_id = EXCLUDED.stripe_customer_id,
-                                status = EXCLUDED.status,
-                                currency = EXCLUDED.currency,
-                                current_period_start = EXCLUDED.current_period_start,
-                                current_period_end = EXCLUDED.current_period_end,
-                                cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-                                cancel_at = EXCLUDED.cancel_at,
-                                canceled_at = EXCLUDED.canceled_at,
-                                ended_at = EXCLUDED.ended_at,
-                                trial_start = EXCLUDED.trial_start,
-                                trial_end = EXCLUDED.trial_end,
-                                collection_method = EXCLUDED.collection_method,
-                                source = EXCLUDED.source,
-                                source_version = EXCLUDED.source_version,
-                                updated_at = EXCLUDED.updated_at
-                            WHERE billing_subscriptions.source_version <= EXCLUDED.source_version
-                            RETURNING id, status
-                        )
-                        SELECT upserted.id AS id, upserted.status AS new_status, previous.status AS previous_status
-                        FROM upserted LEFT JOIN previous ON true
+                        INSERT INTO billing_subscriptions
+                            (id, workspace_id, stripe_subscription_id, stripe_customer_id, status, currency,
+                             current_period_start, current_period_end, cancel_at_period_end, cancel_at,
+                             canceled_at, ended_at, trial_start, trial_end, collection_method, source,
+                             source_version, updated_at)
+                        VALUES
+                            (:id, :workspaceId, :stripeSubscriptionId, :stripeCustomerId, :status, :currency,
+                             :currentPeriodStart, :currentPeriodEnd, :cancelAtPeriodEnd, :cancelAt,
+                             :canceledAt, :endedAt, :trialStart, :trialEnd, :collectionMethod, :source,
+                             :sourceVersion, :updatedAt)
+                        ON CONFLICT (workspace_id, stripe_subscription_id) DO UPDATE SET
+                            stripe_customer_id = EXCLUDED.stripe_customer_id,
+                            status = EXCLUDED.status,
+                            currency = EXCLUDED.currency,
+                            current_period_start = EXCLUDED.current_period_start,
+                            current_period_end = EXCLUDED.current_period_end,
+                            cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                            cancel_at = EXCLUDED.cancel_at,
+                            canceled_at = EXCLUDED.canceled_at,
+                            ended_at = EXCLUDED.ended_at,
+                            trial_start = EXCLUDED.trial_start,
+                            trial_end = EXCLUDED.trial_end,
+                            collection_method = EXCLUDED.collection_method,
+                            source = EXCLUDED.source,
+                            source_version = EXCLUDED.source_version,
+                            updated_at = EXCLUDED.updated_at
+                        WHERE billing_subscriptions.source_version <= EXCLUDED.source_version
+                        RETURNING id, status
                         """)
                 .param("id", UUID.randomUUID())
                 .param("workspaceId", workspaceId)
@@ -173,17 +200,17 @@ class BillingLedgerUpsertService {
                 .param("source", source.name())
                 .param("sourceVersion", sourceVersion)
                 .param("updatedAt", now)
-                .query((rs, rowNum) ->
-                        new SubscriptionUpsertOutcome(UUID.fromString(rs.getString("id")), rs.getString("new_status"), rs.getString("previous_status")))
+                .query((rs, rowNum) -> new SubscriptionUpsertOutcome(UUID.fromString(rs.getString("id")), rs.getString("status")))
                 .optional();
 
         if (outcome.isEmpty()) {
-            // Stale relative to what's already stored: skip items and status-transition bookkeeping too.
+            // Stale relative to what's already stored: skip items, discounts, and status-transition
+            // bookkeeping too -- none of this event's data is any newer than what's already applied.
             return;
         }
         SubscriptionUpsertOutcome applied = outcome.get();
 
-        if (applied.previousStatus() == null || !applied.previousStatus().equals(applied.newStatus())) {
+        if (previousStatus == null || !previousStatus.equals(applied.newStatus())) {
             jdbc.sql(
                             """
                             INSERT INTO billing_subscription_status_events
@@ -198,7 +225,7 @@ class BillingLedgerUpsertService {
                     .param("workspaceId", workspaceId)
                     .param("subscriptionId", applied.id())
                     .param("stripeSubscriptionId", subscription.stripeSubscriptionId())
-                    .param("previousStatus", applied.previousStatus())
+                    .param("previousStatus", previousStatus)
                     .param("newStatus", applied.newStatus())
                     .param("source", source.name())
                     .param("sourceVersion", sourceVersion)
@@ -206,7 +233,14 @@ class BillingLedgerUpsertService {
         }
 
         replaceSubscriptionItems(workspaceId, applied.id(), subscription.items(), sourceVersion);
-        subscription.discount().ifPresent(discount -> upsertDiscount(workspaceId, discount, sourceVersion, source));
+        for (ParsedDiscount discount : subscription.discounts()) {
+            upsertDiscount(workspaceId, discount, sourceVersion, source);
+        }
+        for (ParsedSubscriptionItem item : subscription.items()) {
+            for (ParsedDiscount discount : item.discounts()) {
+                upsertDiscount(workspaceId, discount, sourceVersion, source);
+            }
+        }
     }
 
     private void replaceSubscriptionItems(
@@ -379,15 +413,16 @@ class BillingLedgerUpsertService {
                         """
                         INSERT INTO billing_discounts
                             (id, workspace_id, stripe_discount_id, stripe_customer_id, stripe_subscription_id,
-                             stripe_coupon_id, percent_off, amount_off, currency, start_at, end_at, deleted,
-                             source, source_version, updated_at)
+                             stripe_subscription_item_id, stripe_coupon_id, percent_off, amount_off, currency,
+                             start_at, end_at, deleted, source, source_version, updated_at)
                         VALUES
                             (:id, :workspaceId, :stripeDiscountId, :stripeCustomerId, :stripeSubscriptionId,
-                             :stripeCouponId, :percentOff, :amountOff, :currency, :startAt, :endAt, :deleted,
-                             :source, :sourceVersion, :updatedAt)
+                             :stripeSubscriptionItemId, :stripeCouponId, :percentOff, :amountOff, :currency,
+                             :startAt, :endAt, :deleted, :source, :sourceVersion, :updatedAt)
                         ON CONFLICT (workspace_id, stripe_discount_id) DO UPDATE SET
                             stripe_customer_id = EXCLUDED.stripe_customer_id,
                             stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                            stripe_subscription_item_id = EXCLUDED.stripe_subscription_item_id,
                             stripe_coupon_id = EXCLUDED.stripe_coupon_id,
                             percent_off = EXCLUDED.percent_off,
                             amount_off = EXCLUDED.amount_off,
@@ -405,6 +440,7 @@ class BillingLedgerUpsertService {
                 .param("stripeDiscountId", discount.stripeDiscountId())
                 .param("stripeCustomerId", discount.stripeCustomerId())
                 .param("stripeSubscriptionId", discount.stripeSubscriptionId())
+                .param("stripeSubscriptionItemId", discount.stripeSubscriptionItemId())
                 .param("stripeCouponId", discount.stripeCouponId())
                 .param("percentOff", discount.percentOff())
                 .param("amountOff", discount.amountOff())
@@ -422,5 +458,5 @@ class BillingLedgerUpsertService {
         return OffsetDateTime.now(ZoneOffset.UTC);
     }
 
-    private record SubscriptionUpsertOutcome(UUID id, String newStatus, String previousStatus) {}
+    private record SubscriptionUpsertOutcome(UUID id, String newStatus) {}
 }

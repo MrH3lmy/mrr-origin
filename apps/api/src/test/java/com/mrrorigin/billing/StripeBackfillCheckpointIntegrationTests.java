@@ -11,9 +11,13 @@ import java.util.function.Consumer;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.utility.DockerImageName;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -25,6 +29,10 @@ import tools.jackson.databind.ObjectMapper;
  */
 @Testcontainers
 class StripeBackfillCheckpointIntegrationTests extends AbstractBillingLedgerIntegrationTest {
+
+    @Container
+    @ServiceConnection
+    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(DockerImageName.parse("postgres:17-alpine"));
 
     private static final StripeBillingListApiStub STRIPE_LIST_STUB = new StripeBillingListApiStub();
 
@@ -115,20 +123,75 @@ class StripeBackfillCheckpointIntegrationTests extends AbstractBillingLedgerInte
         Consumer<JsonNode> normalizer = item -> ledger.upsertCustomer(
                 workspaceId, StripeBillingObjectParser.parseCustomer(item), replayVersion, BillingLedgerSource.BACKFILL);
 
-        // Directly re-applies the exact same already-committed page twice in a row (an operator
-        // retry, or a caller that redelivers a page it mistakenly believed had failed). hasMore=true
-        // keeps both calls in the same phase so the second one is a genuine reapplication, not a
-        // discarded stale-phase call.
-        pageRunner.applyPage(connectionId, StripeBackfillPhase.PRICES, parsed, true, normalizer);
-        pageRunner.applyPage(connectionId, StripeBackfillPhase.PRICES, parsed, true, normalizer);
+        // Directly re-applies the exact same already-committed page twice in a row, both using the
+        // SAME expected cursor the original fetch used (an operator retry, or a caller that
+        // redelivers a page it mistakenly believed had failed). The first call succeeds and
+        // advances the checkpoint; the second is now stale relative to the advanced checkpoint and
+        // is safely discarded rather than reapplied -- either way the ledger ends up identical.
+        StripeBackfillPageRunner.PageApplyOutcome first =
+                pageRunner.applyPage(connectionId, StripeBackfillPhase.PRICES, null, parsed, true, normalizer);
+        StripeBackfillPageRunner.PageApplyOutcome second =
+                pageRunner.applyPage(connectionId, StripeBackfillPhase.PRICES, null, parsed, true, normalizer);
 
+        assertThat(first.status()).isEqualTo(StripeBackfillPageRunner.PageApplyStatus.APPLIED);
+        assertThat(second.status()).isEqualTo(StripeBackfillPageRunner.PageApplyStatus.STALE);
         assertThat(countCustomers(workspaceId)).isEqualTo(10);
     }
 
+    @Test
+    void aStaleSlowerPageCanNeverMoveTheCheckpointBackwards() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_monotonic", StripeConnectionMode.TEST);
+
+        List<String> firstPageItems = customers(100);
+        List<JsonNode> firstPageParsed = parse(firstPageItems);
+        List<String> secondPageItems = customers(50, 100);
+        List<JsonNode> secondPageParsed = parse(secondPageItems);
+
+        Consumer<JsonNode> normalizer = item -> ledger.upsertCustomer(
+                workspaceId, StripeBillingObjectParser.parseCustomer(item), Instant.now().getEpochSecond(), BillingLedgerSource.BACKFILL);
+
+        // Request A fetches page 1 (starting_after=null) and applies it: checkpoint cursor -> last item of page 1.
+        StripeBackfillPageRunner.PageApplyOutcome pageOneOutcome =
+                pageRunner.applyPage(connectionId, StripeBackfillPhase.CUSTOMERS, null, firstPageParsed, true, normalizer);
+        assertThat(pageOneOutcome.status()).isEqualTo(StripeBackfillPageRunner.PageApplyStatus.APPLIED);
+        String cursorAfterPageOne = currentCheckpointCursor(connectionId);
+        assertThat(cursorAfterPageOne).isEqualTo("cus_0099");
+
+        // A faster concurrent request B fetches and applies page 2 (starting_after=<page 1's last
+        // id>) before A's slow retry ever arrives: checkpoint cursor -> last item of page 2.
+        StripeBackfillPageRunner.PageApplyOutcome pageTwoOutcome = pageRunner.applyPage(
+                connectionId, StripeBackfillPhase.CUSTOMERS, cursorAfterPageOne, secondPageParsed, true, normalizer);
+        assertThat(pageTwoOutcome.status()).isEqualTo(StripeBackfillPageRunner.PageApplyStatus.APPLIED);
+        assertThat(currentCheckpointCursor(connectionId)).isEqualTo("cus_0149");
+
+        // Request A's slow retry of page 1 (still expecting starting_after=null, its own original
+        // fetch position) finally arrives, after the checkpoint has already moved past it. Phase
+        // alone would match (still CUSTOMERS); only the cursor check catches this.
+        StripeBackfillPageRunner.PageApplyOutcome staleRetryOutcome =
+                pageRunner.applyPage(connectionId, StripeBackfillPhase.CUSTOMERS, null, firstPageParsed, true, normalizer);
+
+        assertThat(staleRetryOutcome.status()).isEqualTo(StripeBackfillPageRunner.PageApplyStatus.STALE);
+        assertThat(currentCheckpointCursor(connectionId)).isEqualTo("cus_0149");
+        assertThat(countCustomers(workspaceId)).isEqualTo(150);
+    }
+
+    private List<JsonNode> parse(List<String> rawItems) {
+        List<JsonNode> parsed = new ArrayList<>();
+        for (String raw : rawItems) {
+            parsed.add(objectMapper.readTree(raw));
+        }
+        return parsed;
+    }
+
     private static List<String> customers(int count) {
+        return customers(count, 0);
+    }
+
+    private static List<String> customers(int count, int startIndex) {
         List<String> items = new ArrayList<>();
         long created = Instant.now().getEpochSecond();
-        for (int i = 0; i < count; i++) {
+        for (int i = startIndex; i < startIndex + count; i++) {
             items.add(BillingFixtures.customer("cus_%04d".formatted(i), "usd", created, false, null));
         }
         return items;

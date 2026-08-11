@@ -45,7 +45,14 @@ final class StripeBillingListApiStub implements AutoCloseable {
         } catch (IOException e) {
             throw new IllegalStateException("Could not start the Stripe billing list API stub", e);
         }
-        for (String path : List.of("/v1/customers", "/v1/prices", "/v1/subscriptions", "/v1/invoices", "/v1/charges", "/v1/refunds")) {
+        for (String path : List.of(
+                "/v1/customers",
+                "/v1/prices",
+                "/v1/subscriptions",
+                "/v1/subscription_items",
+                "/v1/invoices",
+                "/v1/charges",
+                "/v1/refunds")) {
             server.createContext(path, this::handle);
         }
         server.setExecutor(null);

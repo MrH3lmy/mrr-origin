@@ -33,6 +33,11 @@ final class StripeBillingObjects {
             Integer recurringIntervalCount,
             boolean active) {}
 
+    /**
+     * Per https://docs.stripe.com/api/subscriptions/object, a subscription carries a plural,
+     * expandable {@code discounts} array (compound discounts), not the singular {@code discount}
+     * field Customer objects use -- {@code discounts} here can hold zero or more entries.
+     */
     record ParsedSubscription(
             String stripeSubscriptionId,
             String stripeCustomerId,
@@ -48,9 +53,11 @@ final class StripeBillingObjects {
             OffsetDateTime trialEnd,
             String collectionMethod,
             List<ParsedSubscriptionItem> items,
-            Optional<ParsedDiscount> discount) {}
+            List<ParsedDiscount> discounts) {}
 
-    record ParsedSubscriptionItem(String stripeSubscriptionItemId, String stripePriceId, int quantity) {}
+    /** {@code discounts} mirrors the subscription-level field: an item can itself carry compound discounts. */
+    record ParsedSubscriptionItem(
+            String stripeSubscriptionItemId, String stripePriceId, int quantity, List<ParsedDiscount> discounts) {}
 
     record ParsedInvoice(
             String stripeInvoiceId,
@@ -90,6 +97,7 @@ final class StripeBillingObjects {
             String stripeDiscountId,
             String stripeCustomerId,
             String stripeSubscriptionId,
+            String stripeSubscriptionItemId,
             String stripeCouponId,
             BigDecimal percentOff,
             Long amountOff,

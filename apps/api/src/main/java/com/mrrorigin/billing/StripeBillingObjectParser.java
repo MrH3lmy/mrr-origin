@@ -40,6 +40,10 @@ final class StripeBillingObjectParser {
                 parseNestedDiscount(customer.get("discount")));
     }
 
+    static String subscriptionId(JsonNode subscription) {
+        return requiredText(subscription, "id");
+    }
+
     static ParsedPrice parsePrice(JsonNode price) {
         JsonNode recurring = price.get("recurring");
         boolean isRecurring = recurring != null && !recurring.isNull();
@@ -55,14 +59,30 @@ final class StripeBillingObjectParser {
                 requiredBoolean(price, "active"));
     }
 
+    /**
+     * Convenience form for callers that already know the subscription's embedded {@code items}
+     * page is complete (i.e. {@link #embeddedItemsHaveMore} is false, or the caller has already
+     * decided not to complete it). Real call sites should prefer the two-argument overload after
+     * resolving any remaining pages via {@code StripeSubscriptionItemsResolver}.
+     */
     static ParsedSubscription parseSubscription(JsonNode subscription) {
+        return parseSubscription(subscription, List.of());
+    }
+
+    /**
+     * @param supplementalItemNodes raw item objects fetched separately (via the dedicated {@code
+     *     GET /v1/subscription_items} endpoint) to complete a paginated embedded {@code items} page.
+     *     Must be the FULL remainder, never a partial page -- see {@code
+     *     StripeSubscriptionItemsResolver} -- since this method has no way to tell a complete list
+     *     from a truncated one once merged.
+     */
+    static ParsedSubscription parseSubscription(JsonNode subscription, List<JsonNode> supplementalItemNodes) {
         List<ParsedSubscriptionItem> items = new ArrayList<>();
-        JsonNode itemsList = subscription.get("items");
-        JsonNode itemData = itemsList == null ? null : itemsList.get("data");
-        if (itemData != null && itemData.isArray()) {
-            for (JsonNode item : itemData) {
-                items.add(parseSubscriptionItem(item));
-            }
+        for (JsonNode item : embeddedItemNodes(subscription)) {
+            items.add(parseSubscriptionItem(item));
+        }
+        for (JsonNode item : supplementalItemNodes) {
+            items.add(parseSubscriptionItem(item));
         }
         return new ParsedSubscription(
                 requiredText(subscription, "id"),
@@ -79,15 +99,46 @@ final class StripeBillingObjectParser {
                 optionalEpoch(subscription, "trial_end"),
                 optionalText(subscription, "collection_method"),
                 List.copyOf(items),
-                parseNestedDiscount(subscription.get("discount")));
+                parseDiscountsArray(subscription.get("discounts"), null));
     }
 
-    private static ParsedSubscriptionItem parseSubscriptionItem(JsonNode item) {
+    /** The subscription's embedded {@code items.data} page, as delivered (possibly partial). */
+    static List<JsonNode> embeddedItemNodes(JsonNode subscription) {
+        JsonNode itemsList = subscription == null ? null : subscription.get("items");
+        JsonNode itemData = itemsList == null ? null : itemsList.get("data");
+        List<JsonNode> result = new ArrayList<>();
+        if (itemData != null && itemData.isArray()) {
+            for (JsonNode item : itemData) {
+                result.add(item);
+            }
+        }
+        return result;
+    }
+
+    /** Whether the subscription's embedded {@code items} page is a partial page (more items exist). */
+    static boolean embeddedItemsHaveMore(JsonNode subscription) {
+        JsonNode itemsList = subscription == null ? null : subscription.get("items");
+        JsonNode hasMore = itemsList == null ? null : itemsList.get("has_more");
+        return hasMore != null && hasMore.isBoolean() && hasMore.booleanValue();
+    }
+
+    /** The last embedded item's ID, used as {@code starting_after} to fetch the remaining pages. */
+    static String lastEmbeddedItemId(JsonNode subscription) {
+        List<JsonNode> items = embeddedItemNodes(subscription);
+        if (items.isEmpty()) {
+            return null;
+        }
+        JsonNode id = items.get(items.size() - 1).get("id");
+        return id == null ? null : id.textValue();
+    }
+
+    static ParsedSubscriptionItem parseSubscriptionItem(JsonNode item) {
         JsonNode price = item.get("price");
         String priceId =
                 price != null && price.isTextual() ? price.textValue() : requiredText(price, "id");
+        String itemId = requiredText(item, "id");
         return new ParsedSubscriptionItem(
-                requiredText(item, "id"), priceId, (int) optionalLong(item, "quantity", 1));
+                itemId, priceId, (int) optionalLong(item, "quantity", 1), parseDiscountsArray(item.get("discounts"), itemId));
     }
 
     static ParsedInvoice parseInvoice(JsonNode invoice) {
@@ -136,26 +187,57 @@ final class StripeBillingObjectParser {
 
     /** Top-level discount object, as delivered by {@code customer.discount.*} webhook events. */
     static ParsedDiscount parseTopLevelDiscount(JsonNode discount, boolean deleted) {
-        return parseDiscount(discount, deleted);
+        return parseDiscount(discount, deleted, null);
     }
 
+    /** Customer's singular {@code discount} field -- unlike subscriptions, a customer has at most one. */
     private static Optional<ParsedDiscount> parseNestedDiscount(JsonNode discount) {
         if (discount == null || discount.isNull()) {
             return Optional.empty();
         }
-        return Optional.of(parseDiscount(discount, false));
+        return Optional.of(parseDiscount(discount, false, null));
     }
 
-    private static ParsedDiscount parseDiscount(JsonNode discount, boolean deleted) {
+    /**
+     * A {@code discounts} array field (subscriptions, and subscription items). Per
+     * https://docs.stripe.com/api/subscriptions/object this is expandable: without expansion, an
+     * entry is just a coupon/discount ID string, which cannot be safely normalized without its
+     * full data. Such entries are skipped, not guessed -- callers that control the request should
+     * request expansion; a discount that never arrives expanded simply stays unnormalized rather
+     * than corrupting the rest of the subscription/event.
+     *
+     * @param ownerSubscriptionItemId non-null when parsing an item's own {@code discounts} field,
+     *     attributing every entry to that subscription item regardless of what (if anything) the
+     *     entry itself says about its owner.
+     */
+    private static List<ParsedDiscount> parseDiscountsArray(JsonNode discounts, String ownerSubscriptionItemId) {
+        if (discounts == null || discounts.isNull()) {
+            return List.of();
+        }
+        if (!discounts.isArray()) {
+            throw new StripeBillingNormalizationException("Stripe object field has the wrong type: discounts");
+        }
+        List<ParsedDiscount> result = new ArrayList<>();
+        for (JsonNode discount : discounts) {
+            if (discount == null || discount.isNull() || !discount.isObject()) {
+                continue;
+            }
+            result.add(parseDiscount(discount, false, ownerSubscriptionItemId));
+        }
+        return List.copyOf(result);
+    }
+
+    private static ParsedDiscount parseDiscount(JsonNode discount, boolean deleted, String ownerSubscriptionItemId) {
         JsonNode coupon = discount.get("coupon");
         if (coupon == null || coupon.isNull()) {
             throw new StripeBillingNormalizationException("Stripe discount is missing required field: coupon");
         }
         String customerId = optionalText(discount, "customer");
         String subscriptionId = optionalText(discount, "subscription");
-        if (customerId == null && subscriptionId == null) {
+        String subscriptionItemId = ownerSubscriptionItemId != null ? ownerSubscriptionItemId : optionalText(discount, "subscription_item");
+        if (customerId == null && subscriptionId == null && subscriptionItemId == null) {
             throw new StripeBillingNormalizationException(
-                    "Stripe discount has neither a customer nor a subscription owner");
+                    "Stripe discount has no customer, subscription, or subscription-item owner");
         }
         Long amountOff = optionalLong(coupon, "amount_off");
         BigDecimal percentOff = optionalDecimal(coupon, "percent_off");
@@ -163,6 +245,7 @@ final class StripeBillingObjectParser {
                 requiredText(discount, "id"),
                 customerId,
                 subscriptionId,
+                subscriptionItemId,
                 requiredText(coupon, "id"),
                 percentOff,
                 amountOff,

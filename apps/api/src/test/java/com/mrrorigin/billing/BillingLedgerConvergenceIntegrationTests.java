@@ -8,9 +8,13 @@ import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.utility.DockerImageName;
 
 /**
  * The #12 acceptance-criteria fixture: a deterministic customer/subscription/invoice/payment/
@@ -25,6 +29,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  */
 @Testcontainers
 class BillingLedgerConvergenceIntegrationTests extends AbstractBillingLedgerIntegrationTest {
+
+    @Container
+    @ServiceConnection
+    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(DockerImageName.parse("postgres:17-alpine"));
 
     private static final StripeBillingListApiStub STRIPE_LIST_STUB = new StripeBillingListApiStub();
 

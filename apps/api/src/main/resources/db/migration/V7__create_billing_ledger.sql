@@ -9,12 +9,17 @@
 -- satisfy a constraint. Within a single object's own aggregate (a subscription and its items,
 -- always written together in one upsert), a real foreign key is used.
 --
--- Convergence: every row carries `source_version`, the Unix-epoch-second recency of the state it
--- represents (a Stripe webhook event's `created` field, or the wall-clock instant immediately
--- before the backfill page request that produced it). An upsert only ever applies when
+-- Convergence: every row carries `source_version`, a composite BIGINT ordering key: the Stripe
+-- event's `created` epoch-second (webhook) or the wall-clock second the backfill page request was
+-- issued (backfill), each shifted left by a factor of 2,000,000 and combined with a sub-second tie
+-- -breaker in the low-order digits (a webhook's own receipt-time microseconds, always < 1,000,000;
+-- or a fixed backfill sentinel of 1,000,000, so a backfill snapshot always wins a same-second tie
+-- against a webhook event -- it reflects Stripe's true live state as of a strictly later instant).
+-- See BillingSourceVersion. An upsert only ever applies when
 -- `source_version >= <the row's current source_version>`, so replays, retries, restarts, and
 -- interleaved backfill/webhook delivery for the same object always converge on the most recent
--- known state regardless of arrival order, and a same-version replay is a harmless no-op rewrite.
+-- known state regardless of arrival or processing order, and a same-version replay is a harmless
+-- no-op rewrite.
 
 CREATE TABLE billing_customers (
     id UUID PRIMARY KEY,
@@ -79,6 +84,10 @@ CREATE TABLE billing_subscriptions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_subscriptions_workspace_stripe_id UNIQUE (workspace_id, stripe_subscription_id),
+    -- Required so billing_subscription_items/billing_subscription_status_events can enforce a
+    -- composite (workspace_id, subscription_id) foreign key below -- structurally impossible for a
+    -- row to reference a subscription belonging to a different workspace, not merely convention.
+    CONSTRAINT uq_billing_subscriptions_workspace_id UNIQUE (workspace_id, id),
     CONSTRAINT chk_billing_subscriptions_source CHECK (source IN ('BACKFILL', 'WEBHOOK')),
     CONSTRAINT chk_billing_subscriptions_status CHECK (status IN
         ('incomplete', 'incomplete_expired', 'trialing', 'active', 'past_due', 'canceled', 'unpaid', 'paused'))
@@ -89,8 +98,8 @@ CREATE INDEX idx_billing_subscriptions_customer ON billing_subscriptions (worksp
 
 CREATE TABLE billing_subscription_items (
     id UUID PRIMARY KEY,
-    workspace_id UUID NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
-    subscription_id UUID NOT NULL REFERENCES billing_subscriptions (id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL,
+    subscription_id UUID NOT NULL,
     stripe_subscription_item_id VARCHAR(255) NOT NULL,
     stripe_price_id VARCHAR(255) NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1,
@@ -98,7 +107,11 @@ CREATE TABLE billing_subscription_items (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_subscription_items_workspace_stripe_id UNIQUE (workspace_id, stripe_subscription_item_id),
-    CONSTRAINT chk_billing_subscription_items_quantity CHECK (quantity >= 0)
+    CONSTRAINT chk_billing_subscription_items_quantity CHECK (quantity >= 0),
+    -- Composite FK: a row's workspace_id must match its own subscription's workspace_id, so a
+    -- workspace-A item can never structurally reference a workspace-B subscription.
+    CONSTRAINT fk_billing_subscription_items_subscription
+        FOREIGN KEY (workspace_id, subscription_id) REFERENCES billing_subscriptions (workspace_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_billing_subscription_items_subscription ON billing_subscription_items (subscription_id);
@@ -108,8 +121,8 @@ CREATE INDEX idx_billing_subscription_items_subscription ON billing_subscription
 -- can never insert a second transition row for the same underlying change.
 CREATE TABLE billing_subscription_status_events (
     id UUID PRIMARY KEY,
-    workspace_id UUID NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
-    subscription_id UUID NOT NULL REFERENCES billing_subscriptions (id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL,
+    subscription_id UUID NOT NULL,
     stripe_subscription_id VARCHAR(255) NOT NULL,
     previous_status VARCHAR(24),
     new_status VARCHAR(24) NOT NULL,
@@ -118,7 +131,9 @@ CREATE TABLE billing_subscription_status_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_subscription_status_events_version
         UNIQUE (workspace_id, stripe_subscription_id, source_version),
-    CONSTRAINT chk_billing_subscription_status_events_source CHECK (source IN ('BACKFILL', 'WEBHOOK'))
+    CONSTRAINT chk_billing_subscription_status_events_source CHECK (source IN ('BACKFILL', 'WEBHOOK')),
+    CONSTRAINT fk_billing_subscription_status_events_subscription
+        FOREIGN KEY (workspace_id, subscription_id) REFERENCES billing_subscriptions (workspace_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_billing_subscription_status_events_subscription
@@ -204,12 +219,16 @@ CREATE TABLE billing_refunds (
 CREATE INDEX idx_billing_refunds_workspace ON billing_refunds (workspace_id);
 CREATE INDEX idx_billing_refunds_charge ON billing_refunds (workspace_id, stripe_charge_id);
 
+-- Per https://docs.stripe.com/api/subscriptions/object, subscriptions (and subscription items)
+-- support *multiple* compound discounts (the `discounts` array), unlike the single `discount`
+-- field on a Customer -- this table already supports many rows per owner, one per stripe_discount_id.
 CREATE TABLE billing_discounts (
     id UUID PRIMARY KEY,
     workspace_id UUID NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     stripe_discount_id VARCHAR(255) NOT NULL,
     stripe_customer_id VARCHAR(255),
     stripe_subscription_id VARCHAR(255),
+    stripe_subscription_item_id VARCHAR(255),
     stripe_coupon_id VARCHAR(255) NOT NULL,
     percent_off NUMERIC(6, 3),
     amount_off BIGINT,
@@ -223,9 +242,11 @@ CREATE TABLE billing_discounts (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_discounts_workspace_stripe_id UNIQUE (workspace_id, stripe_discount_id),
     CONSTRAINT chk_billing_discounts_source CHECK (source IN ('BACKFILL', 'WEBHOOK')),
-    CONSTRAINT chk_billing_discounts_owner CHECK (stripe_customer_id IS NOT NULL OR stripe_subscription_id IS NOT NULL)
+    CONSTRAINT chk_billing_discounts_owner CHECK (
+        stripe_customer_id IS NOT NULL OR stripe_subscription_id IS NOT NULL OR stripe_subscription_item_id IS NOT NULL)
 );
 
 CREATE INDEX idx_billing_discounts_workspace ON billing_discounts (workspace_id);
 CREATE INDEX idx_billing_discounts_customer ON billing_discounts (workspace_id, stripe_customer_id);
 CREATE INDEX idx_billing_discounts_subscription ON billing_discounts (workspace_id, stripe_subscription_id);
+CREATE INDEX idx_billing_discounts_subscription_item ON billing_discounts (workspace_id, stripe_subscription_item_id);

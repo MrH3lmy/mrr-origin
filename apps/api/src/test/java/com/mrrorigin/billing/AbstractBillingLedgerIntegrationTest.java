@@ -14,28 +14,27 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
-import org.testcontainers.utility.DockerImageName;
 
 /**
  * Shared Postgres-backed fixture plumbing for #12's normalization tests: workspace/connection/
  * webhook-event setup and column-level ledger read helpers used to assert convergence between the
  * backfill and webhook pipelines.
+ *
+ * <p>Deliberately does NOT declare the {@code @Container} Postgres field itself: a {@code static}
+ * container field declared here would be a single object shared by every subclass's own {@code
+ * @Testcontainers} lifecycle (JUnit resolves the field via inheritance, but each subclass's
+ * before/after-all hooks manage the SAME instance), which caused exactly the container-restart/
+ * stale-port races this comment now warns against -- confirmed by this suite reliably passing in
+ * isolation but intermittently failing with "connection refused" only when run alongside its
+ * siblings. Each concrete test class below instead declares its own independent container, exactly
+ * like every other integration test in this module.
  */
-@Testcontainers
 @SpringBootTest
 abstract class AbstractBillingLedgerIntegrationTest {
-
-    @Container
-    @ServiceConnection
-    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(DockerImageName.parse("postgres:17-alpine"));
 
     @DynamicPropertySource
     static void stripeProperties(DynamicPropertyRegistry registry) {
@@ -91,19 +90,30 @@ abstract class AbstractBillingLedgerIntegrationTest {
     }
 
     UUID insertActiveConnection(UUID workspaceId, String stripeAccountId, StripeConnectionMode mode) {
+        return insertConnection(workspaceId, stripeAccountId, mode, StripeConnectionStatus.ACTIVE, StripeVerificationStatus.VERIFIED);
+    }
+
+    UUID insertConnection(
+            UUID workspaceId,
+            String stripeAccountId,
+            StripeConnectionMode mode,
+            StripeConnectionStatus status,
+            StripeVerificationStatus verificationStatus) {
         UUID id = UUID.randomUUID();
         jdbc.sql(
                         """
                         INSERT INTO stripe_connections
                             (id, workspace_id, stripe_account_id, mode, granted_scope, status,
                              verification_status, connected_at)
-                        VALUES (:id, :workspaceId, :stripeAccountId, :mode, 'read_only', 'ACTIVE',
-                                'VERIFIED', CURRENT_TIMESTAMP)
+                        VALUES (:id, :workspaceId, :stripeAccountId, :mode, 'read_only', :status,
+                                :verificationStatus, CURRENT_TIMESTAMP)
                         """)
                 .param("id", id)
                 .param("workspaceId", workspaceId)
                 .param("stripeAccountId", stripeAccountId)
                 .param("mode", mode.name())
+                .param("status", status.name())
+                .param("verificationStatus", verificationStatus.name())
                 .update();
         return id;
     }

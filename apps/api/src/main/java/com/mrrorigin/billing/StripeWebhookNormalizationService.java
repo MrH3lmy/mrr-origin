@@ -5,6 +5,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
@@ -45,13 +46,19 @@ class StripeWebhookNormalizationService {
 
     private final JdbcClient jdbc;
     private final BillingLedgerUpsertService ledger;
+    private final StripeSubscriptionItemsResolver subscriptionItemsResolver;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate perEventTransaction;
 
     StripeWebhookNormalizationService(
-            JdbcClient jdbc, BillingLedgerUpsertService ledger, ObjectMapper objectMapper, PlatformTransactionManager transactionManager) {
+            JdbcClient jdbc,
+            BillingLedgerUpsertService ledger,
+            StripeSubscriptionItemsResolver subscriptionItemsResolver,
+            ObjectMapper objectMapper,
+            PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.ledger = ledger;
+        this.subscriptionItemsResolver = subscriptionItemsResolver;
         this.objectMapper = objectMapper;
         // REQUIRES_NEW: a genuinely separate, independently committed/rolled-back transaction per
         // event, not participating in the outer batch transaction. BillingLedgerUpsertService's own
@@ -69,12 +76,16 @@ class StripeWebhookNormalizationService {
     NormalizationRunOutcome processBatch(int batchSize) {
         List<PendingEvent> events = jdbc.sql(
                         """
-                        SELECT id, workspace_id, event_type, payload, stripe_created_at
-                        FROM stripe_webhook_events
-                        WHERE processing_state = 'PENDING'
-                        ORDER BY received_at ASC
+                        SELECT swe.id AS id, swe.workspace_id AS workspace_id, swe.event_type AS event_type,
+                               swe.payload AS payload, swe.stripe_created_at AS stripe_created_at,
+                               swe.received_at AS received_at, sc.mode AS connection_mode,
+                               sc.stripe_account_id AS stripe_account_id
+                        FROM stripe_webhook_events swe
+                        JOIN stripe_connections sc ON sc.id = swe.connection_id
+                        WHERE swe.processing_state = 'PENDING'
+                        ORDER BY swe.received_at ASC
                         LIMIT :batchSize
-                        FOR UPDATE SKIP LOCKED
+                        FOR UPDATE OF swe SKIP LOCKED
                         """)
                 .param("batchSize", batchSize)
                 .query((rs, rowNum) -> new PendingEvent(
@@ -82,7 +93,10 @@ class StripeWebhookNormalizationService {
                         UUID.fromString(rs.getString("workspace_id")),
                         rs.getString("event_type"),
                         rs.getString("payload"),
-                        rs.getObject("stripe_created_at", OffsetDateTime.class)))
+                        rs.getObject("stripe_created_at", OffsetDateTime.class),
+                        rs.getObject("received_at", OffsetDateTime.class),
+                        StripeConnectionMode.valueOf(rs.getString("connection_mode")),
+                        rs.getString("stripe_account_id")))
                 .list();
 
         int processed = 0;
@@ -90,7 +104,11 @@ class StripeWebhookNormalizationService {
         int failed = 0;
         for (PendingEvent event : events) {
             try {
-                boolean handled = Boolean.TRUE.equals(perEventTransaction.execute(status -> normalize(event)));
+                // Parsing and any Stripe API calls needed to complete the event (paginated
+                // subscription items) happen here, outside of any database transaction -- only the
+                // resulting pure-DB action runs inside perEventTransaction below.
+                BooleanSupplier action = prepareNormalization(event);
+                boolean handled = Boolean.TRUE.equals(perEventTransaction.execute(status -> action.getAsBoolean()));
                 markProcessed(event.id());
                 if (handled) {
                     processed++;
@@ -105,7 +123,7 @@ class StripeWebhookNormalizationService {
         return new NormalizationRunOutcome(events.size(), processed, skipped, failed);
     }
 
-    private boolean normalize(PendingEvent event) {
+    private BooleanSupplier prepareNormalization(PendingEvent event) {
         JsonNode root = objectMapper.readTree(event.payload());
         JsonNode data = root == null ? null : root.get("data");
         JsonNode dataObject = data == null ? null : data.get("object");
@@ -113,57 +131,69 @@ class StripeWebhookNormalizationService {
             throw new StripeBillingNormalizationException("Stripe webhook event payload has no data.object");
         }
 
-        long sourceVersion = event.stripeCreatedAt().toEpochSecond();
+        long sourceVersion = BillingSourceVersion.forWebhookEvent(event.stripeCreatedAt(), event.receivedAt());
         UUID workspaceId = event.workspaceId();
         String type = event.eventType();
 
         if (CUSTOMER_EVENTS.contains(type)) {
-            ledger.upsertCustomer(
-                    workspaceId, StripeBillingObjectParser.parseCustomer(dataObject), sourceVersion, BillingLedgerSource.WEBHOOK);
-            return true;
+            var parsed = StripeBillingObjectParser.parseCustomer(dataObject);
+            return () -> {
+                ledger.upsertCustomer(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                return true;
+            };
         }
         if (PRICE_EVENTS.contains(type)) {
-            ledger.upsertPrice(
-                    workspaceId, StripeBillingObjectParser.parsePrice(dataObject), sourceVersion, BillingLedgerSource.WEBHOOK);
-            return true;
+            var parsed = StripeBillingObjectParser.parsePrice(dataObject);
+            return () -> {
+                ledger.upsertPrice(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                return true;
+            };
         }
         if (SUBSCRIPTION_EVENTS.contains(type)) {
-            ledger.upsertSubscription(
-                    workspaceId, StripeBillingObjectParser.parseSubscription(dataObject), sourceVersion, BillingLedgerSource.WEBHOOK);
-            return true;
+            List<JsonNode> supplementalItems =
+                    subscriptionItemsResolver.resolveSupplementalItems(event.connectionMode(), event.stripeAccountId(), dataObject);
+            var parsed = StripeBillingObjectParser.parseSubscription(dataObject, supplementalItems);
+            return () -> {
+                ledger.upsertSubscription(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                return true;
+            };
         }
         if (INVOICE_EVENTS.contains(type)) {
-            ledger.upsertInvoice(
-                    workspaceId, StripeBillingObjectParser.parseInvoice(dataObject), sourceVersion, BillingLedgerSource.WEBHOOK);
-            return true;
+            var parsed = StripeBillingObjectParser.parseInvoice(dataObject);
+            return () -> {
+                ledger.upsertInvoice(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                return true;
+            };
         }
         if (CHARGE_EVENTS.contains(type)) {
-            ledger.upsertPayment(
-                    workspaceId, StripeBillingObjectParser.parseCharge(dataObject), sourceVersion, BillingLedgerSource.WEBHOOK);
-            return true;
+            var parsed = StripeBillingObjectParser.parseCharge(dataObject);
+            return () -> {
+                ledger.upsertPayment(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                return true;
+            };
         }
         if (REFUND_EVENTS.contains(type)) {
-            ledger.upsertRefund(
-                    workspaceId, StripeBillingObjectParser.parseRefund(dataObject), sourceVersion, BillingLedgerSource.WEBHOOK);
-            return true;
+            var parsed = StripeBillingObjectParser.parseRefund(dataObject);
+            return () -> {
+                ledger.upsertRefund(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                return true;
+            };
         }
         if (DISCOUNT_UPSERT_EVENTS.contains(type)) {
-            ledger.upsertDiscount(
-                    workspaceId,
-                    StripeBillingObjectParser.parseTopLevelDiscount(dataObject, false),
-                    sourceVersion,
-                    BillingLedgerSource.WEBHOOK);
-            return true;
+            var parsed = StripeBillingObjectParser.parseTopLevelDiscount(dataObject, false);
+            return () -> {
+                ledger.upsertDiscount(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                return true;
+            };
         }
         if (DISCOUNT_DELETE_EVENT.equals(type)) {
-            ledger.upsertDiscount(
-                    workspaceId,
-                    StripeBillingObjectParser.parseTopLevelDiscount(dataObject, true),
-                    sourceVersion,
-                    BillingLedgerSource.WEBHOOK);
-            return true;
+            var parsed = StripeBillingObjectParser.parseTopLevelDiscount(dataObject, true);
+            return () -> {
+                ledger.upsertDiscount(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                return true;
+            };
         }
-        return false;
+        return () -> false;
     }
 
     private void markProcessed(UUID eventId) {
@@ -196,7 +226,14 @@ class StripeWebhookNormalizationService {
     }
 
     private record PendingEvent(
-            UUID id, UUID workspaceId, String eventType, String payload, OffsetDateTime stripeCreatedAt) {}
+            UUID id,
+            UUID workspaceId,
+            String eventType,
+            String payload,
+            OffsetDateTime stripeCreatedAt,
+            OffsetDateTime receivedAt,
+            StripeConnectionMode connectionMode,
+            String stripeAccountId) {}
 
     record NormalizationRunOutcome(int fetched, int processed, int skipped, int failed) {}
 }
