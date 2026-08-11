@@ -139,6 +139,29 @@ describe("browser session capture", () => {
     expect(tracker.drain()).toEqual([]);
   });
 
+  it("queues deterministic identify events without requiring an email", () => {
+    const tracker = harness().make();
+
+    const identify = tracker.identify(" application-user-42 ");
+
+    expect(identify).toMatchObject({
+      eventType: "identify",
+      visitorId: tracker.visitorId,
+      sessionId: tracker.sessionId,
+      payload: { externalUserId: "application-user-42" },
+    });
+    expect(tracker.drain()).toEqual([identify]);
+  });
+
+  it("rejects blank and oversized external user IDs", () => {
+    const tracker = harness().make();
+    expect(() => tracker.identify("   ")).toThrow("between 1 and 160");
+    expect(() => tracker.identify("x".repeat(161))).toThrow(
+      "between 1 and 160",
+    );
+    expect(tracker.drain()).toEqual([]);
+  });
+
   it("does not derive identity from browser attributes", () => {
     const one = createTracker({
       publicKey: "key",

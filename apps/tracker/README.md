@@ -16,10 +16,16 @@ const tracker = createTracker({
 
 tracker.page();
 tracker.track("trial_started", { plan: "starter" });
+tracker.identify("application-user-42");
 
 // A transport can periodically batch and send these idempotent envelopes.
 const events = tracker.drain();
 ```
+
+`identify` accepts the SaaS application's stable user ID; it does not require or
+derive an email address. Repeating the call is safe: the API project-scopes the
+identity and links every explicitly identified browser visitor deterministically.
+Use an opaque application identifier rather than personal data.
 
 The first event in every session carries a touchpoint. The persisted
 `firstTouch` is never replaced when a later session starts. URLs are limited to

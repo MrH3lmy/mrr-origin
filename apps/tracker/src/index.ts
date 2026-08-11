@@ -29,7 +29,7 @@ export interface Touchpoint extends Acquisition {
 
 export interface TrackerEvent {
   externalEventId: string;
-  eventType: "page_view" | "custom";
+  eventType: "page_view" | "custom" | "identify";
   occurredAt: string;
   visitorId: string;
   sessionId: string;
@@ -38,6 +38,7 @@ export interface TrackerEvent {
     pageUrl: string;
     properties?: Readonly<Record<string, string | number | boolean | null>>;
     touchpoint?: Touchpoint;
+    externalUserId?: string;
   }>;
 }
 
@@ -47,6 +48,7 @@ export interface Tracker {
     name: string,
     properties?: Readonly<Record<string, string | number | boolean | null>>,
   ): TrackerEvent;
+  identify(externalUserId: string): TrackerEvent;
   drain(): TrackerEvent[];
   readonly visitorId: string;
   readonly sessionId: string;
@@ -156,6 +158,7 @@ export function createTracker(config: TrackerConfig): Tracker {
     name?: string,
     properties?: Readonly<Record<string, string | number | boolean | null>>,
     rolloverReferrer = browserDocument?.referrer ?? "",
+    externalUserId?: string,
   ): TrackerEvent {
     const occurredAtMs = now();
     if (
@@ -182,6 +185,7 @@ export function createTracker(config: TrackerConfig): Tracker {
       sessionId: state.sessionId,
       payload: Object.freeze({
         ...(name === undefined ? {} : { name }),
+        ...(externalUserId === undefined ? {} : { externalUserId }),
         pageUrl: currentPage,
         ...(properties === undefined ? {} : { properties: { ...properties } }),
         ...(pendingTouchpoint === undefined
@@ -220,6 +224,21 @@ export function createTracker(config: TrackerConfig): Tracker {
       const normalizedName = name.trim();
       if (!normalizedName) throw new Error("Custom event name cannot be blank");
       return createEvent("custom", normalizedName, properties);
+    },
+    identify(externalUserId) {
+      const normalizedId = externalUserId.trim();
+      if (!normalizedId || normalizedId.length > 160) {
+        throw new Error(
+          "External user ID must be between 1 and 160 characters",
+        );
+      }
+      return createEvent(
+        "identify",
+        undefined,
+        undefined,
+        browserDocument?.referrer ?? "",
+        normalizedId,
+      );
     },
     drain() {
       return queue.splice(0, queue.length);

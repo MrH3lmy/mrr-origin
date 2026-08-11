@@ -19,6 +19,14 @@ duplicates are detected before visitor or session mutation. New events return
 `ACCEPTED`; an event ID already stored for the project returns `DUPLICATE` without
 changing its original event, visitor, or session data.
 
+An event with type `identify` carries a non-blank `payload.externalUserId` of at
+most 160 characters. External identities and visitor aliases are scoped to the
+ingestion key's project. Re-identifying a visitor with the same user is
+idempotent, and a known user may collect multiple visitor aliases. A visitor's
+first identity link wins: attempting to identify that visitor as a different
+user returns `409 visitor_identity_conflict` and rolls back the whole batch.
+No email or inferred browser identity participates in this flow.
+
 The API stores the canonical request hash and final per-event results with every
 batch receipt. Retrying the exact batch ID and content returns the originally
 stored response. Reusing a batch ID with different content returns `409`.
