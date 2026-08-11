@@ -109,6 +109,20 @@ public class StripeConnectionService {
                     initiator.mode(),
                     exchanged.scope());
         } else {
+            boolean sameAccountAndMode = connection.mode() == initiator.mode()
+                    && connection.stripeAccountId().equals(exchanged.stripeAccountId());
+            if (!sameAccountAndMode && connection.isLive()) {
+                // The state was already consumed above and stays consumed: this rejection cannot be
+                // retried by replaying the same callback with a corrected account.
+                throw new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Workspace already has an active Stripe connection; disconnect it before connecting a different account");
+            }
+            if (!sameAccountAndMode) {
+                // Replacing a disconnected/revoked connection with a different account or mode: the
+                // old backfill cursor belongs to a different Stripe account and must never be reused.
+                connection.clearSyncCheckpoint();
+            }
             connection.applyNewGrant(exchanged.stripeAccountId(), initiator.mode(), exchanged.scope());
         }
 
@@ -136,9 +150,20 @@ public class StripeConnectionService {
             return ConnectionOutcome.from(connection);
         }
 
-        stripeClient.deauthorize(connection.mode(), connection.stripeAccountId());
-        connection.markDisconnected();
-        connections.saveAndFlush(connection);
+        StripeDeauthorizationOutcome outcome = stripeClient.deauthorize(connection.mode(), connection.stripeAccountId());
+        switch (outcome) {
+            case CONFIRMED -> {
+                connection.markDisconnected();
+                connections.saveAndFlush(connection);
+            }
+            case REJECTED ->
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_GATEWAY, "Stripe rejected the disconnect request; the connection was not changed");
+            case UNREACHABLE ->
+                throw new ResponseStatusException(
+                        HttpStatus.SERVICE_UNAVAILABLE,
+                        "Stripe could not be reached to confirm the disconnect; the connection was not changed");
+        }
         return ConnectionOutcome.from(connection);
     }
 

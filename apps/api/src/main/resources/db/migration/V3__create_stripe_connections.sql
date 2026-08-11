@@ -19,7 +19,8 @@ CREATE TABLE stripe_connections (
     last_verified_at TIMESTAMPTZ,
     last_verification_failed_at TIMESTAMPTZ,
     CONSTRAINT chk_stripe_connections_mode CHECK (mode IN ('TEST', 'LIVE')),
-    CONSTRAINT chk_stripe_connections_scope CHECK (granted_scope IN ('read_only', 'read_write')),
+    -- Per ADR-0003, V1 only ever requests/grants read_only. Widening this requires a new ADR and migration.
+    CONSTRAINT chk_stripe_connections_scope CHECK (granted_scope = 'read_only'),
     CONSTRAINT chk_stripe_connections_status
         CHECK (status IN ('PENDING', 'ACTIVE', 'DISCONNECTED', 'REVOKED')),
     CONSTRAINT chk_stripe_connections_verification_status

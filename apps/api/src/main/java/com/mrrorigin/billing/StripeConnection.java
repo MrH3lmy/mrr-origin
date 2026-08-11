@@ -123,6 +123,16 @@ public class StripeConnection {
         this.updatedAt = now;
     }
 
+    /** Called when a replacement account/mode is about to overwrite this row, so a future backfill (#12) never reuses another account's cursor. */
+    void clearSyncCheckpoint() {
+        this.syncCheckpoint = null;
+        this.updatedAt = OffsetDateTime.now(ZoneOffset.UTC);
+    }
+
+    boolean isLive() {
+        return status == StripeConnectionStatus.ACTIVE || status == StripeConnectionStatus.PENDING;
+    }
+
     UUID id() {
         return id;
     }

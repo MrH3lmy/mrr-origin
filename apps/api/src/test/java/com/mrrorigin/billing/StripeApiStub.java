@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.sun.net.httpserver.HttpServer;
@@ -34,6 +35,7 @@ final class StripeApiStub implements AutoCloseable {
             new AtomicReference<>(StubResponse.json(200, "{\"stripe_user_id\":\"acct_default\"}"));
     private final AtomicReference<StubResponse> accountResponse =
             new AtomicReference<>(StubResponse.json(200, "{\"id\":\"acct_default\"}"));
+    private final AtomicBoolean deauthorizeNetworkFailure = new AtomicBoolean(false);
 
     StripeApiStub() {
         try {
@@ -42,8 +44,14 @@ final class StripeApiStub implements AutoCloseable {
             throw new IllegalStateException("Could not start the Stripe API stub", e);
         }
         server.createContext("/oauth/token", exchange -> handle(exchange, tokenRequests, tokenResponse));
-        server.createContext(
-                "/oauth/deauthorize", exchange -> handle(exchange, deauthorizeRequests, deauthorizeResponse));
+        server.createContext("/oauth/deauthorize", exchange -> {
+            if (deauthorizeNetworkFailure.compareAndSet(true, false)) {
+                exchange.getRequestBody().readAllBytes();
+                exchange.close();
+                return;
+            }
+            handle(exchange, deauthorizeRequests, deauthorizeResponse);
+        });
         server.createContext("/v1/accounts/", exchange -> handle(exchange, accountRequests, accountResponse));
         server.setExecutor(null);
         server.start();
@@ -76,6 +84,11 @@ final class StripeApiStub implements AutoCloseable {
 
     void respondToAccount(int status, String jsonBody) {
         accountResponse.set(StubResponse.json(status, jsonBody));
+    }
+
+    /** The next {@code /oauth/deauthorize} call gets its connection closed with no response (one-shot). */
+    void failNextDeauthorizeWithNetworkError() {
+        deauthorizeNetworkFailure.set(true);
     }
 
     private void handle(

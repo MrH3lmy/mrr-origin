@@ -7,6 +7,7 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -60,22 +61,35 @@ class StripeConnectClient {
                 });
     }
 
-    /** Best-effort: an already-disconnected account on Stripe's side still leaves us with no access. */
-    void deauthorize(StripeConnectionMode mode, String stripeAccountId) {
+    /**
+     * Asks Stripe to end our platform's OAuth grant on this account. The caller must only mark the
+     * connection disconnected on {@link StripeDeauthorizationOutcome#CONFIRMED} -- a 2xx response.
+     *
+     * <p>Stripe's only documented error code for this endpoint that could mean "already
+     * disconnected" is {@code invalid_client}, which is also returned for a wrong {@code client_id}
+     * or a live/test key-mode mismatch -- genuine configuration bugs. Stripe does not expose a more
+     * specific code, and {@code error_description} is free text that must never be inspected, so
+     * there is no safe, documented way to tell those cases apart. Every non-2xx response is
+     * therefore treated as {@link StripeDeauthorizationOutcome#REJECTED}, never as success, so a
+     * real misconfiguration is surfaced rather than silently swallowed.
+     */
+    StripeDeauthorizationOutcome deauthorize(StripeConnectionMode mode, String stripeAccountId) {
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
         form.add("client_id", properties.clientId(mode));
         form.add("stripe_user_id", stripeAccountId);
 
         try {
-            restClient
+            return restClient
                     .post()
                     .uri(properties.deauthorizeUri())
                     .headers(headers -> headers.setBasicAuth(properties.secretKey(mode), ""))
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .body(form)
-                    .exchange((request, response) -> null);
-        } catch (RuntimeException ignored) {
-            // Best-effort: our local disconnect proceeds regardless of Stripe's response.
+                    .exchange((request, response) -> response.getStatusCode().is2xxSuccessful()
+                            ? StripeDeauthorizationOutcome.CONFIRMED
+                            : StripeDeauthorizationOutcome.REJECTED);
+        } catch (ResourceAccessException networkFailure) {
+            return StripeDeauthorizationOutcome.UNREACHABLE;
         }
     }
 
@@ -96,7 +110,7 @@ class StripeConnectClient {
                         }
                         return StripeVerificationOutcome.TRANSIENT_FAILURE;
                     });
-        } catch (RuntimeException networkFailure) {
+        } catch (ResourceAccessException networkFailure) {
             return StripeVerificationOutcome.TRANSIENT_FAILURE;
         }
     }

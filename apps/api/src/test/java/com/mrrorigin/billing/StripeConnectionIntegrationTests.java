@@ -258,6 +258,11 @@ class StripeConnectionIntegrationTests {
                 .query(UUID.class)
                 .single();
 
+        // Switching to a different account requires an explicit disconnect first (see the dedicated
+        // active-connection-replacement tests below); this test is about the single row being reused
+        // across a legitimate reconnect, not about bypassing that rule.
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk());
         connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_second", false);
 
         assertThat(jdbc.sql("SELECT COUNT(*) FROM stripe_connections WHERE workspace_id = :workspaceId")
@@ -332,6 +337,173 @@ class StripeConnectionIntegrationTests {
         mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.stripeAccountId").value("acct_disconnect"));
+    }
+
+    @Test
+    void disconnectReturnsBadGatewayAndLeavesConnectionActiveWhenStripeRejects() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_deauth_rejected", false);
+        STRIPE_STUB.respondToDeauthorize(500, "{\"error\":\"api_error\"}");
+
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isBadGateway());
+        assertThat(STRIPE_STUB.deauthorizeRequests).hasSize(1);
+
+        mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.stripeAccountId").value("acct_deauth_rejected"))
+                .andExpect(jsonPath("$.disconnectedAt").doesNotExist());
+    }
+
+    @Test
+    void disconnectReturnsServiceUnavailableAndLeavesConnectionActiveOnNetworkFailure() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_deauth_network", false);
+        STRIPE_STUB.failNextDeauthorizeWithNetworkError();
+
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isServiceUnavailable());
+
+        mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+    }
+
+    @Test
+    void disconnectRetriesStripeOnEachAttemptUntilConfirmedThenStaysIdempotent() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_deauth_retry", false);
+        STRIPE_STUB.respondToDeauthorize(500, "{\"error\":\"api_error\"}");
+
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isBadGateway());
+        assertThat(STRIPE_STUB.deauthorizeRequests).hasSize(1);
+
+        // A repeated attempt after a failure must call Stripe again -- failure is never cached.
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isBadGateway());
+        assertThat(STRIPE_STUB.deauthorizeRequests).hasSize(2);
+
+        STRIPE_STUB.respondToDeauthorize(200, "{\"stripe_user_id\":\"acct_deauth_retry\"}");
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DISCONNECTED"));
+        assertThat(STRIPE_STUB.deauthorizeRequests).hasSize(3);
+
+        // Once confirmed, repeating the request is idempotent and does not call Stripe again.
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DISCONNECTED"));
+        assertThat(STRIPE_STUB.deauthorizeRequests).hasSize(3);
+    }
+
+    @Test
+    void activeConnectionCannotBeSilentlyReplacedByADifferentAccount() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_original_a", false);
+
+        String state = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
+        STRIPE_STUB.respondToToken(
+                200,
+                """
+                {"stripe_user_id":"acct_intruder_b","scope":"read_only","livemode":false,"token_type":"bearer"}""");
+
+        mockMvc.perform(callbackRequestBuilder(state, "ac_intruder", "read_only", null))
+                .andExpect(status().isConflict());
+
+        mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stripeAccountId").value("acct_original_a"))
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM stripe_connections WHERE workspace_id = :workspaceId")
+                        .param("workspaceId", workspaceId)
+                        .query(Integer.class)
+                        .single())
+                .isOne();
+
+        // The rejected state was still consumed and cannot be replayed, even with the original account.
+        mockMvc.perform(callbackRequestBuilder(state, "ac_intruder", "read_only", null))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void activeConnectionCannotSilentlyChangeMode() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_test_mode_locked", false);
+
+        String state = startOauth(workspaceId, ALICE, StripeConnectionMode.LIVE);
+        STRIPE_STUB.respondToToken(
+                200,
+                """
+                {"stripe_user_id":"acct_test_mode_locked","scope":"read_only","livemode":true,"token_type":"bearer"}""");
+
+        mockMvc.perform(callbackRequestBuilder(state, "ac_mode_switch", "read_only", null))
+                .andExpect(status().isConflict());
+
+        mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.mode").value("TEST"))
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+    }
+
+    @Test
+    void reauthorizingTheSameAccountAndModeUpdatesInPlaceDeterministically() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_reauth", false);
+        UUID firstId = jdbc.sql("SELECT id FROM stripe_connections WHERE workspace_id = :workspaceId")
+                .param("workspaceId", workspaceId)
+                .query(UUID.class)
+                .single();
+
+        String state = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
+        STRIPE_STUB.respondToToken(
+                200,
+                """
+                {"stripe_user_id":"acct_reauth","scope":"read_only","livemode":false,"token_type":"bearer"}""");
+
+        mockMvc.perform(callbackRequestBuilder(state, "ac_reauth", "read_only", null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stripeAccountId").value("acct_reauth"))
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM stripe_connections WHERE workspace_id = :workspaceId")
+                        .param("workspaceId", workspaceId)
+                        .query(Integer.class)
+                        .single())
+                .isOne();
+        UUID secondId = jdbc.sql("SELECT id FROM stripe_connections WHERE workspace_id = :workspaceId")
+                .param("workspaceId", workspaceId)
+                .query(UUID.class)
+                .single();
+        assertThat(secondId).isEqualTo(firstId);
+    }
+
+    @Test
+    void reconnectingADifferentAccountAfterDisconnectSucceedsAndClearsSyncCheckpoint() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_before_disconnect", false);
+        jdbc.sql("UPDATE stripe_connections SET sync_checkpoint = :checkpoint WHERE workspace_id = :workspaceId")
+                .param("checkpoint", "cursor-belonging-to-acct_before_disconnect")
+                .param("workspaceId", workspaceId)
+                .update();
+
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DISCONNECTED"));
+
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_after_disconnect", false);
+
+        mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stripeAccountId").value("acct_after_disconnect"))
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+        Map<String, Object> stored = jdbc.sql(
+                        "SELECT sync_checkpoint FROM stripe_connections WHERE workspace_id = :workspaceId")
+                .param("workspaceId", workspaceId)
+                .query()
+                .singleRow();
+        assertThat(stored.get("sync_checkpoint")).isNull();
     }
 
     @Test
