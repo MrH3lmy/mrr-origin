@@ -5,6 +5,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.Clock;
 import java.time.Instant;
@@ -29,7 +30,9 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.RequestBuilder;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -252,12 +255,7 @@ class EventIngestionIntegrationTests {
         Fixture fixture = fixture("chunked-body-limit", "app.example");
         String body = "x".repeat(IngestionBodyLimitFilter.MAX_BODY_BYTES + 1);
 
-        mvc.perform(request(fixture.key(), "https://app.example", body)
-                        .header(HttpHeaders.TRANSFER_ENCODING, "chunked")
-                        .with(request -> {
-                            request.setContentLength(-1);
-                            return request;
-                        }))
+        mvc.perform(unknownLengthRequest(fixture.key(), "https://app.example", body))
                 .andExpect(status().isPayloadTooLarge())
                 .andExpect(jsonPath("$.code").value("request_too_large"));
         assertThat(count("tracking_ingestion_batches")).isZero();
@@ -330,6 +328,29 @@ class EventIngestionIntegrationTests {
                 .header("Origin", origin)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(content);
+    }
+
+    private static RequestBuilder unknownLengthRequest(String key, String origin, String content) {
+        return servletContext -> {
+            MockHttpServletRequest request = new MockHttpServletRequest(
+                    servletContext, "POST", "/api/public/v1/events") {
+                @Override
+                public int getContentLength() {
+                    return -1;
+                }
+
+                @Override
+                public long getContentLengthLong() {
+                    return -1L;
+                }
+            };
+            request.addHeader("X-Ingestion-Key", key);
+            request.addHeader("Origin", origin);
+            request.addHeader(HttpHeaders.TRANSFER_ENCODING, "chunked");
+            request.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            request.setContent(content.getBytes(StandardCharsets.UTF_8));
+            return request;
+        };
     }
 
     private static String batch(String batchId, String eventId) {
