@@ -14,11 +14,15 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -304,6 +308,145 @@ class EventIngestionIntegrationTests {
         assertThat(count("visitors")).isOne();
     }
 
+    @Test
+    void identifyRetriesAndDuplicateEventsAreIdempotent() throws Exception {
+        Fixture fixture = fixture("identify-retry", "app.example");
+        String first = identifyBatch("identify-1", "identify-event", "visitor-1", "session-1", "user-42");
+
+        mvc.perform(request(fixture.key(), "https://app.example", first)).andExpect(status().isOk());
+        mvc.perform(request(fixture.key(), "https://app.example", first))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.events[0].status").value("ACCEPTED"));
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatch("identify-2", "identify-event", "visitor-1", "session-1", "user-42")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.events[0].status").value("DUPLICATE"));
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatch("identify-3", "identify-event-2", "visitor-1", "session-1", "user-42")))
+                .andExpect(status().isOk());
+
+        assertThat(count("external_identities")).isOne();
+        assertThat(count("visitor_aliases")).isOne();
+    }
+
+    @Test
+    void knownUserSessionsMergeMultipleVisitorsIntoOneIdentity() throws Exception {
+        Fixture fixture = fixture("visitor-merge", "app.example");
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatch("merge-1", "merge-event-1", "anonymous-a", "session-a", "known-user")))
+                .andExpect(status().isOk());
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatch("merge-2", "merge-event-2", "anonymous-b", "session-b", "known-user")))
+                .andExpect(status().isOk());
+
+        assertThat(count("external_identities")).isOne();
+        assertThat(count("visitor_aliases")).isEqualTo(2);
+        assertThat(count("tracking_sessions")).isEqualTo(2);
+    }
+
+    @Test
+    void conflictingIdentityForKnownVisitorIsRejectedWithoutPartialWrites() throws Exception {
+        Fixture fixture = fixture("identity-conflict", "app.example");
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatch("conflict-1", "conflict-event-1", "visitor", "session", "first-user")))
+                .andExpect(status().isOk());
+
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatch("conflict-2", "conflict-event-2", "visitor", "session", "second-user")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("visitor_identity_conflict"));
+
+        assertThat(count("external_identities")).isOne();
+        assertThat(count("visitor_aliases")).isOne();
+        assertThat(count("tracking_ingestion_batches")).isOne();
+    }
+
+    @Test
+    void sameExternalUserIdRemainsIsolatedAcrossProjects() throws Exception {
+        Fixture first = fixture("identity-project-a", "a.example");
+        Fixture second = fixture("identity-project-b", "b.example");
+        mvc.perform(request(first.key(), "https://a.example",
+                        identifyBatch("project-a", "event-a", "shared-visitor", "session-a", "shared-user")))
+                .andExpect(status().isOk());
+        mvc.perform(request(second.key(), "https://b.example",
+                        identifyBatch("project-b", "event-b", "shared-visitor", "session-b", "shared-user")))
+                .andExpect(status().isOk());
+
+        assertThat(count("external_identities")).isEqualTo(2);
+        assertThat(count("visitor_aliases")).isEqualTo(2);
+        assertThat(jdbc.sql("SELECT COUNT(DISTINCT project_id) FROM external_identities WHERE external_user_id = 'shared-user'")
+                .query(Integer.class).single()).isEqualTo(2);
+    }
+
+    @Test
+    void concurrentIdentifyCallsForOneVisitorChooseExactlyOneIdentity() throws Exception {
+        Fixture fixture = fixture("identify-concurrent", "app.example");
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<Integer> first = executor.submit(() -> concurrentIdentify(
+                    fixture, "concurrent-identify-a", "identify-a", "user-a", ready, start));
+            Future<Integer> second = executor.submit(() -> concurrentIdentify(
+                    fixture, "concurrent-identify-b", "identify-b", "user-b", ready, start));
+            ready.await();
+            start.countDown();
+            assertThat(first.get() + second.get()).isEqualTo(609);
+        }
+        assertThat(count("external_identities")).isOne();
+        assertThat(count("visitor_aliases")).isOne();
+        assertThat(count("tracking_event_envelopes")).isOne();
+    }
+
+    @ParameterizedTest(name = "rejects malformed identify payload: {0}")
+    @MethodSource("malformedIdentifyPayloads")
+    void rejectsMalformedIdentifyPayloadsWithoutWrites(String description, String payload) throws Exception {
+        Fixture fixture = fixture("malformed-identify", "app.example");
+
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatchWithPayload("malformed-batch", "malformed-event", payload)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("invalid_identify_payload"));
+
+        assertThat(count("tracking_ingestion_batches")).isZero();
+        assertThat(count("tracking_event_envelopes")).isZero();
+        assertThat(count("visitors")).isZero();
+        assertThat(count("tracking_sessions")).isZero();
+        assertThat(count("external_identities")).isZero();
+        assertThat(count("visitor_aliases")).isZero();
+    }
+
+    @Test
+    void malformedIdentifyLateInMixedBatchRollsBackEarlierWrites() throws Exception {
+        Fixture fixture = fixture("late-malformed-identify", "app.example");
+        String mixedBatch = """
+                {"version":1,"batchId":"mixed-malformed","events":[
+                  %s,
+                  {"eventId":"bad-identify","visitorId":"visitor-2","sessionId":"session-2",\
+                   "type":"identify","occurredAt":"2026-08-11T12:00:01Z","payload":{}}
+                ]}
+                """.formatted(event("accepted-first"));
+
+        mvc.perform(request(fixture.key(), "https://app.example", mixedBatch))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("invalid_identify_payload"));
+
+        assertThat(count("tracking_ingestion_batches")).isZero();
+        assertThat(count("tracking_event_envelopes")).isZero();
+        assertThat(count("visitors")).isZero();
+        assertThat(count("tracking_sessions")).isZero();
+        assertThat(count("external_identities")).isZero();
+        assertThat(count("visitor_aliases")).isZero();
+    }
+
+    private static Stream<Arguments> malformedIdentifyPayloads() {
+        return Stream.of(
+                Arguments.of("missing externalUserId", "{}"),
+                Arguments.of("non-string externalUserId", "{\"externalUserId\":42}"),
+                Arguments.of("blank externalUserId", "{\"externalUserId\":\"   \"}"),
+                Arguments.of("externalUserId over 160 characters",
+                        "{\"externalUserId\":\"" + "x".repeat(161) + "\"}"),
+                Arguments.of("externalUserId with surrounding whitespace",
+                        "{\"externalUserId\":\" user-42 \"}"));
+    }
+
     private Fixture fixture(String suffix, String domain) {
         UUID workspaceId = UUID.randomUUID();
         UUID projectId = UUID.randomUUID();
@@ -371,6 +514,34 @@ class EventIngestionIntegrationTests {
         return mvc.perform(request(fixture.key(), "https://app.example", body))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
+    }
+
+    private int concurrentIdentify(Fixture fixture, String batchId, String eventId, String externalUserId,
+            CountDownLatch ready, CountDownLatch start) throws Exception {
+        ready.countDown();
+        start.await();
+        return mvc.perform(request(fixture.key(), "https://app.example",
+                        identifyBatch(batchId, eventId, "visitor", "session", externalUserId)))
+                .andReturn().getResponse().getStatus();
+    }
+
+    private static String identifyBatch(String batchId, String eventId, String visitorId,
+            String sessionId, String externalUserId) {
+        return """
+                {"version":1,"batchId":"%s","events":[
+                  {"eventId":"%s","visitorId":"%s","sessionId":"%s","type":"identify",\
+                   "occurredAt":"2026-08-11T12:00:00Z","payload":{"externalUserId":"%s"}}
+                ]}
+                """.formatted(batchId, eventId, visitorId, sessionId, externalUserId);
+    }
+
+    private static String identifyBatchWithPayload(String batchId, String eventId, String payload) {
+        return """
+                {"version":1,"batchId":"%s","events":[
+                  {"eventId":"%s","visitorId":"visitor","sessionId":"session","type":"identify",\
+                   "occurredAt":"2026-08-11T12:00:00Z","payload":%s}
+                ]}
+                """.formatted(batchId, eventId, payload);
     }
 
     private static String event(String eventId) {

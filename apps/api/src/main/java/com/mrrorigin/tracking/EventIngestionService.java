@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -22,6 +23,8 @@ import tools.jackson.databind.MapperFeature;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.SerializationFeature;
 
+import com.mrrorigin.identity.IdentityLinkingService;
+
 @Service
 public class EventIngestionService {
     private static final HexFormat HEX = HexFormat.of();
@@ -29,10 +32,13 @@ public class EventIngestionService {
     private final JdbcClient jdbc;
     private final ObjectMapper canonicalMapper;
     private final Clock clock;
+    private final IdentityLinkingService identities;
 
-    public EventIngestionService(JdbcClient jdbc, ObjectMapper objectMapper, Clock clock) {
+    public EventIngestionService(JdbcClient jdbc, ObjectMapper objectMapper, Clock clock,
+            IdentityLinkingService identities) {
         this.jdbc = jdbc;
         this.clock = clock;
+        this.identities = identities;
         this.canonicalMapper = objectMapper.rebuild()
                 .enable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
                 .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
@@ -82,6 +88,12 @@ public class EventIngestionService {
                 continue;
             }
             UUID visitorId = upsertVisitor(project, event.visitorId(), event.occurredAt());
+            if (event.type().equals("identify")) {
+                if (!identities.identify(project, visitorId, externalUserId(event.payload()), event.occurredAt())) {
+                    throw new EventIngestionException(HttpStatus.CONFLICT, "visitor_identity_conflict",
+                            "Visitor is already linked to another external identity");
+                }
+            }
             UUID sessionId = event.sessionId() == null
                     ? null
                     : upsertSession(project, visitorId, event.sessionId(), event.occurredAt());
@@ -101,6 +113,15 @@ public class EventIngestionService {
                 .param("projectId", project.projectId())
                 .update();
         return response;
+    }
+
+    private String externalUserId(Map<String, Object> payload) {
+        if (!(payload.get("externalUserId") instanceof String value)
+                || value.isBlank() || value.length() > 160 || !value.equals(value.trim())) {
+            throw new EventIngestionException(HttpStatus.BAD_REQUEST, "invalid_identify_payload",
+                    "Identify events require one non-blank externalUserId of at most 160 characters");
+        }
+        return value;
     }
 
     private void lockProject(UUID projectId) {
