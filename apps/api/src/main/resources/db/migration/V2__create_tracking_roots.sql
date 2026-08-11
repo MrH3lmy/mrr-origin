@@ -71,7 +71,8 @@ CREATE TABLE tracking_sessions (
         FOREIGN KEY (visitor_id, project_id, workspace_id)
         REFERENCES visitors (id, project_id, workspace_id) ON DELETE CASCADE,
     CONSTRAINT uq_sessions_project_external UNIQUE (project_id, external_session_id),
-    CONSTRAINT uq_sessions_identity_owner UNIQUE (id, project_id, workspace_id),
+    CONSTRAINT uq_sessions_identity_owner
+        UNIQUE (id, visitor_id, project_id, workspace_id),
     CONSTRAINT chk_sessions_time_order CHECK (ended_at IS NULL OR ended_at >= started_at)
 );
 CREATE INDEX idx_sessions_workspace_project_visitor
@@ -96,8 +97,8 @@ CREATE TABLE touchpoints (
         FOREIGN KEY (visitor_id, project_id, workspace_id)
         REFERENCES visitors (id, project_id, workspace_id) ON DELETE CASCADE,
     CONSTRAINT fk_touchpoints_session
-        FOREIGN KEY (session_id, project_id, workspace_id)
-        REFERENCES tracking_sessions (id, project_id, workspace_id) ON DELETE CASCADE,
+        FOREIGN KEY (session_id, visitor_id, project_id, workspace_id)
+        REFERENCES tracking_sessions (id, visitor_id, project_id, workspace_id) ON DELETE CASCADE,
     CONSTRAINT uq_touchpoints_identity_owner UNIQUE (id, project_id, workspace_id)
 );
 CREATE INDEX idx_touchpoints_workspace_project_occurred
@@ -118,8 +119,8 @@ CREATE TABLE tracking_event_envelopes (
         FOREIGN KEY (visitor_id, project_id, workspace_id)
         REFERENCES visitors (id, project_id, workspace_id) ON DELETE RESTRICT,
     CONSTRAINT fk_event_envelopes_session
-        FOREIGN KEY (session_id, project_id, workspace_id)
-        REFERENCES tracking_sessions (id, project_id, workspace_id) ON DELETE RESTRICT,
+        FOREIGN KEY (session_id, visitor_id, project_id, workspace_id)
+        REFERENCES tracking_sessions (id, visitor_id, project_id, workspace_id) ON DELETE RESTRICT,
     CONSTRAINT uq_event_envelopes_project_external
         UNIQUE (project_id, external_event_id),
     CONSTRAINT chk_event_envelopes_payload_object

@@ -34,6 +34,9 @@ class TrackingSchemaIntegrationTests {
     @Autowired
     private IngestionKeyService keys;
 
+    @Autowired
+    private AllowedDomainService allowedDomains;
+
     private JdbcClient jdbc;
 
     @Autowired
@@ -126,6 +129,72 @@ class TrackingSchemaIntegrationTests {
                 .single()).isEqualTo(2);
     }
 
+    @Test
+    void allowedDomainsAreNormalizedAndScopedToTheOwningTenant() {
+        Tenant alice = tenant("domains-a");
+        Tenant bob = tenant("domains-b");
+
+        AllowedDomainService.AllowedDomain allowed =
+                allowedDomains.add(alice.workspaceId(), alice.projectId(), "  BÜCHER.Example.  ");
+
+        assertThat(allowed.domain()).isEqualTo("xn--bcher-kva.example");
+        assertThat(jdbc.sql("SELECT domain FROM project_allowed_domains WHERE id = :id")
+                        .param("id", allowed.id())
+                        .query(String.class)
+                        .single())
+                .isEqualTo("xn--bcher-kva.example");
+        assertThatThrownBy(() -> allowedDomains.add(bob.workspaceId(), alice.projectId(), "other.example"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM project_allowed_domains")
+                        .query(Integer.class)
+                        .single())
+                .isOne();
+    }
+
+    @Test
+    void touchpointRejectsASessionOwnedByAnotherVisitorInTheSameProject() {
+        Tenant tenant = tenant("touchpoint-visitors");
+        UUID firstVisitor = visitor(tenant, "visitor-first");
+        UUID secondVisitor = visitor(tenant, "visitor-second");
+        UUID firstSession = session(tenant, firstVisitor, "session-first");
+
+        assertThatThrownBy(() -> jdbc.sql("""
+                        INSERT INTO touchpoints
+                            (id, workspace_id, project_id, visitor_id, session_id, occurred_at, landing_url)
+                        VALUES (:id, :workspaceId, :projectId, :visitorId, :sessionId, :now, 'https://example.com')
+                        """)
+                .param("id", UUID.randomUUID())
+                .param("workspaceId", tenant.workspaceId())
+                .param("projectId", tenant.projectId())
+                .param("visitorId", secondVisitor)
+                .param("sessionId", firstSession)
+                .param("now", OffsetDateTime.now(ZoneOffset.UTC))
+                .update()).isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    void eventEnvelopeRejectsASessionOwnedByAnotherVisitorInTheSameProject() {
+        Tenant tenant = tenant("event-visitors");
+        UUID firstVisitor = visitor(tenant, "visitor-first");
+        UUID secondVisitor = visitor(tenant, "visitor-second");
+        UUID firstSession = session(tenant, firstVisitor, "session-first");
+
+        assertThatThrownBy(() -> jdbc.sql("""
+                        INSERT INTO tracking_event_envelopes
+                            (id, workspace_id, project_id, visitor_id, session_id,
+                             external_event_id, event_type, occurred_at, payload)
+                        VALUES (:id, :workspaceId, :projectId, :visitorId, :sessionId,
+                                'cross-visitor-event', 'page_view', :now, '{}'::JSONB)
+                        """)
+                .param("id", UUID.randomUUID())
+                .param("workspaceId", tenant.workspaceId())
+                .param("projectId", tenant.projectId())
+                .param("visitorId", secondVisitor)
+                .param("sessionId", firstSession)
+                .param("now", OffsetDateTime.now(ZoneOffset.UTC))
+                .update()).isInstanceOf(DataIntegrityViolationException.class);
+    }
+
     private Tenant tenant(String suffix) {
         UUID workspaceId = UUID.randomUUID();
         UUID projectId = UUID.randomUUID();
@@ -160,6 +229,23 @@ class TrackingSchemaIntegrationTests {
                 .param("projectId", tenant.projectId())
                 .param("externalId", externalId)
                 .param("now", now)
+                .update();
+        return id;
+    }
+
+    private UUID session(Tenant tenant, UUID visitorId, String externalId) {
+        UUID id = UUID.randomUUID();
+        jdbc.sql("""
+                INSERT INTO tracking_sessions
+                    (id, workspace_id, project_id, visitor_id, external_session_id, started_at)
+                VALUES (:id, :workspaceId, :projectId, :visitorId, :externalId, :now)
+                """)
+                .param("id", id)
+                .param("workspaceId", tenant.workspaceId())
+                .param("projectId", tenant.projectId())
+                .param("visitorId", visitorId)
+                .param("externalId", externalId)
+                .param("now", OffsetDateTime.now(ZoneOffset.UTC))
                 .update();
         return id;
     }
