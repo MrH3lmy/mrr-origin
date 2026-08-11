@@ -15,7 +15,12 @@ public class SecurityConfiguration {
     @Bean
     SecurityFilterChain apiSecurityFilterChain(HttpSecurity http) throws Exception {
         http.authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info", "/error")
+                        .requestMatchers(
+                                "/actuator/health",
+                                "/actuator/health/**",
+                                "/actuator/info",
+                                "/error",
+                                "/api/stripe/connections/oauth/callback")
                         .permitAll()
                         .anyRequest()
                         .authenticated())
