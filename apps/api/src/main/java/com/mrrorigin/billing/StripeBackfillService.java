@@ -14,6 +14,7 @@ import org.springframework.web.server.ResponseStatusException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+import com.mrrorigin.billing.BillingSourceVersion.SourceVersion;
 import com.mrrorigin.billing.StripeBackfillClient.StripePage;
 import com.mrrorigin.billing.StripeBackfillPageRunner.PageApplyOutcome;
 import com.mrrorigin.billing.StripeBackfillPageRunner.PageApplyStatus;
@@ -30,10 +31,14 @@ import com.mrrorigin.billing.StripeBackfillPageRunner.PageApplyStatus;
  * row's lock is held. A page is only ever "in flight" (fetched but not yet durably applied) for the
  * instant between fetch and {@code applyPage}, which is exactly the window its atomicity closes.
  *
- * <p>Backfill only ever runs for a connection that is currently ACTIVE and VERIFIED; see {@link
- * #requireEligible}. {@code applyPage} independently re-checks this under its own lock for every
- * page, so a page fetched while eligible can never apply after the connection is disconnected or
- * revoked mid-run.
+ * <p>Backfill only ever runs for a connection that is currently ACTIVE and VERIFIED. Eligibility is
+ * checked three times, for three different purposes: once before the loop even starts ({@link
+ * #requireEligible}, throws -- the caller shouldn't have invoked backfill at all), once at the top
+ * of every iteration before issuing that page's Stripe request (a plain re-check -- no point
+ * spending an API call once the connection is known to be ineligible), and once more inside {@link
+ * StripeBackfillPageRunner#applyPage} under the same lock that guards the checkpoint write (closes
+ * the residual race: the connection could still be disconnected/revoked while that page's fetch was
+ * in flight).
  */
 @Service
 class StripeBackfillService {
@@ -61,10 +66,13 @@ class StripeBackfillService {
     }
 
     /**
-     * Runs up to {@code maxPages} pages of backfill for the given connection, stopping early if
-     * the backfill completes or the connection stops being eligible. Safe to call repeatedly (e.g.
-     * by a future scheduler in #15): each call resumes from whatever checkpoint the previous call
-     * (or none) left behind.
+     * Runs until {@code maxPages} pages have been successfully APPLIED for the given connection, or
+     * the backfill completes, or the connection stops being eligible. STALE outcomes (a page whose
+     * expected phase/cursor no longer matches -- see {@link StripeBackfillPageRunner}) do not count
+     * against {@code maxPages}; the loop simply re-reads the current checkpoint and tries again,
+     * bounded by a generous safety cap on total iterations so a pathological run of races can never
+     * spin forever. Safe to call repeatedly (e.g. by a future scheduler in #15): each call resumes
+     * from whatever checkpoint the previous call (or none) left behind.
      *
      * @throws StripeBackfillIneligibleConnectionException if the connection is not currently
      *     ACTIVE and VERIFIED
@@ -72,11 +80,21 @@ class StripeBackfillService {
     BackfillRunOutcome runBatch(UUID connectionId, int maxPages) {
         requireEligible(loadConnection(connectionId));
 
-        int pagesProcessed = 0;
+        int pagesApplied = 0;
+        int iterations = 0;
+        int maxIterations = Math.max(maxPages * 4, 10);
         PageApplyOutcome last = null;
 
-        while (pagesProcessed < maxPages) {
+        while (pagesApplied < maxPages && iterations < maxIterations) {
+            iterations++;
             StripeConnection connection = loadConnection(connectionId);
+            if (!isEligible(connection)) {
+                StripeBackfillCheckpoint currentCheckpoint =
+                        StripeBackfillCheckpoint.parse(objectMapper, connection.syncCheckpoint());
+                last = PageApplyOutcome.connectionIneligible(currentCheckpoint.phase(), currentCheckpoint.isComplete());
+                break;
+            }
+
             StripeBackfillCheckpoint checkpoint =
                     StripeBackfillCheckpoint.parse(objectMapper, connection.syncCheckpoint());
             if (checkpoint.isComplete()) {
@@ -90,7 +108,7 @@ class StripeBackfillService {
             String cursor = checkpoint.cursor();
             StripeBackfillPhase phase = checkpoint.phase();
 
-            long sourceVersion = BillingSourceVersion.forBackfillFetch(Instant.now());
+            SourceVersion sourceVersion = BillingSourceVersion.forBackfillFetch(Instant.now());
             StripePage page = fetchPage(phase, mode, stripeAccountId, cursor);
             Map<String, List<JsonNode>> supplementalItemsBySubscriptionId = phase == StripeBackfillPhase.SUBSCRIPTIONS
                     ? resolveSupplementalItemsForPage(mode, stripeAccountId, page.data())
@@ -99,7 +117,9 @@ class StripeBackfillService {
                     normalizerFor(phase, workspaceId, sourceVersion, supplementalItemsBySubscriptionId);
 
             last = pageRunner.applyPage(connectionId, phase, cursor, page.data(), page.hasMore(), normalizer);
-            pagesProcessed++;
+            if (last.status() == PageApplyStatus.APPLIED) {
+                pagesApplied++;
+            }
             if (last.status() == PageApplyStatus.CONNECTION_INELIGIBLE) {
                 // The connection was disconnected/revoked between this page's fetch and its
                 // (rejected) application. Stop immediately rather than fetching further pages that
@@ -109,6 +129,8 @@ class StripeBackfillService {
             if (last.complete()) {
                 break;
             }
+            // STALE: a concurrent run already advanced past this page. Loop again -- the next
+            // iteration re-reads the checkpoint and fetches from wherever it actually is now.
         }
 
         if (last == null) {
@@ -118,7 +140,7 @@ class StripeBackfillService {
             last = PageApplyOutcome.applied(checkpoint.phase(), checkpoint.isComplete());
         }
         boolean connectionEligible = last.status() != PageApplyStatus.CONNECTION_INELIGIBLE;
-        return new BackfillRunOutcome(pagesProcessed, last.phase(), last.complete(), connectionEligible);
+        return new BackfillRunOutcome(pagesApplied, last.phase(), last.complete(), connectionEligible);
     }
 
     private Map<String, List<JsonNode>> resolveSupplementalItemsForPage(
@@ -140,11 +162,15 @@ class StripeBackfillService {
     }
 
     private void requireEligible(StripeConnection connection) {
-        if (connection.status() != StripeConnectionStatus.ACTIVE || connection.verificationStatus() != StripeVerificationStatus.VERIFIED) {
+        if (!isEligible(connection)) {
             throw new StripeBackfillIneligibleConnectionException(
                     "Stripe connection " + connection.id() + " is not ACTIVE/VERIFIED (status=" + connection.status()
                             + ", verificationStatus=" + connection.verificationStatus() + ")");
         }
+    }
+
+    private boolean isEligible(StripeConnection connection) {
+        return connection.status() == StripeConnectionStatus.ACTIVE && connection.verificationStatus() == StripeVerificationStatus.VERIFIED;
     }
 
     private StripePage fetchPage(StripeBackfillPhase phase, StripeConnectionMode mode, String stripeAccountId, String cursor) {
@@ -160,7 +186,10 @@ class StripeBackfillService {
     }
 
     private Consumer<JsonNode> normalizerFor(
-            StripeBackfillPhase phase, UUID workspaceId, long sourceVersion, Map<String, List<JsonNode>> supplementalItemsBySubscriptionId) {
+            StripeBackfillPhase phase,
+            UUID workspaceId,
+            SourceVersion sourceVersion,
+            Map<String, List<JsonNode>> supplementalItemsBySubscriptionId) {
         return switch (phase) {
             case CUSTOMERS -> item -> ledger.upsertCustomer(
                     workspaceId, StripeBillingObjectParser.parseCustomer(item), sourceVersion, BillingLedgerSource.BACKFILL);

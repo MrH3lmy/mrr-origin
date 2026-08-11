@@ -33,6 +33,7 @@ final class StripeBillingListApiStub implements AutoCloseable {
 
     private final HttpServer server;
     private final Map<String, List<String>> itemsByPath = new ConcurrentHashMap<>();
+    private final Map<String, String> singleSubscriptionsById = new ConcurrentHashMap<>();
     final List<RecordedRequest> requests = new CopyOnWriteArrayList<>();
 
     private static final Pattern STARTING_AFTER = Pattern.compile("(?:^|&)starting_after=([^&]*)");
@@ -55,6 +56,10 @@ final class StripeBillingListApiStub implements AutoCloseable {
                 "/v1/refunds")) {
             server.createContext(path, this::handle);
         }
+        // More specific than the "/v1/subscriptions" list context above, so a single-subscription
+        // GET (e.g. "/v1/subscriptions/sub_x") is routed here instead (HttpServer matches the
+        // longest registered prefix).
+        server.createContext("/v1/subscriptions/", this::handleSingleSubscription);
         server.setExecutor(null);
         server.start();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> server.stop(0)));
@@ -67,6 +72,32 @@ final class StripeBillingListApiStub implements AutoCloseable {
     /** Sets the full ordered set of raw Stripe JSON objects this path's list endpoint serves. */
     void seed(String path, List<String> rawJsonObjects) {
         itemsByPath.put(path, List.copyOf(rawJsonObjects));
+    }
+
+    /** Sets the raw JSON body a single-subscription {@code GET /v1/subscriptions/{id}} returns. */
+    void seedSingleSubscription(String stripeSubscriptionId, String rawJsonObject) {
+        singleSubscriptionsById.put(stripeSubscriptionId, rawJsonObject);
+    }
+
+    private void handleSingleSubscription(com.sun.net.httpserver.HttpExchange exchange) throws IOException {
+        exchange.getRequestBody().readAllBytes();
+        URI uri = exchange.getRequestURI();
+        String query = uri.getRawQuery() == null ? "" : uri.getRawQuery();
+        String authorization = exchange.getRequestHeaders().getFirst("Authorization");
+        String stripeAccount = exchange.getRequestHeaders().getFirst("Stripe-Account");
+        requests.add(new RecordedRequest(uri.getPath(), query, authorization, stripeAccount));
+
+        String subscriptionId = uri.getPath().substring("/v1/subscriptions/".length());
+        String body = singleSubscriptionsById.get(subscriptionId);
+        boolean found = body != null;
+        byte[] payload =
+                (found ? body : "{\"error\":{\"message\":\"No such subscription: " + subscriptionId + "\"}}")
+                        .getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().add("Content-Type", "application/json");
+        exchange.sendResponseHeaders(found ? 200 : 404, payload.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(payload);
+        }
     }
 
     private void handle(com.sun.net.httpserver.HttpExchange exchange) throws IOException {

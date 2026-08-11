@@ -121,16 +121,35 @@ abstract class AbstractBillingLedgerIntegrationTest {
     /** Directly inserts a PENDING raw webhook event row, bypassing HTTP ingestion (#11's own concern). */
     void insertPendingWebhookEvent(
             UUID connectionId, UUID workspaceId, StripeConnectionMode mode, String eventId, String type, Instant created, String object) {
+        insertPendingWebhookEvent(connectionId, workspaceId, mode, eventId, type, created, Instant.now(), object);
+    }
+
+    /**
+     * As above, but with an explicit {@code received_at} instead of letting each call land at
+     * whatever instant it happens to execute -- needed to deterministically force two rows to share
+     * the exact same receipt instant (proving convergence still holds even then), rather than
+     * relying on separate calls coincidentally landing in the same instant.
+     */
+    void insertPendingWebhookEvent(
+            UUID connectionId,
+            UUID workspaceId,
+            StripeConnectionMode mode,
+            String eventId,
+            String type,
+            Instant created,
+            Instant receivedAt,
+            String object) {
         String payload = BillingFixtures.webhookEnvelope(
                 eventId, "acct_unused", type, created.getEpochSecond(), mode == StripeConnectionMode.LIVE, object);
         jdbc.sql(
                         """
                         INSERT INTO stripe_webhook_events
                             (id, stripe_event_id, stripe_account_id, mode, connection_id, workspace_id,
-                             event_type, api_version, stripe_created_at, raw_payload, payload, processing_state)
+                             event_type, api_version, stripe_created_at, received_at, raw_payload, payload,
+                             processing_state)
                         VALUES
                             (:id, :stripeEventId, 'acct_unused', :mode, :connectionId, :workspaceId, :eventType,
-                             '2024-06-20', :stripeCreatedAt, :rawPayload, :payload::jsonb, 'PENDING')
+                             '2024-06-20', :stripeCreatedAt, :receivedAt, :rawPayload, :payload::jsonb, 'PENDING')
                         """)
                 .param("id", UUID.randomUUID())
                 .param("stripeEventId", eventId)
@@ -139,6 +158,7 @@ abstract class AbstractBillingLedgerIntegrationTest {
                 .param("workspaceId", workspaceId)
                 .param("eventType", type)
                 .param("stripeCreatedAt", OffsetDateTime.ofInstant(created, ZoneOffset.UTC))
+                .param("receivedAt", OffsetDateTime.ofInstant(receivedAt, ZoneOffset.UTC))
                 .param("rawPayload", payload.getBytes(java.nio.charset.StandardCharsets.UTF_8))
                 .param("payload", payload)
                 .update();

@@ -100,6 +100,89 @@ class BillingLedgerIdempotencyIntegrationTests extends AbstractBillingLedgerInte
         assertThat(invoiceSnapshot(workspaceId, "in_ooo2").orElseThrow()).containsEntry("status", "paid").containsEntry("amount_paid", 500L);
     }
 
+    @Test
+    void sameSourceVersionAppliesDeterministicallyRegardlessOfApplicationOrder() {
+        // BillingSourceVersion's tie-breaker (source_sequence) is what makes this possible: two
+        // updates sharing an identical `version` (identical stripe_created_at AND identical
+        // receipt-time microsecond -- the case plain second-or-microsecond resolution cannot
+        // distinguish) must still converge on the SAME winner no matter which one a caller happens
+        // to apply first. Proven directly against BillingLedgerUpsertService, not through the
+        // webhook queue, so the outcome does not depend on incidental claim ordering.
+        UUID workspaceForward = createWorkspace();
+        UUID workspaceReversed = createWorkspace();
+        long sharedVersion = 1_800_000_000L;
+        BillingSourceVersion.SourceVersion lower = new BillingSourceVersion.SourceVersion(sharedVersion, 1L);
+        BillingSourceVersion.SourceVersion higher = new BillingSourceVersion.SourceVersion(sharedVersion, 2L);
+
+        var trialing = subscriptionFor("sub_tie", "cus_tie", "trialing");
+        var active = subscriptionFor("sub_tie", "cus_tie", "active");
+
+        // Forward order: lower sequence (trialing) applied, then higher sequence (active).
+        ledger.upsertSubscription(workspaceForward, trialing, lower, BillingLedgerSource.WEBHOOK);
+        ledger.upsertSubscription(workspaceForward, active, higher, BillingLedgerSource.WEBHOOK);
+
+        // Reversed order: higher sequence (active) applied FIRST, then lower sequence (trialing)
+        // arrives after -- it must be rejected as stale despite sharing the same `version`.
+        ledger.upsertSubscription(workspaceReversed, active, higher, BillingLedgerSource.WEBHOOK);
+        ledger.upsertSubscription(workspaceReversed, trialing, lower, BillingLedgerSource.WEBHOOK);
+
+        assertThat(subscriptionSnapshot(workspaceForward, "sub_tie").orElseThrow()).containsEntry("status", "active");
+        assertThat(subscriptionSnapshot(workspaceReversed, "sub_tie").orElseThrow()).containsEntry("status", "active");
+    }
+
+    @Test
+    void webhookEventsWithIdenticalStripeCreatedAtAndIdenticalReceivedAtStillConvergeDeterministically() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_identical_ts", StripeConnectionMode.TEST);
+        Instant sameCreatedAt = Instant.parse("2026-02-01T00:00:00Z");
+        Instant sameReceivedAt = Instant.parse("2026-02-01T00:00:05.123456Z");
+
+        String trialingObject = BillingFixtures.subscription(
+                "sub_identical_ts", "cus_identical_ts", "trialing", "usd", sameCreatedAt.getEpochSecond(),
+                sameCreatedAt.getEpochSecond() + 2_592_000L, false, null, null,
+                BillingFixtures.subscriptionItem("si_identical_ts", "price_x", 1), null);
+        String activeObject = BillingFixtures.subscription(
+                "sub_identical_ts", "cus_identical_ts", "active", "usd", sameCreatedAt.getEpochSecond(),
+                sameCreatedAt.getEpochSecond() + 2_592_000L, false, null, null,
+                BillingFixtures.subscriptionItem("si_identical_ts", "price_x", 1), null);
+
+        // Row inserted first gets the lower stripe_webhook_events.ingest_sequence (Postgres IDENTITY
+        // is strictly insertion-ordered), even though both rows carry byte-identical
+        // stripe_created_at and received_at -- a collision plain (second, microsecond) resolution
+        // cannot break.
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_identical_ts_1", "customer.subscription.created",
+                sameCreatedAt, sameReceivedAt, trialingObject);
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_identical_ts_2", "customer.subscription.updated",
+                sameCreatedAt, sameReceivedAt, activeObject);
+
+        assertThat(drainWebhookQueue()).isEqualTo(2);
+
+        // The later-inserted (higher ingest_sequence) event deterministically wins, regardless of
+        // which order the queue happened to claim/process the two rows in.
+        assertThat(subscriptionSnapshot(workspaceId, "sub_identical_ts").orElseThrow()).containsEntry("status", "active");
+    }
+
+    private static StripeBillingObjects.ParsedSubscription subscriptionFor(String stripeSubscriptionId, String customerId, String status) {
+        return new StripeBillingObjects.ParsedSubscription(
+                stripeSubscriptionId,
+                customerId,
+                status,
+                "usd",
+                null,
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                java.util.List.of(),
+                java.util.List.of());
+    }
+
     private int countRows(String table, UUID workspaceId) {
         return jdbc().sql("SELECT COUNT(*) FROM " + table + " WHERE workspace_id = :w")
                 .param("w", workspaceId)

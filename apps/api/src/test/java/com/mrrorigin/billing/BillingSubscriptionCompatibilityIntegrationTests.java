@@ -165,4 +165,75 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
                         .list())
                 .containsExactly("si_wh_page_1", "si_wh_page_2");
     }
+
+    @Test
+    void backfillRequestsDiscountExpansionForSubscriptionsAndSupplementalItems() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_expand_params", StripeConnectionMode.TEST);
+
+        String embeddedItem = BillingFixtures.subscriptionItem("si_expand_1", "price_x", 1);
+        String subscription = BillingFixtures.subscription(
+                "sub_expand_params", "cus_expand_params", "active", "usd", T, T + 2_592_000L, false, null, null,
+                embeddedItem, true, null);
+
+        STRIPE_LIST_STUB.seed("/v1/customers", List.of());
+        STRIPE_LIST_STUB.seed("/v1/prices", List.of());
+        STRIPE_LIST_STUB.seed("/v1/subscriptions", List.of(subscription));
+        STRIPE_LIST_STUB.seed("/v1/subscription_items", List.of(BillingFixtures.subscriptionItem("si_expand_2", "price_x", 1)));
+        STRIPE_LIST_STUB.seed("/v1/invoices", List.of());
+        STRIPE_LIST_STUB.seed("/v1/charges", List.of());
+        STRIPE_LIST_STUB.seed("/v1/refunds", List.of());
+
+        runBackfillToCompletion(connectionId);
+
+        StripeBillingListApiStub.RecordedRequest subscriptionsRequest = STRIPE_LIST_STUB.requests.stream()
+                .filter(request -> request.path().equals("/v1/subscriptions"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(subscriptionsRequest.query()).contains("expand[]=data.discounts");
+        assertThat(subscriptionsRequest.query()).contains("expand[]=data.items.data.discounts");
+
+        StripeBillingListApiStub.RecordedRequest itemsRequest = STRIPE_LIST_STUB.requests.stream()
+                .filter(request -> request.path().equals("/v1/subscription_items"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(itemsRequest.query()).contains("expand[]=data.discounts");
+    }
+
+    @Test
+    void webhookPayloadWithUnexpandedDiscountFallsBackToALiveFullyExpandedFetch() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_unexpanded_discount", StripeConnectionMode.TEST);
+
+        // The webhook's own payload carries only a bare discount ID string -- not a full object --
+        // simulating a push-delivered event Stripe did not (and cannot, via expand[]) expand.
+        String unexpandedSubscription = BillingFixtures.subscription(
+                "sub_unexpanded", "cus_unexpanded", "active", "usd", T, T + 2_592_000L, false, null, null,
+                BillingFixtures.subscriptionItem("si_unexpanded", "price_x", 1), "\"di_pending_expansion\"");
+
+        String fullyExpandedDiscount =
+                BillingFixtures.discount("di_pending_expansion", null, "sub_unexpanded", "coupon_live_fetch", 42L, null, null, T, null);
+        String fullyExpandedSubscription = BillingFixtures.subscription(
+                "sub_unexpanded", "cus_unexpanded", "active", "usd", T, T + 2_592_000L, false, null, null,
+                BillingFixtures.subscriptionItem("si_unexpanded", "price_x", 1), fullyExpandedDiscount);
+        STRIPE_LIST_STUB.seedSingleSubscription("sub_unexpanded", fullyExpandedSubscription);
+
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_unexpanded_discount", "customer.subscription.created",
+                Instant.ofEpochSecond(T), unexpandedSubscription);
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        // The discount only exists because normalization fell back to the live GET -- the original
+        // webhook payload had no expandable data to normalize it from at all.
+        Map<String, Object> discount = discountSnapshot(workspaceId, "di_pending_expansion").orElseThrow();
+        assertThat(discount).containsEntry("stripe_coupon_id", "coupon_live_fetch");
+        assertThat(((Number) discount.get("percent_off")).intValue()).isEqualTo(42);
+
+        StripeBillingListApiStub.RecordedRequest fallbackRequest = STRIPE_LIST_STUB.requests.stream()
+                .filter(request -> request.path().equals("/v1/subscriptions/sub_unexpanded"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(fallbackRequest.query()).contains("expand[]=discounts");
+        assertThat(fallbackRequest.query()).contains("expand[]=items.data.discounts");
+    }
 }

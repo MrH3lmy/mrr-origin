@@ -4,25 +4,32 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 
 /**
- * Computes {@code billing_*.source_version}: a composite ordering key combining a Stripe-meaningful
- * epoch-second timestamp (which object state is objectively newer, across different seconds) with a
- * deterministic sub-second tie-breaker (which of two same-second deliveries wins). Second-resolution
- * alone is insufficient -- Stripe's {@code created} field on events and objects is second-precision,
- * but multiple distinct events for the same object can legitimately occur within one second, and a
- * plain second-level version guard cannot tell them apart or order them consistently.
+ * Computes {@code billing_*.(source_version, source_sequence)}: an ordering PAIR, compared as a
+ * Postgres row value so a tie on the coarse component always falls back to an independently
+ * guaranteed-unique one instead of silently colliding.
  *
- * <p>The tie-breaker must be intrinsic to the event, not to processing order: replaying the same
- * stored events in a different order must always converge on the same final state. For webhook
- * events, {@code received_at} (V5, set once at insert time and never touched again) is exactly that
- * -- an immutable, deterministic proxy for real arrival order, independent of whatever order the
- * normalization worker later happens to drain the PENDING queue in.
+ * <p>{@code source_version} is the coarse, human-meaningful ordering: which object state is
+ * objectively newer, across different seconds. Stripe's {@code created} field on events and
+ * objects is only second-precision, and multiple distinct events for the same object can
+ * legitimately occur within one second, so second-resolution alone is insufficient.
+ *
+ * <p>{@code source_sequence} is the tie-breaker: for webhook events, {@code
+ * stripe_webhook_events.ingest_sequence} (a {@code GENERATED ALWAYS AS IDENTITY} column --
+ * strictly increasing and unique per row by construction, assigned once at insert and immutable
+ * thereafter). Because it is fixed at insert time, it is independent of whatever order the
+ * normalization worker later happens to process PENDING rows in: replaying the same stored events
+ * in a different order always converges on the same final state. This eliminates collisions
+ * {@code source_version} alone cannot resolve -- including the adversarial case of two events with
+ * identical {@code stripe_created_at} AND identical receipt-time microsecond -- which a
+ * microsecond-only tie-breaker could not.
  */
 final class BillingSourceVersion {
 
     /**
-     * Width of the low-order tie-breaker slot: wide enough for microsecond resolution (0..999,999)
-     * plus the backfill sentinel above it, while `epochSeconds * SECOND_SCALE` stays comfortably
-     * inside a signed 64-bit range for any realistic timestamp.
+     * Width of the low-order sub-second slot within {@code source_version}: wide enough for
+     * microsecond resolution (0..999,999) plus the backfill sentinel above it, while {@code
+     * epochSeconds * SECOND_SCALE} stays comfortably inside a signed 64-bit range for any
+     * realistic timestamp.
      */
     private static final long SECOND_SCALE = 2_000_000L;
 
@@ -34,14 +41,26 @@ final class BillingSourceVersion {
      */
     private static final long BACKFILL_TIE_BREAKER = 1_000_000L;
 
+    /**
+     * Backfill rows never need {@code source_sequence} to distinguish anything: two backfill
+     * fetches of the same object always carry identical content (both are "the current live
+     * state"), so a same-version replay is a harmless no-op regardless of relative order.
+     */
+    private static final long BACKFILL_SEQUENCE = 0L;
+
     private BillingSourceVersion() {}
 
-    static long forWebhookEvent(OffsetDateTime stripeCreatedAt, OffsetDateTime receivedAt) {
+    static SourceVersion forWebhookEvent(OffsetDateTime stripeCreatedAt, OffsetDateTime receivedAt, long ingestSequence) {
         long microsecondOfSecond = receivedAt.getNano() / 1_000;
-        return stripeCreatedAt.toEpochSecond() * SECOND_SCALE + microsecondOfSecond;
+        long version = stripeCreatedAt.toEpochSecond() * SECOND_SCALE + microsecondOfSecond;
+        return new SourceVersion(version, ingestSequence);
     }
 
-    static long forBackfillFetch(Instant fetchStartedAt) {
-        return fetchStartedAt.getEpochSecond() * SECOND_SCALE + BACKFILL_TIE_BREAKER;
+    static SourceVersion forBackfillFetch(Instant fetchStartedAt) {
+        long version = fetchStartedAt.getEpochSecond() * SECOND_SCALE + BACKFILL_TIE_BREAKER;
+        return new SourceVersion(version, BACKFILL_SEQUENCE);
     }
+
+    /** The ordering pair applied to every {@code billing_*} upsert's version guard. */
+    record SourceVersion(long version, long sequence) {}
 }

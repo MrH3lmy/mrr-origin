@@ -101,7 +101,8 @@ class StripeBackfillConnectionLifecycleIntegrationTests extends AbstractBillingL
 
         List<JsonNode> page = parse(List.of(BillingFixtures.customer("cus_race", "usd", Instant.now().getEpochSecond(), false, null)));
         Consumer<JsonNode> normalizer = item -> ledger.upsertCustomer(
-                workspaceId, StripeBillingObjectParser.parseCustomer(item), Instant.now().getEpochSecond(), BillingLedgerSource.BACKFILL);
+                workspaceId, StripeBillingObjectParser.parseCustomer(item), BillingSourceVersion.forBackfillFetch(Instant.now()),
+                BillingLedgerSource.BACKFILL);
 
         // Simulates the connection being disconnected by the user in the moment between this page
         // being fetched (while still ACTIVE/VERIFIED) and applyPage's lock acquisition.

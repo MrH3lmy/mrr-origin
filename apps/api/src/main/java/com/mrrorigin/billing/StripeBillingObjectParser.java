@@ -44,6 +44,39 @@ final class StripeBillingObjectParser {
         return requiredText(subscription, "id");
     }
 
+    /**
+     * True when the subscription's own {@code discounts} array, or any embedded item's {@code
+     * discounts} array, contains an unexpanded entry (a bare coupon/discount ID string rather than
+     * a full object). Webhook payloads for {@code customer.subscription.*} events are not requested
+     * with {@code expand[]} (Stripe does not support expand on push-delivered events), so unlike the
+     * backfill list calls -- which always request expansion -- a webhook's embedded discounts can
+     * arrive unexpanded. Callers use this to decide whether to fall back to a live, fully-expanded
+     * {@code GET} rather than silently normalizing a partial discount set.
+     */
+    static boolean hasUnexpandedDiscounts(JsonNode subscription) {
+        if (containsUnexpandedEntry(subscription.get("discounts"))) {
+            return true;
+        }
+        for (JsonNode item : embeddedItemNodes(subscription)) {
+            if (containsUnexpandedEntry(item.get("discounts"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsUnexpandedEntry(JsonNode discounts) {
+        if (discounts == null || !discounts.isArray()) {
+            return false;
+        }
+        for (JsonNode discount : discounts) {
+            if (discount != null && !discount.isNull() && !discount.isObject()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static ParsedPrice parsePrice(JsonNode price) {
         JsonNode recurring = price.get("recurring");
         boolean isRecurring = recurring != null && !recurring.isNull();

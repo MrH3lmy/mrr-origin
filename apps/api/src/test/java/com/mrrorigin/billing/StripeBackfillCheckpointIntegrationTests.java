@@ -119,7 +119,7 @@ class StripeBackfillCheckpointIntegrationTests extends AbstractBillingLedgerInte
         for (String raw : page) {
             parsed.add(objectMapper.readTree(raw));
         }
-        long replayVersion = Instant.now().getEpochSecond();
+        BillingSourceVersion.SourceVersion replayVersion = BillingSourceVersion.forBackfillFetch(Instant.now());
         Consumer<JsonNode> normalizer = item -> ledger.upsertCustomer(
                 workspaceId, StripeBillingObjectParser.parseCustomer(item), replayVersion, BillingLedgerSource.BACKFILL);
 
@@ -149,7 +149,8 @@ class StripeBackfillCheckpointIntegrationTests extends AbstractBillingLedgerInte
         List<JsonNode> secondPageParsed = parse(secondPageItems);
 
         Consumer<JsonNode> normalizer = item -> ledger.upsertCustomer(
-                workspaceId, StripeBillingObjectParser.parseCustomer(item), Instant.now().getEpochSecond(), BillingLedgerSource.BACKFILL);
+                workspaceId, StripeBillingObjectParser.parseCustomer(item), BillingSourceVersion.forBackfillFetch(Instant.now()),
+                BillingLedgerSource.BACKFILL);
 
         // Request A fetches page 1 (starting_after=null) and applies it: checkpoint cursor -> last item of page 1.
         StripeBackfillPageRunner.PageApplyOutcome pageOneOutcome =
