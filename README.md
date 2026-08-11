@@ -6,7 +6,7 @@ MRROrigin connects a SaaS customer's acquisition journey to their subscription l
 
 ## Current status
 
-Phase 1 establishes the product contract, architecture, repository layout, core tenancy schema, build tooling, and CI. Product tracking, Stripe synchronization, attribution calculations, and dashboard features are intentionally tracked as later backlog work.
+Phase 1 established the product contract, architecture, repository layout, core tenancy schema, build tooling, and CI. Phase 2 is adding authenticated workspace management and first-party tracking. Stripe synchronization, attribution calculations, and dashboard features remain dependency-ordered backlog work.
 
 ## Repository layout
 
@@ -56,6 +56,7 @@ cd ../.. && pnpm check
 - [Architecture](ARCHITECTURE.md)
 - [Roadmap](ROADMAP.md)
 - [Contributing guide](CONTRIBUTING.md)
+- [Local authentication](docs/local-authentication.md)
 - [Security policy](SECURITY.md)
 
 GitHub issues are the executable backlog. Every implementation PR should reference exactly one primary issue and update documentation when it changes a product or architecture decision.

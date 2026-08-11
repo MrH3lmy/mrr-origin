@@ -16,6 +16,14 @@ spring:
       hibernate:
         jdbc:
           time_zone: UTC
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8081/realms/mrr-origin}
+          jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8081/realms/mrr-origin/protocol/openid-connect/certs}
+          audiences:
+            - ${OIDC_AUDIENCE:mrr-origin-api}
 
 server:
   port: ${PORT:8080}
