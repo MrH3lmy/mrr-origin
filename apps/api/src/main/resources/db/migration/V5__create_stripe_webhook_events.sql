@@ -18,6 +18,11 @@ CREATE TABLE stripe_webhook_events (
     api_version VARCHAR(32),
     stripe_created_at TIMESTAMPTZ NOT NULL,
     received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- The exact bytes verified against the Stripe-Signature header -- the only source of truth for
+    -- what Stripe actually sent and signed. Never reconstructed from `payload`, which is a parsed
+    -- JSONB mirror kept only for future query convenience (#13) and can differ byte-for-byte
+    -- (key order, whitespace, number formatting) from what was originally received and verified.
+    raw_payload BYTEA NOT NULL,
     payload JSONB NOT NULL,
     processing_state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
     -- Reserved for the future normalization worker (#13); always 0/NULL out of #11.
@@ -28,7 +33,10 @@ CREATE TABLE stripe_webhook_events (
     replay_count INTEGER NOT NULL DEFAULT 0,
     last_replayed_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_stripe_webhook_events_stripe_event_id UNIQUE (stripe_event_id),
+    -- Scoped by (mode, stripe_event_id) rather than stripe_event_id alone: test-mode and live-mode
+    -- are separate Stripe environments (separate signing secrets, separate object graphs), and
+    -- uniqueness/lookup must not conflate them even though a collision is very unlikely in practice.
+    CONSTRAINT uq_stripe_webhook_events_mode_event_id UNIQUE (mode, stripe_event_id),
     CONSTRAINT chk_stripe_webhook_events_mode CHECK (mode IN ('TEST', 'LIVE')),
     CONSTRAINT chk_stripe_webhook_events_processing_state
         CHECK (processing_state IN ('PENDING', 'ORPHANED', 'PROCESSED', 'FAILED')),

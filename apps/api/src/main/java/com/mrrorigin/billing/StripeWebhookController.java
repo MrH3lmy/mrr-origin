@@ -1,6 +1,7 @@
 package com.mrrorigin.billing;
 
 import java.io.IOException;
+import java.io.InputStream;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -24,6 +25,14 @@ import org.springframework.web.server.ResponseStatusException;
 @RestController
 class StripeWebhookController {
 
+    /**
+     * Documented maximum accepted webhook body size (1 MiB). Stripe's own events are typically well
+     * under this; the limit exists to bound memory for the raw-byte read below regardless of what a
+     * request declares via {@code Content-Length} or whether it uses chunked transfer encoding --
+     * at most this many bytes plus one are ever buffered before an oversized request is rejected.
+     */
+    private static final int MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+
     private final StripeWebhookIngestionService ingestionService;
 
     StripeWebhookController(StripeWebhookIngestionService ingestionService) {
@@ -37,7 +46,7 @@ class StripeWebhookController {
             HttpServletRequest request)
             throws IOException {
         StripeConnectionMode resolvedMode = resolveMode(mode);
-        byte[] rawBody = request.getInputStream().readAllBytes();
+        byte[] rawBody = readBoundedBody(request.getInputStream());
         ingestionService.ingest(resolvedMode, rawBody, signatureHeader);
     }
 
@@ -49,5 +58,20 @@ class StripeWebhookController {
             return StripeConnectionMode.LIVE;
         }
         throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown Stripe webhook endpoint");
+    }
+
+    /**
+     * Reads at most {@link #MAX_REQUEST_BODY_BYTES} + 1 bytes regardless of any declared
+     * {@code Content-Length} (missing, wrong, or otherwise) and regardless of transfer encoding
+     * (fixed-length or chunked) -- the cap is enforced against actual bytes streamed, never a
+     * client-supplied header, so memory use is bounded before allocation, not after.
+     */
+    private static byte[] readBoundedBody(InputStream input) throws IOException {
+        byte[] buffer = input.readNBytes(MAX_REQUEST_BODY_BYTES + 1);
+        if (buffer.length > MAX_REQUEST_BODY_BYTES) {
+            throw new ResponseStatusException(
+                    HttpStatus.PAYLOAD_TOO_LARGE, "Stripe webhook payload exceeds the maximum accepted size");
+        }
+        return buffer;
     }
 }

@@ -4,6 +4,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.DateTimeException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
@@ -15,20 +19,30 @@ import org.springframework.stereotype.Component;
 
 /**
  * Verifies a {@code Stripe-Signature} header per Stripe's documented scheme
- * (https://docs.stripe.com/webhooks#verify-manually): HMAC-SHA256 of {@code "<timestamp>.<raw body>"}
+ * (https://docs.stripe.com/webhooks?lang=node): HMAC-SHA256 of {@code "<timestamp>.<raw body>"}
  * using the endpoint's signing secret, compared against every {@code v1} signature present (Stripe
  * can include more than one during its own secret rotation). Always called with the exact,
  * unmodified request bytes -- never a re-serialized or re-parsed representation of the body.
  *
- * <p>Deliberately does not enforce a timestamp-tolerance window: Stripe can retry delivery for a
- * delayed event well after its original signing time, and duplicate/replayed deliveries are
- * already made safe by the unique constraint on the event ID, so an age check would only reject
- * legitimate delayed retries without adding real protection.
+ * <p>Enforces Stripe's documented replay defense: the {@code t} timestamp must be within a
+ * 5-minute tolerance of the current time, in either direction. This is safe for delayed events --
+ * Stripe generates a fresh {@code t} and signature for every delivery attempt, including retries,
+ * so an event whose own {@code created} is hours old still arrives with a signature timestamped at
+ * delivery time. What this rejects is a captured, stale request being replayed verbatim later.
  */
 @Component
 class StripeWebhookSignatureVerifier {
 
     private static final String HMAC_ALGORITHM = "HmacSHA256";
+
+    /** Stripe's documented tolerance: https://docs.stripe.com/webhooks?lang=node#verify-official-libraries */
+    static final Duration TOLERANCE = Duration.ofMinutes(5);
+
+    private final Clock clock;
+
+    StripeWebhookSignatureVerifier(Clock clock) {
+        this.clock = clock;
+    }
 
     boolean isValid(byte[] rawBody, String signatureHeader, String signingSecret) {
         if (rawBody == null
@@ -58,6 +72,10 @@ class StripeWebhookSignatureVerifier {
             return false;
         }
 
+        if (!isWithinTolerance(timestamp)) {
+            return false;
+        }
+
         byte[] expected = hmacSha256(signingSecret, timestamp, rawBody);
         for (String candidate : v1Signatures) {
             byte[] candidateBytes;
@@ -71,6 +89,25 @@ class StripeWebhookSignatureVerifier {
             }
         }
         return false;
+    }
+
+    private boolean isWithinTolerance(String timestamp) {
+        long epochSeconds;
+        try {
+            epochSeconds = Long.parseLong(timestamp);
+        } catch (NumberFormatException notANumber) {
+            return false;
+        }
+
+        Instant signedAt;
+        try {
+            signedAt = Instant.ofEpochSecond(epochSeconds);
+        } catch (DateTimeException | ArithmeticException outOfRange) {
+            return false;
+        }
+
+        Duration drift = Duration.between(signedAt, Instant.now(clock)).abs();
+        return drift.compareTo(TOLERANCE) <= 0;
     }
 
     private static byte[] hmacSha256(String secret, String timestamp, byte[] rawBody) {
