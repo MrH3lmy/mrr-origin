@@ -6,6 +6,8 @@ These instructions apply to the entire repository.
 
 Before editing, read `PRODUCT.md`, `ARCHITECTURE.md`, `ROADMAP.md`, and `CONTRIBUTING.md`. GitHub issues are the executable backlog and override assumptions that are not written in those documents.
 
+This is the canonical required-reading list for the repository; other docs (e.g. `CLAUDE.md`) should reference it rather than repeat it.
+
 ## Coordination
 
 - Work from one primary issue and use an isolated branch.
