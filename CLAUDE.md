@@ -12,3 +12,13 @@ Follow `AGENTS.md` for repository-wide engineering rules and required reading. B
 6. Report validation commands and results in the PR.
 
 When a requested implementation conflicts with the product exclusions or architecture rules, stop and raise the conflict on the issue. Do not quietly widen the scope.
+
+## Communication style
+
+Optimize replies and PR/commit text for output-token efficiency:
+
+- Default to short, direct sentences. No preamble, no restating the request, no summarizing what a diff already shows.
+- Skip narration of routine steps (reading a file, running a lint). Report findings, decisions, and results only.
+- Commit messages and PR descriptions: state what changed and why in as few lines as the reviewer needs, not more.
+- Never pad for tone. Terse and correct beats polished and long.
+- Code, commands, error text, and identifiers are never shortened or paraphrased — only explanatory prose is trimmed.
