@@ -4,6 +4,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -26,9 +28,11 @@ public class EventIngestionService {
 
     private final JdbcClient jdbc;
     private final ObjectMapper canonicalMapper;
+    private final Clock clock;
 
-    public EventIngestionService(JdbcClient jdbc, ObjectMapper objectMapper) {
+    public EventIngestionService(JdbcClient jdbc, ObjectMapper objectMapper, Clock clock) {
         this.jdbc = jdbc;
+        this.clock = clock;
         this.canonicalMapper = objectMapper.rebuild()
                 .enable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
                 .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
@@ -43,12 +47,24 @@ public class EventIngestionService {
         }
         ensureDistinctEventIds(request);
         String requestHash = requestHash(request);
+        lockProject(project.projectId());
+        ExistingBatch existing = findBatch(project.projectId(), request.batchId());
+        if (existing != null) {
+            if (!MessageDigest.isEqual(
+                    existing.requestHash().getBytes(StandardCharsets.US_ASCII),
+                    requestHash.getBytes(StandardCharsets.US_ASCII))) {
+                throw new EventIngestionException(
+                        HttpStatus.CONFLICT, "batch_id_conflict", "Batch ID was already used for different content");
+            }
+            return storedResponse(request.batchId(), existing.eventResults());
+        }
+        validateTimestamps(request);
+
         UUID batchId = UUID.randomUUID();
-        int insertedBatch = jdbc.sql("""
+        jdbc.sql("""
                         INSERT INTO tracking_ingestion_batches
                             (id, workspace_id, project_id, external_batch_id, envelope_version, request_hash)
                         VALUES (:id, :workspaceId, :projectId, :batchId, :version, :requestHash)
-                        ON CONFLICT (project_id, external_batch_id) DO NOTHING
                         """)
                 .param("id", batchId)
                 .param("workspaceId", project.workspaceId())
@@ -58,38 +74,78 @@ public class EventIngestionService {
                 .param("requestHash", requestHash)
                 .update();
 
-        if (insertedBatch == 0) {
-            ExistingBatch existing = jdbc.sql("""
-                            SELECT id, request_hash FROM tracking_ingestion_batches
-                            WHERE project_id = :projectId AND external_batch_id = :batchId
-                            """)
-                    .param("projectId", project.projectId())
-                    .param("batchId", request.batchId())
-                    .query((rs, row) -> new ExistingBatch(
-                            rs.getObject("id", UUID.class), rs.getString("request_hash")))
-                    .single();
-            if (!MessageDigest.isEqual(
-                    existing.requestHash().getBytes(StandardCharsets.US_ASCII),
-                    requestHash.getBytes(StandardCharsets.US_ASCII))) {
-                throw new EventIngestionException(
-                        HttpStatus.CONFLICT, "batch_id_conflict", "Batch ID was already used for different content");
-            }
-            return duplicateResponse(request);
-        }
-
         List<EventIngestionResponse.EventResult> results = new ArrayList<>();
         for (EventIngestionRequest.Event event : request.events()) {
+            if (eventExists(project.projectId(), event.eventId())) {
+                results.add(new EventIngestionResponse.EventResult(
+                        event.eventId(), EventIngestionResponse.Status.DUPLICATE));
+                continue;
+            }
             UUID visitorId = upsertVisitor(project, event.visitorId(), event.occurredAt());
             UUID sessionId = event.sessionId() == null
                     ? null
                     : upsertSession(project, visitorId, event.sessionId(), event.occurredAt());
-            int inserted = insertEvent(project, batchId, visitorId, sessionId, event);
+            insertEvent(project, batchId, visitorId, sessionId, event);
             results.add(new EventIngestionResponse.EventResult(
-                    event.eventId(), inserted == 1
-                            ? EventIngestionResponse.Status.ACCEPTED
-                            : EventIngestionResponse.Status.DUPLICATE));
+                    event.eventId(), EventIngestionResponse.Status.ACCEPTED));
         }
-        return new EventIngestionResponse(request.batchId(), List.copyOf(results));
+        EventIngestionResponse response = new EventIngestionResponse(request.batchId(), List.copyOf(results));
+        jdbc.sql("""
+                        UPDATE tracking_ingestion_batches
+                        SET event_results = CAST(:results AS JSONB)
+                        WHERE id = :id AND workspace_id = :workspaceId AND project_id = :projectId
+                        """)
+                .param("results", json(response.events()))
+                .param("id", batchId)
+                .param("workspaceId", project.workspaceId())
+                .param("projectId", project.projectId())
+                .update();
+        return response;
+    }
+
+    private void lockProject(UUID projectId) {
+        long lockKey = projectId.getMostSignificantBits() ^ projectId.getLeastSignificantBits();
+        jdbc.sql("SELECT pg_advisory_xact_lock(:lockKey)")
+                .param("lockKey", lockKey)
+                .query((rs, row) -> 0)
+                .single();
+    }
+
+    private ExistingBatch findBatch(UUID projectId, String externalBatchId) {
+        return jdbc.sql("""
+                        SELECT request_hash, event_results::TEXT AS event_results
+                        FROM tracking_ingestion_batches
+                        WHERE project_id = :projectId AND external_batch_id = :batchId
+                        """)
+                .param("projectId", projectId)
+                .param("batchId", externalBatchId)
+                .query((rs, row) -> new ExistingBatch(
+                        rs.getString("request_hash"), rs.getString("event_results")))
+                .optional()
+                .orElse(null);
+    }
+
+    private void validateTimestamps(EventIngestionRequest request) {
+        OffsetDateTime now = OffsetDateTime.now(clock);
+        OffsetDateTime oldest = now.minus(Duration.ofDays(30));
+        OffsetDateTime newest = now.plus(Duration.ofMinutes(5));
+        for (EventIngestionRequest.Event event : request.events()) {
+            if (event.occurredAt().isBefore(oldest) || event.occurredAt().isAfter(newest)) {
+                throw new EventIngestionException(HttpStatus.BAD_REQUEST, "timestamp_out_of_range",
+                        "Event timestamps must be at most 30 days old and no more than 5 minutes in the future");
+            }
+        }
+    }
+
+    private boolean eventExists(UUID projectId, String externalEventId) {
+        return jdbc.sql("""
+                        SELECT EXISTS (SELECT 1 FROM tracking_event_envelopes
+                            WHERE project_id = :projectId AND external_event_id = :eventId)
+                        """)
+                .param("projectId", projectId)
+                .param("eventId", externalEventId)
+                .query(Boolean.class)
+                .single();
     }
 
     private void ensureDistinctEventIds(EventIngestionRequest request) {
@@ -145,15 +201,14 @@ public class EventIngestionService {
                         HttpStatus.CONFLICT, "session_visitor_conflict", "Session ID belongs to another visitor"));
     }
 
-    private int insertEvent(IngestionKeyService.ResolvedProject project, UUID batchId, UUID visitorId,
+    private void insertEvent(IngestionKeyService.ResolvedProject project, UUID batchId, UUID visitorId,
             UUID sessionId, EventIngestionRequest.Event event) {
-        return jdbc.sql("""
+        jdbc.sql("""
                         INSERT INTO tracking_event_envelopes
                             (id, workspace_id, project_id, visitor_id, session_id, ingestion_batch_id,
                              external_event_id, event_type, occurred_at, payload)
                         VALUES (:id, :workspaceId, :projectId, :visitorId, :sessionId, :batchId,
                                 :eventId, :eventType, :occurredAt, CAST(:payload AS JSONB))
-                        ON CONFLICT (project_id, external_event_id) DO NOTHING
                         """)
                 .param("id", UUID.randomUUID())
                 .param("workspaceId", project.workspaceId())
@@ -168,11 +223,14 @@ public class EventIngestionService {
                 .update();
     }
 
-    private EventIngestionResponse duplicateResponse(EventIngestionRequest request) {
-        return new EventIngestionResponse(request.batchId(), request.events().stream()
-                .map(event -> new EventIngestionResponse.EventResult(
-                        event.eventId(), EventIngestionResponse.Status.DUPLICATE))
-                .toList());
+    private EventIngestionResponse storedResponse(String batchId, String resultsJson) {
+        try {
+            EventIngestionResponse.EventResult[] results =
+                    canonicalMapper.readValue(resultsJson, EventIngestionResponse.EventResult[].class);
+            return new EventIngestionResponse(batchId, List.of(results));
+        } catch (JacksonException invalidStoredResponse) {
+            throw new IllegalStateException("Stored ingestion response is invalid", invalidStoredResponse);
+        }
     }
 
     private String requestHash(EventIngestionRequest request) {
@@ -200,5 +258,5 @@ public class EventIngestionService {
         }
     }
 
-    private record ExistingBatch(UUID id, String requestHash) {}
+    private record ExistingBatch(String requestHash, String eventResults) {}
 }

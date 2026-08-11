@@ -5,6 +5,7 @@ CREATE TABLE tracking_ingestion_batches (
     external_batch_id VARCHAR(160) NOT NULL,
     envelope_version SMALLINT NOT NULL,
     request_hash CHAR(64) NOT NULL,
+    event_results JSONB NOT NULL DEFAULT '[]'::JSONB,
     received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_ingestion_batches_project
         FOREIGN KEY (project_id, workspace_id)
@@ -14,7 +15,9 @@ CREATE TABLE tracking_ingestion_batches (
     CONSTRAINT uq_ingestion_batches_identity_owner
         UNIQUE (id, project_id, workspace_id),
     CONSTRAINT chk_ingestion_batches_version CHECK (envelope_version = 1),
-    CONSTRAINT chk_ingestion_batches_hash CHECK (request_hash ~ '^[0-9a-f]{64}$')
+    CONSTRAINT chk_ingestion_batches_hash CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_ingestion_batches_results_array
+        CHECK (jsonb_typeof(event_results) = 'array')
 );
 
 ALTER TABLE tracking_event_envelopes

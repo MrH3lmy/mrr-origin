@@ -6,7 +6,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.OffsetDateTime;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.UUID;
 
 import javax.sql.DataSource;
@@ -17,6 +22,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.web.servlet.MockMvc;
@@ -28,6 +37,7 @@ import org.testcontainers.utility.DockerImageName;
 @Testcontainers
 @SpringBootTest
 @AutoConfigureMockMvc
+@Import(EventIngestionIntegrationTests.FixedClockConfiguration.class)
 class EventIngestionIntegrationTests {
     @Container
     @ServiceConnection
@@ -61,12 +71,80 @@ class EventIngestionIntegrationTests {
 
         mvc.perform(request(fixture.key(), "https://app.example", batch("batch-1", "event-1")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.events[0].status").value("DUPLICATE"));
+                .andExpect(jsonPath("$.events[0].status").value("ACCEPTED"));
         mvc.perform(request(fixture.key(), "https://app.example", batch("batch-2", "event-1")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.events[0].status").value("DUPLICATE"));
 
         assertThat(count("tracking_ingestion_batches")).isEqualTo(2);
+        assertThat(count("tracking_event_envelopes")).isOne();
+        assertThat(count("visitors")).isOne();
+        assertThat(count("tracking_sessions")).isOne();
+    }
+
+    @Test
+    void enforcesTimestampBoundariesUsingTheInjectedClock() throws Exception {
+        Fixture fixture = fixture("timestamps", "app.example");
+
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        batchAt("old-boundary", "old-boundary-event", "2026-07-12T12:00:00Z")))
+                .andExpect(status().isOk());
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        batchAt("future-boundary", "future-boundary-event", "2026-08-11T12:05:00Z")))
+                .andExpect(status().isOk());
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        batchAt("too-old", "too-old-event", "2026-07-12T11:59:59.999Z")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("timestamp_out_of_range"));
+        mvc.perform(request(fixture.key(), "https://app.example",
+                        batchAt("too-new", "too-new-event", "2026-08-11T12:05:00.001Z")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("timestamp_out_of_range"));
+
+        assertThat(count("tracking_ingestion_batches")).isEqualTo(2);
+        assertThat(count("tracking_event_envelopes")).isEqualTo(2);
+    }
+
+    @Test
+    void duplicateEventWithChangedDataHasNoVisitorOrSessionSideEffects() throws Exception {
+        Fixture fixture = fixture("duplicate-side-effects", "app.example");
+        mvc.perform(request(fixture.key(), "https://app.example", batch("original", "same-event")))
+                .andExpect(status().isOk());
+        String changed = """
+                {"version":1,"batchId":"changed","events":[
+                  {"eventId":"same-event","visitorId":"phantom-visitor","sessionId":"phantom-session",\
+                   "type":"custom","occurredAt":"2026-08-11T12:04:00Z","payload":{"changed":true}}
+                ]}
+                """;
+
+        mvc.perform(request(fixture.key(), "https://app.example", changed))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.events[0].status").value("DUPLICATE"));
+
+        assertThat(count("tracking_event_envelopes")).isOne();
+        assertThat(count("visitors")).isOne();
+        assertThat(count("tracking_sessions")).isOne();
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM visitors WHERE external_visitor_id = 'phantom-visitor'")
+                .query(Integer.class).single()).isZero();
+    }
+
+    @Test
+    void concurrentDuplicateIngestionCreatesNoPhantomIdentityRecords() throws Exception {
+        Fixture fixture = fixture("concurrent", "app.example");
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<String> first = executor.submit(() -> concurrentRequest(
+                    fixture, "concurrent-a", "shared-event", "visitor-a", "session-a", ready, start));
+            Future<String> second = executor.submit(() -> concurrentRequest(
+                    fixture, "concurrent-b", "shared-event", "visitor-b", "session-b", ready, start));
+            ready.await();
+            start.countDown();
+
+            assertThat(first.get() + second.get())
+                    .contains("ACCEPTED")
+                    .contains("DUPLICATE");
+        }
         assertThat(count("tracking_event_envelopes")).isOne();
         assertThat(count("visitors")).isOne();
         assertThat(count("tracking_sessions")).isOne();
@@ -130,6 +208,34 @@ class EventIngestionIntegrationTests {
         mvc.perform(request(fixture.key(), "https://evil.example", batch("batch-3", "event-3")))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("origin_not_allowed"));
+        assertThat(count("tracking_ingestion_batches")).isZero();
+    }
+
+    @Test
+    void normalizesAllowedOriginsWithTheConfiguredDomainPolicy() throws Exception {
+        Fixture ascii = fixture("origin-normalization", "app.example");
+        Fixture idn = fixture("origin-idn", "BÜCHER.Example.");
+
+        mvc.perform(request(ascii.key(), "HTTPS://APP.EXAMPLE.", batch("upper", "upper-event")))
+                .andExpect(status().isOk());
+        mvc.perform(request(idn.key(), "https://BÜCHER.Example.", batch("idn", "idn-event")))
+                .andExpect(status().isOk());
+        mvc.perform(request(ascii.key(), "https://app.example/path", batch("path", "path-event")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("invalid_origin"));
+        mvc.perform(request(ascii.key(), "https://unlisted.example", batch("unlisted", "unlisted-event")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("origin_not_allowed"));
+    }
+
+    @Test
+    void rejectsRequestBodyOverByteLimitBeforeDeserialization() throws Exception {
+        Fixture fixture = fixture("body-limit", "app.example");
+        String body = "x".repeat(IngestionBodyLimitFilter.MAX_BODY_BYTES + 1);
+
+        mvc.perform(request(fixture.key(), "https://app.example", body))
+                .andExpect(status().isPayloadTooLarge())
+                .andExpect(jsonPath("$.code").value("request_too_large"));
         assertThat(count("tracking_ingestion_batches")).isZero();
     }
 
@@ -205,6 +311,22 @@ class EventIngestionIntegrationTests {
         return "{\"version\":1,\"batchId\":\"" + batchId + "\",\"events\":[" + event(eventId) + "]}";
     }
 
+    private static String batchAt(String batchId, String eventId, String occurredAt) {
+        return batch(batchId, eventId).replace("2026-08-11T12:00:00Z", occurredAt);
+    }
+
+    private String concurrentRequest(Fixture fixture, String batchId, String eventId,
+            String visitorId, String sessionId, CountDownLatch ready, CountDownLatch start) throws Exception {
+        String body = batch(batchId, eventId)
+                .replace("visitor-1", visitorId)
+                .replace("session-1", sessionId);
+        ready.countDown();
+        start.await();
+        return mvc.perform(request(fixture.key(), "https://app.example", body))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+    }
+
     private static String event(String eventId) {
         return """
                 {"eventId":"%s","visitorId":"visitor-1","sessionId":"session-1",\
@@ -217,4 +339,13 @@ class EventIngestionIntegrationTests {
     }
 
     private record Fixture(UUID workspaceId, UUID projectId, UUID keyId, String key) {}
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class FixedClockConfiguration {
+        @Bean
+        @Primary
+        Clock fixedTrackingClock() {
+            return Clock.fixed(Instant.parse("2026-08-11T12:00:00Z"), ZoneOffset.UTC);
+        }
+    }
 }
