@@ -133,10 +133,11 @@ The API must remain horizontally safe: scheduled work uses database leases, inge
 
 ## Architecture decisions
 
-| ADR                                                           | Decision                                       |
-| ------------------------------------------------------------- | ---------------------------------------------- |
-| [ADR-0001](docs/adr/0001-modular-monolith.md)                 | Start with a modular monolith                  |
-| [ADR-0002](docs/adr/0002-immutable-inputs-derived-results.md) | Separate immutable inputs from derived results |
+| ADR                                                                | Decision                                                                                         |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| [ADR-0001](docs/adr/0001-modular-monolith.md)                      | Start with a modular monolith                                                                    |
+| [ADR-0002](docs/adr/0002-immutable-inputs-derived-results.md)      | Separate immutable inputs from derived results                                                   |
+| [ADR-0003](docs/adr/0003-stripe-connection-credential-security.md) | Stripe Standard-account OAuth consent (`read_only`) plus platform-key/`Stripe-Account` API calls |
 
 ## Deferred decisions
 
