@@ -9,6 +9,9 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
 @Entity
 @Table(name = "workspaces")
 public class Workspace {
@@ -22,7 +25,8 @@ public class Workspace {
     @Column(nullable = false, unique = true, length = 80)
     private String slug;
 
-    @Column(name = "reporting_currency", nullable = false, length = 3, columnDefinition = "char(3)")
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "reporting_currency", nullable = false, length = 3)
     private String reportingCurrency;
 
     @Column(name = "created_at", nullable = false, updatable = false)
