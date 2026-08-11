@@ -25,6 +25,18 @@ spring:
           audiences:
             - ${OIDC_AUDIENCE:mrr-origin-api}
 
+mrrorigin:
+  stripe:
+    connect:
+      # Per ADR-0003, these are the platform's own restricted OAuth client/secret keys -- never a
+      # per-workspace credential. Test and live are always kept separate.
+      test-client-id: ${STRIPE_CONNECT_TEST_CLIENT_ID:}
+      test-secret-key: ${STRIPE_CONNECT_TEST_SECRET_KEY:}
+      live-client-id: ${STRIPE_CONNECT_LIVE_CLIENT_ID:}
+      live-secret-key: ${STRIPE_CONNECT_LIVE_SECRET_KEY:}
+      redirect-uri: ${STRIPE_CONNECT_REDIRECT_URI:}
+      state-ttl: ${STRIPE_CONNECT_STATE_TTL:PT15M}
+
 server:
   port: ${PORT:8080}
   shutdown: graceful
