@@ -5,10 +5,24 @@ import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+
+import jakarta.persistence.LockModeType;
 
 interface StripeConnectionRepository extends JpaRepository<StripeConnection, UUID> {
 
     Optional<StripeConnection> findByWorkspaceId(UUID workspaceId);
+
+    /**
+     * Locks the connection row for the duration of the caller's transaction, so two concurrent
+     * backfill page applications for the same connection (#12) serialize instead of racing a lost
+     * checkpoint update: the second waits for the first to commit, then re-reads the now-current
+     * checkpoint rather than overwriting it with a stale in-memory copy.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select c from StripeConnection c where c.id = :id")
+    Optional<StripeConnection> findByIdForUpdate(UUID id);
 
     /**
      * At most one row can match, for any given {@code stripeAccountId}, since

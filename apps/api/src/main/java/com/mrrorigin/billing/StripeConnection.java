@@ -129,6 +129,16 @@ public class StripeConnection {
         this.updatedAt = OffsetDateTime.now(ZoneOffset.UTC);
     }
 
+    /** Persists the resumable backfill cursor (#12); see {@link StripeBackfillCheckpoint}. */
+    void applySyncCheckpoint(String syncCheckpoint) {
+        this.syncCheckpoint = syncCheckpoint;
+        this.updatedAt = OffsetDateTime.now(ZoneOffset.UTC);
+    }
+
+    String syncCheckpoint() {
+        return syncCheckpoint;
+    }
+
     boolean isLive() {
         return status == StripeConnectionStatus.ACTIVE || status == StripeConnectionStatus.PENDING;
     }
