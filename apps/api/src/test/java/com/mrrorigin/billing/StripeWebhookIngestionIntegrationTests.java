@@ -297,6 +297,97 @@ class StripeWebhookIngestionIntegrationTests {
         assertThat(countEvents()).isZero();
     }
 
+    @Test
+    void missingApiVersionIsAcceptedAsAbsent() throws Exception {
+        UUID workspaceId = createWorkspace();
+        insertActiveConnection(workspaceId, "acct_no_api_version", StripeConnectionMode.TEST);
+        String payload = """
+                {"id":"evt_missing_api_version","object":"event","created":%d,"type":"invoice.paid",
+                 "account":"acct_no_api_version","livemode":false,"data":{"object":{}}}"""
+                .formatted(Instant.now().getEpochSecond());
+        String signature = sign(payload, TEST_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("test", payload, signature)).andExpect(status().isOk());
+
+        Map<String, Object> stored = jdbc.sql(
+                        "SELECT api_version FROM stripe_webhook_events WHERE stripe_event_id = 'evt_missing_api_version'")
+                .query()
+                .singleRow();
+        assertThat(stored.get("api_version")).isNull();
+    }
+
+    @Test
+    void jsonNullApiVersionIsAcceptedAsAbsent() throws Exception {
+        UUID workspaceId = createWorkspace();
+        insertActiveConnection(workspaceId, "acct_null_api_version", StripeConnectionMode.TEST);
+        String payload = """
+                {"id":"evt_null_api_version","object":"event","api_version":null,"created":%d,
+                 "type":"invoice.paid","account":"acct_null_api_version","livemode":false,
+                 "data":{"object":{}}}"""
+                .formatted(Instant.now().getEpochSecond());
+        String signature = sign(payload, TEST_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("test", payload, signature)).andExpect(status().isOk());
+
+        Map<String, Object> stored = jdbc.sql(
+                        "SELECT api_version FROM stripe_webhook_events WHERE stripe_event_id = 'evt_null_api_version'")
+                .query()
+                .singleRow();
+        assertThat(stored.get("api_version")).isNull();
+    }
+
+    @Test
+    void numericApiVersionIsRejectedAndNotPersisted() throws Exception {
+        String payload = """
+                {"id":"evt_api_version_number","object":"event","api_version":20240620,
+                 "created":%d,"type":"invoice.paid","account":"acct_unknown","livemode":false,
+                 "data":{"object":{}}}"""
+                .formatted(Instant.now().getEpochSecond());
+        String signature = sign(payload, TEST_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("test", payload, signature)).andExpect(status().isBadRequest());
+        assertThat(countEvents()).isZero();
+    }
+
+    @Test
+    void booleanApiVersionIsRejectedAndNotPersisted() throws Exception {
+        String payload = """
+                {"id":"evt_api_version_boolean","object":"event","api_version":true,
+                 "created":%d,"type":"invoice.paid","account":"acct_unknown","livemode":false,
+                 "data":{"object":{}}}"""
+                .formatted(Instant.now().getEpochSecond());
+        String signature = sign(payload, TEST_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("test", payload, signature)).andExpect(status().isBadRequest());
+        assertThat(countEvents()).isZero();
+    }
+
+    @Test
+    void objectApiVersionIsRejectedAndNotPersisted() throws Exception {
+        String payload = """
+                {"id":"evt_api_version_object","object":"event","api_version":{"value":"2024-06-20"},
+                 "created":%d,"type":"invoice.paid","account":"acct_unknown","livemode":false,
+                 "data":{"object":{}}}"""
+                .formatted(Instant.now().getEpochSecond());
+        String signature = sign(payload, TEST_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("test", payload, signature)).andExpect(status().isBadRequest());
+        assertThat(countEvents()).isZero();
+    }
+
+    @Test
+    void arrayApiVersionIsRejectedAndNotPersisted() throws Exception {
+        String payload = """
+                {"id":"evt_api_version_array","object":"event","api_version":["2024-06-20"],
+                 "created":%d,"type":"invoice.paid","account":"acct_unknown","livemode":false,
+                 "data":{"object":{}}}"""
+                .formatted(Instant.now().getEpochSecond());
+        String signature = sign(payload, TEST_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("test", payload, signature)).andExpect(status().isBadRequest());
+        assertThat(countEvents()).isZero();
+    }
+
     // ---- livemode must match the endpoint ----------------------------------------------------
 
     @Test
@@ -499,6 +590,77 @@ class StripeWebhookIngestionIntegrationTests {
                 .isEqualTo(workspaceId);
         assertThat(jdbc.sql(eventTableRow.formatted("event_type")).query(String.class).single())
                 .isEqualTo("customer.subscription.updated");
+    }
+
+    // ---- Account routing is scoped by mode: test/live are separate Stripe environments --------
+
+    @Test
+    void testWebhookCannotAttachToALiveConnectionWithTheSameAccountId() throws Exception {
+        UUID workspaceId = createWorkspace();
+        insertActiveConnection(workspaceId, "acct_cross_mode_a", StripeConnectionMode.LIVE);
+        String payload = event("evt_cross_mode_test_on_live_acct", "acct_cross_mode_a", "invoice.paid", Instant.now());
+        String signature = sign(payload, TEST_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("test", payload, signature)).andExpect(status().isOk());
+
+        assertThat(jdbc.sql("SELECT processing_state FROM stripe_webhook_events "
+                        + "WHERE stripe_event_id = 'evt_cross_mode_test_on_live_acct'")
+                        .query(String.class)
+                        .single())
+                .isEqualTo("ORPHANED");
+        Map<String, Object> stored = jdbc.sql("SELECT connection_id, workspace_id FROM stripe_webhook_events "
+                        + "WHERE stripe_event_id = 'evt_cross_mode_test_on_live_acct'")
+                .query()
+                .singleRow();
+        assertThat(stored.get("connection_id")).isNull();
+        assertThat(stored.get("workspace_id")).isNull();
+    }
+
+    @Test
+    void liveWebhookCannotAttachToATestConnectionWithTheSameAccountId() throws Exception {
+        UUID workspaceId = createWorkspace();
+        insertActiveConnection(workspaceId, "acct_cross_mode_b", StripeConnectionMode.TEST);
+        String payload =
+                event("evt_cross_mode_live_on_test_acct", "acct_cross_mode_b", "invoice.paid", Instant.now(), true);
+        String signature = sign(payload, LIVE_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("live", payload, signature)).andExpect(status().isOk());
+
+        assertThat(jdbc.sql("SELECT processing_state FROM stripe_webhook_events "
+                        + "WHERE stripe_event_id = 'evt_cross_mode_live_on_test_acct'")
+                        .query(String.class)
+                        .single())
+                .isEqualTo("ORPHANED");
+        Map<String, Object> stored = jdbc.sql("SELECT connection_id, workspace_id FROM stripe_webhook_events "
+                        + "WHERE stripe_event_id = 'evt_cross_mode_live_on_test_acct'")
+                .query()
+                .singleRow();
+        assertThat(stored.get("connection_id")).isNull();
+        assertThat(stored.get("workspace_id")).isNull();
+    }
+
+    @Test
+    void matchingModeConnectionStillLinksCorrectlyAsPending() throws Exception {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_cross_mode_c", StripeConnectionMode.TEST);
+        // A DISCONNECTED row for the same account also exists in the other mode, elsewhere. (A
+        // second *live* row for the same account id, in either mode, would itself violate
+        // uq_stripe_connections_active_account -- that index is deliberately not mode-scoped,
+        // since a Stripe account is never validly live in both modes for MRROrigin at once. This
+        // still proves the lookup picks the correctly-moded row rather than erroring or matching
+        // ambiguously when another, non-live, cross-mode row for the same account exists.)
+        UUID otherWorkspaceId = createWorkspace();
+        insertConnection(otherWorkspaceId, "acct_cross_mode_c", StripeConnectionMode.LIVE, StripeConnectionStatus.DISCONNECTED);
+
+        String payload = event("evt_cross_mode_matching", "acct_cross_mode_c", "invoice.paid", Instant.now());
+        String signature = sign(payload, TEST_WEBHOOK_SECRET);
+
+        mockMvc.perform(webhookRequest("test", payload, signature)).andExpect(status().isOk());
+
+        String row = "SELECT %s FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cross_mode_matching'";
+        assertThat(jdbc.sql(row.formatted("processing_state")).query(String.class).single()).isEqualTo("PENDING");
+        assertThat(jdbc.sql(row.formatted("connection_id")).query(UUID.class).single()).isEqualTo(connectionId);
+        assertThat(jdbc.sql(row.formatted("workspace_id")).query(UUID.class).single()).isEqualTo(workspaceId);
     }
 
     // ---- Raw bytes are preserved immutably, separate from the parsed JSONB mirror -------------

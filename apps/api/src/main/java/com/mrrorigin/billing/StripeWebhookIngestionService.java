@@ -84,12 +84,13 @@ class StripeWebhookIngestionService {
                     "Stripe webhook payload's livemode does not match the endpoint it was delivered to");
         }
 
-        // Only a currently live (PENDING/ACTIVE) connection is a valid processing target. An
-        // account with no connection at all, or one that is DISCONNECTED/REVOKED, is treated the
-        // same way: the event is stored as an orphaned raw record and never processed into a
-        // workspace, per ADR-0003.
+        // Only a currently live (PENDING/ACTIVE) connection in the SAME mode as this endpoint is a
+        // valid processing target. An account with no connection at all, one that is
+        // DISCONNECTED/REVOKED, or one that is only live in the other mode (test vs. live are
+        // separate Stripe environments) is treated the same way: the event is stored as an
+        // orphaned raw record and never processed into a workspace, per ADR-0003.
         StripeConnection connection = connections
-                .findByStripeAccountIdAndStatusIn(stripeAccountId, LIVE_STATUSES)
+                .findByStripeAccountIdAndModeAndStatusIn(stripeAccountId, mode, LIVE_STATUSES)
                 .orElse(null);
         StripeWebhookProcessingState processingState =
                 connection != null ? StripeWebhookProcessingState.PENDING : StripeWebhookProcessingState.ORPHANED;
@@ -160,10 +161,20 @@ class StripeWebhookIngestionService {
         return text;
     }
 
+    /**
+     * A missing field, or an explicit JSON {@code null}, leaves the value absent. Any other
+     * present-but-wrong-typed value (number, boolean, object, array) is a malformed payload, not a
+     * silently-ignored one -- an attacker or a buggy sender should get a 400, not have the field
+     * quietly dropped.
+     */
     private static String optionalText(JsonNode event, String field, int maxLength) {
         JsonNode value = event.get(field);
-        if (value == null || !value.isTextual()) {
+        if (value == null || value.isNull()) {
             return null;
+        }
+        if (!value.isTextual()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "Stripe webhook payload field has the wrong type: " + field);
         }
         String text = value.textValue();
         if (text.length() > maxLength) {
