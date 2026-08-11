@@ -60,3 +60,7 @@ cd ../.. && pnpm check
 - [Security policy](SECURITY.md)
 
 GitHub issues are the executable backlog. Every implementation PR should reference exactly one primary issue and update documentation when it changes a product or architecture decision.
+
+## Claude Code plugins
+
+This repo registers the [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) skill via `.claude/settings.json`. Team members who trust this folder in Claude Code will be prompted to install the `ui-ux-pro-max-skill` marketplace and the `ui-ux-pro-max` plugin (design intelligence: UI styles, color palettes, font pairings, chart types, and UX guidelines).
