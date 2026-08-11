@@ -1,6 +1,7 @@
 package com.mrrorigin.tracking;
 
 import java.net.IDN;
+import java.net.URI;
 import java.util.Locale;
 import java.util.UUID;
 
@@ -38,6 +39,40 @@ public class AllowedDomainService {
             throw new IllegalArgumentException("Project does not belong to workspace");
         }
         return new AllowedDomain(id, workspaceId, projectId, domain);
+    }
+
+    @Transactional(readOnly = true)
+    public boolean isAllowed(UUID workspaceId, UUID projectId, String origin) {
+        String domain = normalizeOrigin(origin);
+        return jdbc.sql("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM project_allowed_domains
+                            WHERE workspace_id = :workspaceId AND project_id = :projectId AND domain = :domain)
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("projectId", projectId)
+                .param("domain", domain)
+                .query(Boolean.class)
+                .single();
+    }
+
+    static String normalizeOrigin(String candidate) {
+        try {
+            URI origin = URI.create(candidate);
+            if (!("http".equalsIgnoreCase(origin.getScheme()) || "https".equalsIgnoreCase(origin.getScheme()))
+                    || origin.getRawAuthority() == null || origin.getUserInfo() != null
+                    || origin.getPath() != null && !origin.getPath().isEmpty()
+                    || origin.getQuery() != null || origin.getFragment() != null) {
+                throw new IllegalArgumentException("Origin must contain only an HTTP(S) scheme, host, and optional port");
+            }
+            String authority = origin.getRawAuthority();
+            String host = authority.startsWith("[")
+                    ? authority.substring(0, authority.indexOf(']') + 1)
+                    : authority.replaceFirst(":\\d+$", "");
+            return normalize(host);
+        } catch (IllegalArgumentException invalid) {
+            throw new IllegalArgumentException("Origin is invalid", invalid);
+        }
     }
 
     static String normalize(String candidate) {
