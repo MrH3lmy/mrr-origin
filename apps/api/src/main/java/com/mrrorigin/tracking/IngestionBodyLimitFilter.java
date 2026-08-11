@@ -1,5 +1,6 @@
 package com.mrrorigin.tracking;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 
 import jakarta.servlet.FilterChain;
@@ -31,6 +32,15 @@ final class IngestionBodyLimitFilter extends OncePerRequestFilter {
             writeTooLarge(response);
             return;
         }
+        if (request.getContentLengthLong() < 0) {
+            byte[] body = request.getInputStream().readNBytes(MAX_BODY_BYTES + 1);
+            if (body.length > MAX_BODY_BYTES) {
+                writeTooLarge(response);
+                return;
+            }
+            chain.doFilter(new CachedRequest(request, body), response);
+            return;
+        }
         chain.doFilter(new LimitedRequest(request), response);
     }
 
@@ -58,6 +68,52 @@ final class IngestionBodyLimitFilter extends OncePerRequestFilter {
         public ServletInputStream getInputStream() throws IOException {
             return new LimitedInputStream(super.getInputStream());
         }
+    }
+
+    private static final class CachedRequest extends HttpServletRequestWrapper {
+        private final byte[] body;
+
+        CachedRequest(HttpServletRequest request, byte[] body) {
+            super(request);
+            this.body = body;
+        }
+
+        @Override
+        public int getContentLength() {
+            return body.length;
+        }
+
+        @Override
+        public long getContentLengthLong() {
+            return body.length;
+        }
+
+        @Override
+        public ServletInputStream getInputStream() {
+            return new ByteArrayServletInputStream(body);
+        }
+    }
+
+    private static final class ByteArrayServletInputStream extends ServletInputStream {
+        private final ByteArrayInputStream delegate;
+
+        ByteArrayServletInputStream(byte[] body) {
+            delegate = new ByteArrayInputStream(body);
+        }
+
+        @Override
+        public int read() {
+            return delegate.read();
+        }
+
+        @Override
+        public int read(byte[] bytes, int offset, int length) {
+            return delegate.read(bytes, offset, length);
+        }
+
+        @Override public boolean isFinished() { return delegate.available() == 0; }
+        @Override public boolean isReady() { return true; }
+        @Override public void setReadListener(ReadListener listener) { throw new UnsupportedOperationException(); }
     }
 
     private static final class LimitedInputStream extends ServletInputStream {
