@@ -13,6 +13,11 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import javax.sql.DataSource;
 
@@ -123,6 +128,34 @@ class StripeConnectionIntegrationTests {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"mode\":\"TEST\"}"))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    void oauthStartIsRejectedWithConflictWhenTheConnectionIsActive() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_start_active", false);
+
+        mockMvc.perform(post("/api/workspaces/{id}/stripe-connection/oauth/start", workspaceId)
+                        .with(token(ALICE))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"mode\":\"TEST\"}"))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void oauthStartIsRejectedWithConflictWhenTheConnectionIsPending() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        String state = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
+        STRIPE_STUB.respondToAccount(500, "{\"error\":{\"type\":\"api_error\"}}");
+        mockMvc.perform(callbackRequestBuilder(state, "ac_pending_start", "read_only", null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PENDING"));
+
+        mockMvc.perform(post("/api/workspaces/{id}/stripe-connection/oauth/start", workspaceId)
+                        .with(token(ALICE))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"mode\":\"TEST\"}"))
+                .andExpect(status().isConflict());
     }
 
     @Test
@@ -401,16 +434,22 @@ class StripeConnectionIntegrationTests {
     @Test
     void activeConnectionCannotBeSilentlyReplacedByADifferentAccount() throws Exception {
         UUID workspaceId = createWorkspace(ALICE);
+        // Minted while nothing is connected yet (oauth/start itself would now reject a second attempt
+        // once a connection is live), then left stale while a connection is established through a
+        // separate, completed flow -- modeling a late/duplicate browser tab finishing its redirect.
+        String staleState = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
         connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_original_a", false);
 
-        String state = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
         STRIPE_STUB.respondToToken(
                 200,
                 """
                 {"stripe_user_id":"acct_intruder_b","scope":"read_only","livemode":false,"token_type":"bearer"}""");
 
-        mockMvc.perform(callbackRequestBuilder(state, "ac_intruder", "read_only", null))
+        int tokenCallsBeforeCallback = STRIPE_STUB.tokenRequests.size();
+        mockMvc.perform(callbackRequestBuilder(staleState, "ac_intruder", "read_only", null))
                 .andExpect(status().isConflict());
+        // Rejected before the token endpoint is ever called: the intruder's code is never exchanged.
+        assertThat(STRIPE_STUB.tokenRequests).hasSize(tokenCallsBeforeCallback);
 
         mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
                 .andExpect(status().isOk())
@@ -423,23 +462,25 @@ class StripeConnectionIntegrationTests {
                 .isOne();
 
         // The rejected state was still consumed and cannot be replayed, even with the original account.
-        mockMvc.perform(callbackRequestBuilder(state, "ac_intruder", "read_only", null))
+        mockMvc.perform(callbackRequestBuilder(staleState, "ac_intruder", "read_only", null))
                 .andExpect(status().isBadRequest());
     }
 
     @Test
     void activeConnectionCannotSilentlyChangeMode() throws Exception {
         UUID workspaceId = createWorkspace(ALICE);
+        String staleState = startOauth(workspaceId, ALICE, StripeConnectionMode.LIVE);
         connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_test_mode_locked", false);
 
-        String state = startOauth(workspaceId, ALICE, StripeConnectionMode.LIVE);
         STRIPE_STUB.respondToToken(
                 200,
                 """
                 {"stripe_user_id":"acct_test_mode_locked","scope":"read_only","livemode":true,"token_type":"bearer"}""");
 
-        mockMvc.perform(callbackRequestBuilder(state, "ac_mode_switch", "read_only", null))
+        int tokenCallsBeforeCallback = STRIPE_STUB.tokenRequests.size();
+        mockMvc.perform(callbackRequestBuilder(staleState, "ac_mode_switch", "read_only", null))
                 .andExpect(status().isConflict());
+        assertThat(STRIPE_STUB.tokenRequests).hasSize(tokenCallsBeforeCallback);
 
         mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
                 .andExpect(status().isOk())
@@ -448,35 +489,139 @@ class StripeConnectionIntegrationTests {
     }
 
     @Test
-    void reauthorizingTheSameAccountAndModeUpdatesInPlaceDeterministically() throws Exception {
+    void sameAccountReauthorizationIsRejectedUntilExplicitDisconnect() throws Exception {
         UUID workspaceId = createWorkspace(ALICE);
+        // V1 policy: even reauthorizing the exact same account and mode is rejected while active --
+        // there is no "safe" reauthorization carve-out, only explicit disconnect then reconnect. This
+        // state is minted before the connection exists (oauth/start itself blocks a second attempt
+        // once live) and is left stale to exercise the callback-level guard directly.
+        String staleState = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
         connectSuccessfully(workspaceId, ALICE, StripeConnectionMode.TEST, "acct_reauth", false);
         UUID firstId = jdbc.sql("SELECT id FROM stripe_connections WHERE workspace_id = :workspaceId")
                 .param("workspaceId", workspaceId)
                 .query(UUID.class)
                 .single();
 
-        String state = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
         STRIPE_STUB.respondToToken(
                 200,
                 """
                 {"stripe_user_id":"acct_reauth","scope":"read_only","livemode":false,"token_type":"bearer"}""");
 
-        mockMvc.perform(callbackRequestBuilder(state, "ac_reauth", "read_only", null))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.stripeAccountId").value("acct_reauth"))
-                .andExpect(jsonPath("$.status").value("ACTIVE"));
+        int tokenCallsBeforeCallback = STRIPE_STUB.tokenRequests.size();
+        mockMvc.perform(callbackRequestBuilder(staleState, "ac_reauth", "read_only", null))
+                .andExpect(status().isConflict());
+        assertThat(STRIPE_STUB.tokenRequests).hasSize(tokenCallsBeforeCallback);
 
-        assertThat(jdbc.sql("SELECT COUNT(*) FROM stripe_connections WHERE workspace_id = :workspaceId")
-                        .param("workspaceId", workspaceId)
-                        .query(Integer.class)
-                        .single())
-                .isOne();
-        UUID secondId = jdbc.sql("SELECT id FROM stripe_connections WHERE workspace_id = :workspaceId")
+        UUID unchangedId = jdbc.sql("SELECT id FROM stripe_connections WHERE workspace_id = :workspaceId")
                 .param("workspaceId", workspaceId)
                 .query(UUID.class)
                 .single();
-        assertThat(secondId).isEqualTo(firstId);
+        assertThat(unchangedId).isEqualTo(firstId);
+
+        // Disconnecting first, then reauthorizing the same account, succeeds.
+        mockMvc.perform(delete("/api/workspaces/{id}/stripe-connection", workspaceId).with(token(ALICE)))
+                .andExpect(status().isOk());
+        String secondState = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
+        mockMvc.perform(callbackRequestBuilder(secondState, "ac_reauth_2", "read_only", null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stripeAccountId").value("acct_reauth"))
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+    }
+
+    @Test
+    void revokedConnectionMayBeReplacedByANewAuthorization() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        String firstState = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
+        STRIPE_STUB.respondToToken(
+                200,
+                """
+                {"stripe_user_id":"acct_will_be_revoked","scope":"read_only","livemode":false,"token_type":"bearer"}""");
+        STRIPE_STUB.respondToAccount(401, "{\"error\":{\"type\":\"invalid_request_error\"}}");
+        mockMvc.perform(callbackRequestBuilder(firstState, "ac_will_be_revoked", "read_only", null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REVOKED"));
+
+        // REVOKED is not "live", so a fresh authorization is allowed straight through, same as DISCONNECTED.
+        STRIPE_STUB.respondToAccount(200, "{\"id\":\"acct_after_revoke\"}");
+        String secondState = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
+        STRIPE_STUB.respondToToken(
+                200,
+                """
+                {"stripe_user_id":"acct_after_revoke","scope":"read_only","livemode":false,"token_type":"bearer"}""");
+        mockMvc.perform(callbackRequestBuilder(secondState, "ac_after_revoke", "read_only", null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stripeAccountId").value("acct_after_revoke"))
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+    }
+
+    @Test
+    void stripeAccountAlreadyLinkedToAnotherWorkspaceReturnsConflictAndLeavesOriginalUnchanged() throws Exception {
+        UUID workspaceA = createWorkspace(ALICE);
+        UUID workspaceB = createWorkspace(BOB);
+        connectSuccessfully(workspaceA, ALICE, StripeConnectionMode.TEST, "acct_shared", false);
+
+        String state = startOauth(workspaceB, BOB, StripeConnectionMode.TEST);
+        STRIPE_STUB.respondToToken(
+                200,
+                """
+                {"stripe_user_id":"acct_shared","scope":"read_only","livemode":false,"token_type":"bearer"}""");
+
+        mockMvc.perform(callbackRequestBuilder(state, "ac_shared_conflict", "read_only", null))
+                .andExpect(status().isConflict());
+
+        mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceA).with(token(ALICE)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stripeAccountId").value("acct_shared"))
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+        mockMvc.perform(get("/api/workspaces/{id}/stripe-connection", workspaceB).with(token(BOB)))
+                .andExpect(status().isNotFound());
+        // The other workspace's connection is never touched, let alone deauthorized, to "free" the account.
+        assertThat(STRIPE_STUB.deauthorizeRequests).isEmpty();
+    }
+
+    @Test
+    void concurrentValidCallbacksForOneWorkspaceProduceExactlyOneExchangeAndOneConnection() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE);
+        String stateA = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
+        String stateB = startOauth(workspaceId, ALICE, StripeConnectionMode.TEST);
+        STRIPE_STUB.respondToToken(
+                200,
+                """
+                {"stripe_user_id":"acct_concurrent","scope":"read_only","livemode":false,"token_type":"bearer"}""");
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CyclicBarrier barrier = new CyclicBarrier(2);
+        try {
+            Callable<Integer> raceA = () -> raceCallback(barrier, stateA, "ac_race_a");
+            Callable<Integer> raceB = () -> raceCallback(barrier, stateB, "ac_race_b");
+            List<Future<Integer>> results = executor.invokeAll(List.of(raceA, raceB));
+            int statusA = results.get(0).get();
+            int statusB = results.get(1).get();
+
+            assertThat(List.of(statusA, statusB)).containsExactlyInAnyOrder(200, 409);
+
+            assertThat(STRIPE_STUB.tokenRequests).hasSize(1);
+            assertThat(jdbc.sql("SELECT COUNT(*) FROM stripe_connections WHERE workspace_id = :workspaceId")
+                            .param("workspaceId", workspaceId)
+                            .query(Integer.class)
+                            .single())
+                    .isOne();
+
+            // The losing callback's state was still consumed and cannot be replayed.
+            String loserState = statusA == 409 ? stateA : stateB;
+            mockMvc.perform(callbackRequestBuilder(loserState, "ac_replay_attempt", "read_only", null))
+                    .andExpect(status().isBadRequest());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private int raceCallback(CyclicBarrier barrier, String state, String code) throws Exception {
+        barrier.await();
+        return mockMvc.perform(callbackRequestBuilder(state, code, "read_only", null))
+                .andReturn()
+                .getResponse()
+                .getStatus();
     }
 
     @Test

@@ -1,10 +1,13 @@
 package com.mrrorigin.billing;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -22,24 +25,32 @@ import com.mrrorigin.workspace.WorkspaceContext;
 public class StripeConnectionService {
 
     private static final String REQUIRED_SCOPE = "read_only";
+    private static final List<StripeConnectionStatus> LIVE_STATUSES =
+            List.of(StripeConnectionStatus.PENDING, StripeConnectionStatus.ACTIVE);
+
+    /** Namespaces this service's Postgres advisory locks from any other feature that might add its own. */
+    private static final int ADVISORY_LOCK_NAMESPACE = 914_002;
 
     private final StripeConnectionRepository connections;
     private final StripeOauthStateService oauthStates;
     private final StripeConnectClient stripeClient;
     private final StripeConnectProperties properties;
     private final WorkspaceContext workspaceContext;
+    private final JdbcClient jdbc;
 
     public StripeConnectionService(
             StripeConnectionRepository connections,
             StripeOauthStateService oauthStates,
             StripeConnectClient stripeClient,
             StripeConnectProperties properties,
-            WorkspaceContext workspaceContext) {
+            WorkspaceContext workspaceContext,
+            JdbcClient jdbc) {
         this.connections = connections;
         this.oauthStates = oauthStates;
         this.stripeClient = stripeClient;
         this.properties = properties;
         this.workspaceContext = workspaceContext;
+        this.jdbc = jdbc;
     }
 
     @Transactional
@@ -49,6 +60,14 @@ public class StripeConnectionService {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE, "Stripe Connect is not configured for this mode");
         }
+        connections
+                .findByWorkspaceId(workspaceId)
+                .filter(StripeConnection::isLive)
+                .ifPresent(existing -> {
+                    throw new ResponseStatusException(
+                            HttpStatus.CONFLICT,
+                            "Workspace already has an active Stripe connection; disconnect it before authorizing again");
+                });
 
         String state = oauthStates.issue(workspaceId, workspaceContext.subjectId(), mode);
 
@@ -82,6 +101,23 @@ public class StripeConnectionService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Stripe granted an unexpected scope");
         }
 
+        // Stripe's token exchange itself completes the account connection (see the OAuth reference:
+        // re-consuming a code even revokes it), so the "is this workspace already connected" check
+        // must happen before that call, not after -- otherwise a rejected 409 could still leave the
+        // newly authorized Stripe account connected to us but untracked locally. The advisory lock is
+        // transaction-scoped and workspace-keyed: it serializes concurrent callbacks for the same
+        // workspace so exactly one of them can exchange the code, and it self-releases on commit or
+        // rollback without requiring a pre-existing row to lock.
+        lockWorkspaceForConnectionCallback(initiator.workspaceId());
+        StripeConnection existing = connections.findByWorkspaceId(initiator.workspaceId()).orElse(null);
+        if (existing != null && existing.isLive()) {
+            // The state stays consumed either way: this rejection cannot be retried by replaying the
+            // same callback, with the same or a different account.
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Workspace already has an active Stripe connection; disconnect it before authorizing again");
+        }
+
         StripeConnectClient.TokenExchangeResult exchanged;
         try {
             exchanged = stripeClient.exchangeAuthorizationCode(initiator.mode(), code);
@@ -98,10 +134,20 @@ public class StripeConnectionService {
                     HttpStatus.BAD_GATEWAY, "Stripe connection mode did not match the requested mode");
         }
 
-        StripeConnection connection = connections
-                .findByWorkspaceId(initiator.workspaceId())
-                .orElse(null);
-        if (connection == null) {
+        // The account may already be live on a different workspace (its own advisory lock was not
+        // held here, only ours). Check proactively for a clear 409 instead of an opaque constraint
+        // violation, and never deauthorize the other workspace's connection to "free up" the account.
+        Optional<StripeConnection> elsewhere =
+                connections.findByStripeAccountIdAndStatusIn(exchanged.stripeAccountId(), LIVE_STATUSES);
+        if (elsewhere.isPresent() && !elsewhere.get().workspaceId().equals(initiator.workspaceId())) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT, "This Stripe account is already connected to another workspace");
+        }
+
+        // existing is guaranteed non-live here (null, DISCONNECTED, or REVOKED); the live case was
+        // rejected above before the Stripe call.
+        StripeConnection connection;
+        if (existing == null) {
             connection = new StripeConnection(
                     UUID.randomUUID(),
                     initiator.workspaceId(),
@@ -109,26 +155,37 @@ public class StripeConnectionService {
                     initiator.mode(),
                     exchanged.scope());
         } else {
-            boolean sameAccountAndMode = connection.mode() == initiator.mode()
-                    && connection.stripeAccountId().equals(exchanged.stripeAccountId());
-            if (!sameAccountAndMode && connection.isLive()) {
-                // The state was already consumed above and stays consumed: this rejection cannot be
-                // retried by replaying the same callback with a corrected account.
-                throw new ResponseStatusException(
-                        HttpStatus.CONFLICT,
-                        "Workspace already has an active Stripe connection; disconnect it before connecting a different account");
+            boolean accountOrModeChanged = existing.mode() != initiator.mode()
+                    || !existing.stripeAccountId().equals(exchanged.stripeAccountId());
+            if (accountOrModeChanged) {
+                // The old backfill cursor belongs to a different Stripe account and must never be reused.
+                existing.clearSyncCheckpoint();
             }
-            if (!sameAccountAndMode) {
-                // Replacing a disconnected/revoked connection with a different account or mode: the
-                // old backfill cursor belongs to a different Stripe account and must never be reused.
-                connection.clearSyncCheckpoint();
-            }
-            connection.applyNewGrant(exchanged.stripeAccountId(), initiator.mode(), exchanged.scope());
+            existing.applyNewGrant(exchanged.stripeAccountId(), initiator.mode(), exchanged.scope());
+            connection = existing;
         }
 
         verifyAndUpdateStatus(connection);
-        connections.saveAndFlush(connection);
+        try {
+            connections.saveAndFlush(connection);
+        } catch (DataIntegrityViolationException raceLostToAnotherWorkspace) {
+            // Defense-in-depth backstop for the narrow window between the check above and this save.
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT, "This Stripe account is already connected to another workspace");
+        }
         return ConnectionOutcome.from(connection);
+    }
+
+    /**
+     * Blocks until this workspace's Postgres transaction-scoped advisory lock is free, then holds it
+     * for the rest of the current transaction (it is released automatically on commit or rollback).
+     */
+    private void lockWorkspaceForConnectionCallback(UUID workspaceId) {
+        jdbc.sql("SELECT 1 FROM (SELECT pg_advisory_xact_lock(:namespace, hashtext(:workspaceId))) AS lock_acquired")
+                .param("namespace", ADVISORY_LOCK_NAMESPACE)
+                .param("workspaceId", workspaceId.toString())
+                .query(Integer.class)
+                .single();
     }
 
     public ConnectionOutcome getConnection(UUID workspaceId) {
