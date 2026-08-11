@@ -9,32 +9,11 @@
 -- satisfy a constraint. Within a single object's own aggregate (a subscription and its items,
 -- always written together in one upsert), a real foreign key is used.
 --
--- Convergence: every row carries an ordering PAIR, compared as a Postgres row value --
--- `(source_version, source_sequence) <= (EXCLUDED.source_version, EXCLUDED.source_sequence)` --
--- so ties on the first component always fall back to a second, independently guaranteed-unique
--- component rather than silently colliding.
---
--- `source_version` is the coarse, human-meaningful ordering: the Stripe event's `created`
--- epoch-second (webhook) or the wall-clock second the backfill page request was issued (backfill),
--- each shifted left by a factor of 2,000,000 and combined with a sub-second component in the
--- low-order digits (a webhook's own receipt-time microseconds, always < 1,000,000; or a fixed
--- backfill sentinel of 1,000,000, so a backfill snapshot always wins a same-second tie against a
--- webhook event -- it reflects Stripe's true live state as of a strictly later instant).
---
--- `source_sequence` is the tie-breaker of last resort, for the case `source_version` alone cannot
--- distinguish: two webhook events with identical `created` AND identical receipt-time microsecond
--- (adversarial or coincidental, but not impossible). For webhook-origin rows this is
--- `stripe_webhook_events.ingest_sequence` -- a `GENERATED ALWAYS AS IDENTITY` column, so strictly
--- increasing and unique per row by construction, assigned once at insert and never touched again
--- (immutable, independent of whatever order the normalization worker later processes PENDING rows
--- in, so replaying the same stored events in any order still converges identically). Backfill-origin
--- rows use a constant 0: two backfill fetches of the same object always carry identical content
--- (both are "the current live state"), so their relative order never needs to be distinguished.
---
--- See BillingSourceVersion. Replays, retries, restarts, and interleaved backfill/webhook delivery
--- for the same object always converge on the most recent known state regardless of arrival or
--- processing order, and a same-(version,sequence) replay is a harmless no-op rewrite.
-ALTER TABLE stripe_webhook_events ADD COLUMN ingest_sequence BIGINT GENERATED ALWAYS AS IDENTITY;
+-- Convergence: every row carries an ordering pair. `source_version` is the provider epoch-second;
+-- `source_sequence` is a stable source key. Webhooks use their immutable Stripe event ID, never a
+-- locally assigned arrival sequence. A backfill issued during second S is conservatively ordered
+-- at the end of S-1: it is guaranteed to contain prior-second state but cannot claim to contain a
+-- webhook Stripe may create later during S. See BillingSourceVersion for the full contract.
 
 CREATE TABLE billing_customers (
     id UUID PRIMARY KEY,
@@ -45,7 +24,7 @@ CREATE TABLE billing_customers (
     provider_created_at TIMESTAMPTZ NOT NULL,
     source VARCHAR(16) NOT NULL,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_customers_workspace_stripe_id UNIQUE (workspace_id, stripe_customer_id),
@@ -68,7 +47,7 @@ CREATE TABLE billing_prices (
     active BOOLEAN NOT NULL,
     source VARCHAR(16) NOT NULL,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_prices_workspace_stripe_id UNIQUE (workspace_id, stripe_price_id),
@@ -98,7 +77,7 @@ CREATE TABLE billing_subscriptions (
     collection_method VARCHAR(32),
     source VARCHAR(16) NOT NULL,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_subscriptions_workspace_stripe_id UNIQUE (workspace_id, stripe_subscription_id),
@@ -122,7 +101,7 @@ CREATE TABLE billing_subscription_items (
     stripe_price_id VARCHAR(255) NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_subscription_items_workspace_stripe_id UNIQUE (workspace_id, stripe_subscription_item_id),
@@ -147,7 +126,7 @@ CREATE TABLE billing_subscription_status_events (
     new_status VARCHAR(24) NOT NULL,
     source VARCHAR(16) NOT NULL,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_subscription_status_events_version
         UNIQUE (workspace_id, stripe_subscription_id, source_version, source_sequence),
@@ -175,7 +154,7 @@ CREATE TABLE billing_invoices (
     provider_created_at TIMESTAMPTZ NOT NULL,
     source VARCHAR(16) NOT NULL,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_invoices_workspace_stripe_id UNIQUE (workspace_id, stripe_invoice_id),
@@ -205,7 +184,7 @@ CREATE TABLE billing_payments (
     provider_created_at TIMESTAMPTZ NOT NULL,
     source VARCHAR(16) NOT NULL,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_payments_workspace_stripe_id UNIQUE (workspace_id, stripe_charge_id),
@@ -229,7 +208,7 @@ CREATE TABLE billing_refunds (
     provider_created_at TIMESTAMPTZ NOT NULL,
     source VARCHAR(16) NOT NULL,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_refunds_workspace_stripe_id UNIQUE (workspace_id, stripe_refund_id),
@@ -261,7 +240,7 @@ CREATE TABLE billing_discounts (
     deleted BOOLEAN NOT NULL DEFAULT FALSE,
     source VARCHAR(16) NOT NULL,
     source_version BIGINT NOT NULL,
-    source_sequence BIGINT NOT NULL DEFAULT 0,
+    source_sequence VARCHAR(512) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_billing_discounts_workspace_stripe_id UNIQUE (workspace_id, stripe_discount_id),

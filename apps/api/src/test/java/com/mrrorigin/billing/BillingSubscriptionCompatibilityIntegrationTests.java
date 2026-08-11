@@ -213,9 +213,11 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
 
         String fullyExpandedDiscount =
                 BillingFixtures.discount("di_pending_expansion", null, "sub_unexpanded", "coupon_live_fetch", 42L, null, null, T, null);
+        // The live object has already moved on. It may enrich the bare discount ID, but none of
+        // these current status/period/item values may replace the immutable webhook snapshot.
         String fullyExpandedSubscription = BillingFixtures.subscription(
-                "sub_unexpanded", "cus_unexpanded", "active", "usd", T, T + 2_592_000L, false, null, null,
-                BillingFixtures.subscriptionItem("si_unexpanded", "price_x", 1), fullyExpandedDiscount);
+                "sub_unexpanded", "cus_unexpanded", "canceled", "usd", T + 300, T + 600, false, T + 400, T + 400,
+                BillingFixtures.subscriptionItem("si_unexpanded", "price_x", 9), fullyExpandedDiscount);
         STRIPE_LIST_STUB.seedSingleSubscription("sub_unexpanded", fullyExpandedSubscription);
 
         insertPendingWebhookEvent(
@@ -228,6 +230,8 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
         Map<String, Object> discount = discountSnapshot(workspaceId, "di_pending_expansion").orElseThrow();
         assertThat(discount).containsEntry("stripe_coupon_id", "coupon_live_fetch");
         assertThat(((Number) discount.get("percent_off")).intValue()).isEqualTo(42);
+        assertThat(subscriptionSnapshot(workspaceId, "sub_unexpanded").orElseThrow()).containsEntry("status", "active");
+        assertThat(subscriptionItemSnapshots(workspaceId, "sub_unexpanded").getFirst()).containsEntry("quantity", 1);
 
         StripeBillingListApiStub.RecordedRequest fallbackRequest = STRIPE_LIST_STUB.requests.stream()
                 .filter(request -> request.path().equals("/v1/subscriptions/sub_unexpanded"))
@@ -235,5 +239,30 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
                 .orElseThrow();
         assertThat(fallbackRequest.query()).contains("expand[]=discounts");
         assertThat(fallbackRequest.query()).contains("expand[]=items.data.discounts");
+    }
+
+    @Test
+    void unresolvedBareDiscountFailsVisiblyInsteadOfApplyingPartialSubscriptionState() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_missing_discount", StripeConnectionMode.TEST);
+        String webhookSubscription = BillingFixtures.subscription(
+                "sub_missing_discount", "cus_missing_discount", "active", "usd", T, T + 2_592_000L, false, null, null,
+                BillingFixtures.subscriptionItem("si_missing_discount", "price_x", 1), "\"di_no_longer_available\"");
+        String liveSubscription = BillingFixtures.subscription(
+                "sub_missing_discount", "cus_missing_discount", "canceled", "usd", T + 300, T + 600, false, null, null,
+                BillingFixtures.subscriptionItem("si_missing_discount", "price_x", 9), null);
+        STRIPE_LIST_STUB.seedSingleSubscription("sub_missing_discount", liveSubscription);
+
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_missing_discount", "customer.subscription.updated",
+                Instant.ofEpochSecond(T), webhookSubscription);
+
+        StripeWebhookNormalizationService.NormalizationRunOutcome outcome = normalizationService.processBatch(1);
+        assertThat(outcome.failed()).isEqualTo(1);
+        assertThat(subscriptionSnapshot(workspaceId, "sub_missing_discount")).isEmpty();
+        assertThat(jdbc().sql("SELECT processing_state FROM stripe_webhook_events WHERE stripe_event_id = 'evt_missing_discount'")
+                        .query(String.class)
+                        .single())
+                .isEqualTo("FAILED");
     }
 }

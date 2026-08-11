@@ -294,7 +294,7 @@ abstract class AbstractBillingLedgerIntegrationTest {
                         """
                         SELECT new_status FROM billing_subscription_status_events
                         WHERE workspace_id = :w AND stripe_subscription_id = :id
-                        ORDER BY source_version, created_at
+                        ORDER BY source_version, source_sequence
                         """)
                 .param("w", workspaceId)
                 .param("id", stripeSubscriptionId)

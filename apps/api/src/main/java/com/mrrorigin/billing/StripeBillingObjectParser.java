@@ -99,7 +99,7 @@ final class StripeBillingObjectParser {
      * resolving any remaining pages via {@code StripeSubscriptionItemsResolver}.
      */
     static ParsedSubscription parseSubscription(JsonNode subscription) {
-        return parseSubscription(subscription, List.of());
+        return parseSubscription(subscription, List.of(), null);
     }
 
     /**
@@ -110,9 +110,19 @@ final class StripeBillingObjectParser {
      *     from a truncated one once merged.
      */
     static ParsedSubscription parseSubscription(JsonNode subscription, List<JsonNode> supplementalItemNodes) {
+        return parseSubscription(subscription, supplementalItemNodes, null);
+    }
+
+    /**
+     * Parses the subscription fields from the immutable source snapshot while optionally resolving
+     * bare discount IDs from a separately fetched expanded representation. The enrichment object
+     * is never used for status, periods, item price/quantity, or any other historical field.
+     */
+    static ParsedSubscription parseSubscription(
+            JsonNode subscription, List<JsonNode> supplementalItemNodes, JsonNode discountEnrichment) {
         List<ParsedSubscriptionItem> items = new ArrayList<>();
         for (JsonNode item : embeddedItemNodes(subscription)) {
-            items.add(parseSubscriptionItem(item));
+            items.add(parseSubscriptionItem(item, matchingEnrichmentItem(discountEnrichment, requiredText(item, "id"))));
         }
         for (JsonNode item : supplementalItemNodes) {
             items.add(parseSubscriptionItem(item));
@@ -132,7 +142,10 @@ final class StripeBillingObjectParser {
                 optionalEpoch(subscription, "trial_end"),
                 optionalText(subscription, "collection_method"),
                 List.copyOf(items),
-                parseDiscountsArray(subscription.get("discounts"), null));
+                parseDiscountsArray(
+                        subscription.get("discounts"),
+                        null,
+                        discountEnrichment == null ? null : discountEnrichment.get("discounts")));
     }
 
     /** The subscription's embedded {@code items.data} page, as delivered (possibly partial). */
@@ -166,12 +179,22 @@ final class StripeBillingObjectParser {
     }
 
     static ParsedSubscriptionItem parseSubscriptionItem(JsonNode item) {
+        return parseSubscriptionItem(item, null);
+    }
+
+    private static ParsedSubscriptionItem parseSubscriptionItem(JsonNode item, JsonNode discountEnrichmentItem) {
         JsonNode price = item.get("price");
         String priceId =
                 price != null && price.isTextual() ? price.textValue() : requiredText(price, "id");
         String itemId = requiredText(item, "id");
         return new ParsedSubscriptionItem(
-                itemId, priceId, (int) optionalLong(item, "quantity", 1), parseDiscountsArray(item.get("discounts"), itemId));
+                itemId,
+                priceId,
+                (int) optionalLong(item, "quantity", 1),
+                parseDiscountsArray(
+                        item.get("discounts"),
+                        itemId,
+                        discountEnrichmentItem == null ? null : discountEnrichmentItem.get("discounts")));
     }
 
     static ParsedInvoice parseInvoice(JsonNode invoice) {
@@ -235,15 +258,16 @@ final class StripeBillingObjectParser {
      * A {@code discounts} array field (subscriptions, and subscription items). Per
      * https://docs.stripe.com/api/subscriptions/object this is expandable: without expansion, an
      * entry is just a coupon/discount ID string, which cannot be safely normalized without its
-     * full data. Such entries are skipped, not guessed -- callers that control the request should
-     * request expansion; a discount that never arrives expanded simply stays unnormalized rather
-     * than corrupting the rest of the subscription/event.
+     * full data. Callers that control the request should request expansion. Webhook callers may
+     * provide an expanded live representation used only to resolve matching discount IDs; no
+     * other field is read from that enrichment snapshot.
      *
      * @param ownerSubscriptionItemId non-null when parsing an item's own {@code discounts} field,
      *     attributing every entry to that subscription item regardless of what (if anything) the
      *     entry itself says about its owner.
      */
-    private static List<ParsedDiscount> parseDiscountsArray(JsonNode discounts, String ownerSubscriptionItemId) {
+    private static List<ParsedDiscount> parseDiscountsArray(
+            JsonNode discounts, String ownerSubscriptionItemId, JsonNode expandedDiscounts) {
         if (discounts == null || discounts.isNull()) {
             return List.of();
         }
@@ -252,12 +276,45 @@ final class StripeBillingObjectParser {
         }
         List<ParsedDiscount> result = new ArrayList<>();
         for (JsonNode discount : discounts) {
-            if (discount == null || discount.isNull() || !discount.isObject()) {
+            if (discount == null || discount.isNull()) {
                 continue;
             }
-            result.add(parseDiscount(discount, false, ownerSubscriptionItemId));
+            JsonNode resolved = discount;
+            if (discount.isTextual()) {
+                resolved = findExpandedDiscount(expandedDiscounts, discount.textValue());
+                if (resolved == null) {
+                    throw new StripeBillingNormalizationException(
+                            "Stripe discount could not be resolved from expanded subscription: " + discount.textValue());
+                }
+            }
+            if (resolved != null && resolved.isObject()) {
+                result.add(parseDiscount(resolved, false, ownerSubscriptionItemId));
+            }
         }
         return List.copyOf(result);
+    }
+
+    private static JsonNode matchingEnrichmentItem(JsonNode enrichmentSubscription, String itemId) {
+        for (JsonNode candidate : embeddedItemNodes(enrichmentSubscription)) {
+            JsonNode candidateId = candidate.get("id");
+            if (candidateId != null && candidateId.isTextual() && itemId.equals(candidateId.textValue())) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static JsonNode findExpandedDiscount(JsonNode expandedDiscounts, String discountId) {
+        if (expandedDiscounts == null || !expandedDiscounts.isArray()) {
+            return null;
+        }
+        for (JsonNode candidate : expandedDiscounts) {
+            JsonNode candidateId = candidate == null ? null : candidate.get("id");
+            if (candidateId != null && candidateId.isTextual() && discountId.equals(candidateId.textValue())) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private static ParsedDiscount parseDiscount(JsonNode discount, boolean deleted, String ownerSubscriptionItemId) {

@@ -69,8 +69,8 @@ class BillingLedgerStructuralIsolationIntegrationTests extends AbstractBillingLe
                         """
                         INSERT INTO billing_subscriptions
                             (id, workspace_id, stripe_subscription_id, stripe_customer_id, status, currency,
-                             source, source_version, updated_at)
-                        VALUES (:id, :workspaceId, :stripeSubscriptionId, 'cus_x', 'active', 'usd', 'BACKFILL', 1, :now)
+                             source, source_version, source_sequence, updated_at)
+                        VALUES (:id, :workspaceId, :stripeSubscriptionId, 'cus_x', 'active', 'usd', 'BACKFILL', 1, 'test', :now)
                         """)
                 .param("id", id)
                 .param("workspaceId", workspaceId)
@@ -85,8 +85,8 @@ class BillingLedgerStructuralIsolationIntegrationTests extends AbstractBillingLe
                         """
                         INSERT INTO billing_subscription_items
                             (id, workspace_id, subscription_id, stripe_subscription_item_id, stripe_price_id,
-                             quantity, source_version, updated_at)
-                        VALUES (:id, :workspaceId, :subscriptionId, :stripeItemId, 'price_x', 1, 1, :now)
+                             quantity, source_version, source_sequence, updated_at)
+                        VALUES (:id, :workspaceId, :subscriptionId, :stripeItemId, 'price_x', 1, 1, 'test', :now)
                         """)
                 .param("id", UUID.randomUUID())
                 .param("workspaceId", workspaceId)
@@ -101,8 +101,8 @@ class BillingLedgerStructuralIsolationIntegrationTests extends AbstractBillingLe
                         """
                         INSERT INTO billing_subscription_status_events
                             (id, workspace_id, subscription_id, stripe_subscription_id, previous_status, new_status,
-                             source, source_version)
-                        VALUES (:id, :workspaceId, :subscriptionId, :stripeSubscriptionId, NULL, 'active', 'BACKFILL', :sourceVersion)
+                             source, source_version, source_sequence)
+                        VALUES (:id, :workspaceId, :subscriptionId, :stripeSubscriptionId, NULL, 'active', 'BACKFILL', :sourceVersion, 'test')
                         """)
                 .param("id", UUID.randomUUID())
                 .param("workspaceId", workspaceId)

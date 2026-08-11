@@ -35,8 +35,7 @@ import com.mrrorigin.billing.BillingSourceVersion.SourceVersion;
  *       an {@code UPDATE ... FROM} in the same statement stamps a fresh lease ({@code
  *       last_attempted_at}, {@code attempt_count}) before the transaction commits and every lock
  *       releases. {@code processing_state} itself stays PENDING throughout -- no new state, no V5
- *       schema change -- the lease is what stops a second caller from re-claiming the same row
- *       while this one is still working it.
+ *       schema change -- the lease normally stops a second caller from re-claiming the same row.
  *   <li>{@link #prepareNormalization} -- no transaction at all. Parses the event and performs
  *       whatever Stripe API calls completing it requires (paginated subscription items, or a
  *       fully-expanded re-fetch when discounts arrived unexpanded), returning a pure-DB closure to
@@ -45,9 +44,10 @@ import com.mrrorigin.billing.BillingSourceVersion.SourceVersion;
  *       write and marking the row PROCESSED commit atomically together.
  * </ol>
  *
- * <p>If the process crashes between phases, the row is simply left leased; once the lease expires
- * (see {@link #LEASE_DURATION}) another call to {@code processBatch} reclaims and reprocesses it
- * from scratch -- safe, since every ledger upsert is idempotent.
+ * <p>Apply and failure writes are fenced by the exact claimed {@code last_attempted_at} value. If
+ * work exceeds the lease and another worker reclaims the row, the stale worker cannot execute its
+ * ledger action or overwrite the newer worker's PROCESSED/FAILED outcome. A crash between phases
+ * simply leaves the row leased until it can be reclaimed and safely reprocessed from scratch.
  */
 @Service
 class StripeWebhookNormalizationService {
@@ -58,6 +58,7 @@ class StripeWebhookNormalizationService {
      * a crash mid-event simply costs waiting out the rest of this window before retry.
      */
     private static final Duration LEASE_DURATION = Duration.ofMinutes(5);
+    private static final int MAX_BATCH_SIZE = 100;
 
     /** Event types #12 normalizes; every other type is acknowledged (PROCESSED) with no ledger effect. */
     private static final Set<String> CUSTOMER_EVENTS = Set.of("customer.created", "customer.updated", "customer.deleted");
@@ -112,21 +113,28 @@ class StripeWebhookNormalizationService {
                 // database transaction and after the claim transaction has already committed --
                 // only the resulting pure-DB action runs inside applyAndMarkProcessed below.
                 BooleanSupplier action = prepareNormalization(event);
-                boolean handled = applyAndMarkProcessed(event.id(), action);
-                if (handled) {
-                    processed++;
-                } else {
-                    skipped++;
+                ApplyOutcome outcome = applyAndMarkProcessed(event, action);
+                switch (outcome) {
+                    case PROCESSED -> processed++;
+                    case SKIPPED, LEASE_LOST -> skipped++;
                 }
             } catch (RuntimeException failure) {
-                markFailed(event.id(), failure.getMessage());
-                failed++;
+                if (markFailed(event, failure.getMessage())) {
+                    failed++;
+                } else {
+                    // A newer worker reclaimed or completed this row after our lease expired. The
+                    // stale worker must not overwrite that newer outcome with FAILED.
+                    skipped++;
+                }
             }
         }
         return new NormalizationRunOutcome(claimed.size(), processed, skipped, failed);
     }
 
-    private List<PendingEvent> claimBatch(int batchSize) {
+    List<PendingEvent> claimBatch(int batchSize) {
+        if (batchSize <= 0 || batchSize > MAX_BATCH_SIZE) {
+            throw new IllegalArgumentException("batchSize must be between 1 and " + MAX_BATCH_SIZE);
+        }
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         OffsetDateTime leaseCutoff = now.minus(LEASE_DURATION);
         List<PendingEvent> claimed = transactionTemplate.execute(status -> jdbc.sql(
@@ -144,15 +152,16 @@ class StripeWebhookNormalizationService {
                             SET last_attempted_at = :now, attempt_count = attempt_count + 1, updated_at = :now
                             FROM claimable
                             WHERE swe.id = claimable.id
-                            RETURNING swe.id, swe.workspace_id, swe.event_type, swe.payload,
-                                      swe.stripe_created_at, swe.received_at, swe.ingest_sequence,
-                                      swe.connection_id
+                            RETURNING swe.id, swe.workspace_id, swe.stripe_event_id, swe.event_type,
+                                      swe.payload, swe.stripe_created_at, swe.received_at,
+                                      swe.last_attempted_at, swe.connection_id
                         )
                         SELECT claimed.id AS id, claimed.workspace_id AS workspace_id,
                                claimed.event_type AS event_type, claimed.payload AS payload,
+                               claimed.stripe_event_id AS stripe_event_id,
                                claimed.stripe_created_at AS stripe_created_at,
                                claimed.received_at AS received_at,
-                               claimed.ingest_sequence AS ingest_sequence,
+                               claimed.last_attempted_at AS claimed_at,
                                sc.mode AS connection_mode, sc.stripe_account_id AS stripe_account_id
                         FROM claimed JOIN stripe_connections sc ON sc.id = claimed.connection_id
                         """)
@@ -162,23 +171,42 @@ class StripeWebhookNormalizationService {
                 .query((rs, rowNum) -> new PendingEvent(
                         UUID.fromString(rs.getString("id")),
                         UUID.fromString(rs.getString("workspace_id")),
+                        rs.getString("stripe_event_id"),
                         rs.getString("event_type"),
                         rs.getString("payload"),
                         rs.getObject("stripe_created_at", OffsetDateTime.class),
                         rs.getObject("received_at", OffsetDateTime.class),
-                        rs.getLong("ingest_sequence"),
+                        rs.getObject("claimed_at", OffsetDateTime.class),
                         StripeConnectionMode.valueOf(rs.getString("connection_mode")),
                         rs.getString("stripe_account_id")))
                 .list());
         return claimed == null ? List.of() : claimed;
     }
 
-    private boolean applyAndMarkProcessed(UUID eventId, BooleanSupplier action) {
-        return Boolean.TRUE.equals(transactionTemplate.execute(status -> {
+    ApplyOutcome applyAndMarkProcessed(PendingEvent event, BooleanSupplier action) {
+        ApplyOutcome outcome = transactionTemplate.execute(status -> {
+            if (!lockOwnedLease(event)) {
+                return ApplyOutcome.LEASE_LOST;
+            }
             boolean handled = action.getAsBoolean();
-            markProcessed(eventId);
-            return handled;
-        }));
+            markProcessed(event);
+            return handled ? ApplyOutcome.PROCESSED : ApplyOutcome.SKIPPED;
+        });
+        return outcome == null ? ApplyOutcome.LEASE_LOST : outcome;
+    }
+
+    private boolean lockOwnedLease(PendingEvent event) {
+        return jdbc.sql(
+                        """
+                        SELECT 1 FROM stripe_webhook_events
+                        WHERE id = :id AND processing_state = 'PENDING' AND last_attempted_at = :claimedAt
+                        FOR UPDATE
+                        """)
+                .param("id", event.id())
+                .param("claimedAt", event.claimedAt())
+                .query(Integer.class)
+                .optional()
+                .isPresent();
     }
 
     private BooleanSupplier prepareNormalization(PendingEvent event) {
@@ -189,8 +217,7 @@ class StripeWebhookNormalizationService {
             throw new StripeBillingNormalizationException("Stripe webhook event payload has no data.object");
         }
 
-        SourceVersion sourceVersion =
-                BillingSourceVersion.forWebhookEvent(event.stripeCreatedAt(), event.receivedAt(), event.ingestSequence());
+        SourceVersion sourceVersion = BillingSourceVersion.forWebhookEvent(event.stripeCreatedAt(), event.stripeEventId());
         UUID workspaceId = event.workspaceId();
         String type = event.eventType();
 
@@ -209,18 +236,18 @@ class StripeWebhookNormalizationService {
             };
         }
         if (SUBSCRIPTION_EVENTS.contains(type)) {
-            JsonNode subscriptionNode = dataObject;
-            if (StripeBillingObjectParser.hasUnexpandedDiscounts(subscriptionNode)) {
+            JsonNode discountEnrichment = null;
+            if (StripeBillingObjectParser.hasUnexpandedDiscounts(dataObject)) {
                 // Webhooks cannot be delivered with expand[] applied, so a push-delivered discount
-                // reference can arrive as a bare ID. Rather than silently normalizing a partial
-                // discount set, fetch the subscription's current, fully-expanded representation
-                // directly and use that as the authoritative source for this event instead.
-                subscriptionNode = stripeClient.getSubscription(
-                        event.connectionMode(), event.stripeAccountId(), StripeBillingObjectParser.subscriptionId(subscriptionNode));
+                // reference can arrive as a bare ID. Fetch current expanded discount objects only
+                // as enrichment; the event's own status, periods, items, and quantities remain the
+                // authoritative historical snapshot and are never replaced by today's state.
+                discountEnrichment = stripeClient.getSubscription(
+                        event.connectionMode(), event.stripeAccountId(), StripeBillingObjectParser.subscriptionId(dataObject));
             }
             List<JsonNode> supplementalItems =
-                    subscriptionItemsResolver.resolveSupplementalItems(event.connectionMode(), event.stripeAccountId(), subscriptionNode);
-            var parsed = StripeBillingObjectParser.parseSubscription(subscriptionNode, supplementalItems);
+                    subscriptionItemsResolver.resolveSupplementalItems(event.connectionMode(), event.stripeAccountId(), dataObject);
+            var parsed = StripeBillingObjectParser.parseSubscription(dataObject, supplementalItems, discountEnrichment);
             return () -> {
                 ledger.upsertSubscription(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
                 return true;
@@ -265,43 +292,56 @@ class StripeWebhookNormalizationService {
     }
 
     /** Attempt/lease bookkeeping (attempt_count, last_attempted_at) was already stamped at claim time. */
-    private void markProcessed(UUID eventId) {
+    private void markProcessed(PendingEvent event) {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        jdbc.sql(
+        int updated = jdbc.sql(
                         """
                         UPDATE stripe_webhook_events
                         SET processing_state = 'PROCESSED', last_error = NULL, updated_at = :now
-                        WHERE id = :id
+                        WHERE id = :id AND processing_state = 'PENDING' AND last_attempted_at = :claimedAt
                         """)
-                .param("id", eventId)
+                .param("id", event.id())
+                .param("claimedAt", event.claimedAt())
                 .param("now", now)
                 .update();
+        if (updated != 1) {
+            throw new IllegalStateException("Webhook normalization lease was lost before completion");
+        }
     }
 
-    private void markFailed(UUID eventId, String error) {
+    boolean markFailed(PendingEvent event, String error) {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        jdbc.sql(
+        return jdbc.sql(
                         """
                         UPDATE stripe_webhook_events
                         SET processing_state = 'FAILED', last_error = :error, updated_at = :now
-                        WHERE id = :id
+                        WHERE id = :id AND processing_state = 'PENDING' AND last_attempted_at = :claimedAt
                         """)
-                .param("id", eventId)
+                .param("id", event.id())
+                .param("claimedAt", event.claimedAt())
                 .param("now", now)
                 .param("error", error)
-                .update();
+                .update()
+                == 1;
     }
 
-    private record PendingEvent(
+    record PendingEvent(
             UUID id,
             UUID workspaceId,
+            String stripeEventId,
             String eventType,
             String payload,
             OffsetDateTime stripeCreatedAt,
             OffsetDateTime receivedAt,
-            long ingestSequence,
+            OffsetDateTime claimedAt,
             StripeConnectionMode connectionMode,
             String stripeAccountId) {}
+
+    enum ApplyOutcome {
+        PROCESSED,
+        SKIPPED,
+        LEASE_LOST
+    }
 
     record NormalizationRunOutcome(int fetched, int processed, int skipped, int failed) {}
 }

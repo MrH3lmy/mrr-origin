@@ -11,6 +11,7 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -85,6 +86,45 @@ class BillingLedgerConcurrencyAndIsolationIntegrationTests extends AbstractBilli
                         .query(Integer.class)
                         .single())
                 .isZero();
+    }
+
+    @Test
+    void expiredWorkerCannotApplyOrFailAnEventAfterAnotherWorkerReclaimsIt() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_lease_fence", StripeConnectionMode.TEST);
+        Instant createdAt = Instant.parse("2026-03-01T00:00:00Z");
+        insertPendingWebhookEvent(
+                connectionId,
+                workspaceId,
+                StripeConnectionMode.TEST,
+                "evt_lease_fence",
+                "customer.created",
+                createdAt,
+                BillingFixtures.customer("cus_lease_fence", "usd", createdAt.getEpochSecond(), false, null));
+
+        StripeWebhookNormalizationService.PendingEvent staleLease = normalizationService.claimBatch(1).getFirst();
+        jdbc().sql(
+                        "UPDATE stripe_webhook_events SET last_attempted_at = last_attempted_at - INTERVAL '10 minutes' WHERE id = :id")
+                .param("id", staleLease.id())
+                .update();
+        StripeWebhookNormalizationService.PendingEvent currentLease = normalizationService.claimBatch(1).getFirst();
+
+        AtomicBoolean staleActionRan = new AtomicBoolean();
+        assertThat(normalizationService.applyAndMarkProcessed(staleLease, () -> {
+                    staleActionRan.set(true);
+                    return true;
+                }))
+                .isEqualTo(StripeWebhookNormalizationService.ApplyOutcome.LEASE_LOST);
+        assertThat(staleActionRan).isFalse();
+
+        assertThat(normalizationService.applyAndMarkProcessed(currentLease, () -> true))
+                .isEqualTo(StripeWebhookNormalizationService.ApplyOutcome.PROCESSED);
+        assertThat(normalizationService.markFailed(staleLease, "late failure from expired worker")).isFalse();
+        assertThat(jdbc().sql("SELECT processing_state FROM stripe_webhook_events WHERE id = :id")
+                        .param("id", staleLease.id())
+                        .query(String.class)
+                        .single())
+                .isEqualTo("PROCESSED");
     }
 
     @Test
