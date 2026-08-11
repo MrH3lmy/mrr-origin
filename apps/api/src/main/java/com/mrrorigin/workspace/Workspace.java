@@ -22,7 +22,7 @@ public class Workspace {
     @Column(nullable = false, unique = true, length = 80)
     private String slug;
 
-    @Column(name = "reporting_currency", nullable = false, length = 3)
+    @Column(name = "reporting_currency", nullable = false, length = 3, columnDefinition = "char(3)")
     private String reportingCurrency;
 
     @Column(name = "created_at", nullable = false, updatable = false)
