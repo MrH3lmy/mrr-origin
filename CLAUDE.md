@@ -1,6 +1,6 @@
 # Claude collaboration guide
 
-Follow `AGENTS.md` for repository-wide engineering rules. Before accepting a task, also read `PRODUCT.md`, `ARCHITECTURE.md`, `ROADMAP.md`, and the complete GitHub issue.
+Follow `AGENTS.md` for repository-wide engineering rules and required reading. Before accepting a task, also read the complete GitHub issue.
 
 ## Working agreement
 
