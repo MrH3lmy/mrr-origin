@@ -1,0 +1,421 @@
+{
+  "policyVersion": "mrr-v1",
+  "currency": "USD",
+  "snapshotCases": [
+    {
+      "id": "trial-is-zero",
+      "periodAmount": 12000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "trialing",
+      "expectedMrr": 0
+    },
+    {
+      "id": "incomplete-is-zero",
+      "periodAmount": 12000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "incomplete",
+      "expectedMrr": 0
+    },
+    {
+      "id": "incomplete-expired-is-zero",
+      "periodAmount": 12000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "incomplete_expired",
+      "expectedMrr": 0
+    },
+    {
+      "id": "monthly-quantity",
+      "periodAmount": 2500,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 3,
+      "state": "active",
+      "expectedMrr": 7500
+    },
+    {
+      "id": "multi-month",
+      "periodAmount": 3000,
+      "interval": "month",
+      "intervalCount": 3,
+      "quantity": 1,
+      "state": "active",
+      "expectedMrr": 1000
+    },
+    {
+      "id": "annual-round-half-up",
+      "periodAmount": 10000,
+      "interval": "year",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "active",
+      "expectedMrr": 833
+    },
+    {
+      "id": "multi-year",
+      "periodAmount": 24000,
+      "interval": "year",
+      "intervalCount": 2,
+      "quantity": 1,
+      "state": "active",
+      "expectedMrr": 1000
+    },
+    {
+      "id": "percent-discount",
+      "periodAmount": 12000,
+      "interval": "year",
+      "intervalCount": 1,
+      "quantity": 2,
+      "discountPercent": 25,
+      "state": "active",
+      "expectedMrr": 1500
+    },
+    {
+      "id": "fixed-discount-clamped",
+      "periodAmount": 1000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "discountAmount": 1500,
+      "state": "active",
+      "expectedMrr": 0
+    },
+    {
+      "id": "past-due-retained",
+      "periodAmount": 5000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "past_due",
+      "expectedMrr": 5000
+    },
+    {
+      "id": "unpaid-is-zero",
+      "periodAmount": 5000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "unpaid",
+      "expectedMrr": 0
+    },
+    {
+      "id": "paused-is-zero",
+      "periodAmount": 5000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "paused",
+      "expectedMrr": 0
+    },
+    {
+      "id": "pause-collection-retains-mrr",
+      "periodAmount": 5000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "active",
+      "pauseCollection": true,
+      "expectedMrr": 5000
+    },
+    {
+      "id": "canceled-is-zero",
+      "periodAmount": 5000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "canceled",
+      "expectedMrr": 0
+    },
+    {
+      "id": "multi-item-round-once",
+      "items": [
+        {
+          "periodAmount": 1000,
+          "interval": "year",
+          "intervalCount": 1,
+          "quantity": 1
+        },
+        {
+          "periodAmount": 1000,
+          "interval": "year",
+          "intervalCount": 1,
+          "quantity": 1
+        }
+      ],
+      "state": "active",
+      "expectedMrr": 167
+    },
+    {
+      "id": "zero-decimal-jpy",
+      "currency": "JPY",
+      "periodAmount": 10000,
+      "interval": "year",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "active",
+      "expectedMrr": 833
+    }
+  ],
+  "movementCases": [
+    {
+      "id": "trial-converts-new",
+      "before": 0,
+      "after": 1000,
+      "everPositiveBefore": false,
+      "effectiveAt": "2026-02-01T00:00:00Z",
+      "trigger": "trial_end",
+      "expectedType": "NEW",
+      "expectedAmount": 1000
+    },
+    {
+      "id": "quantity-expansion",
+      "before": 1000,
+      "after": 3000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-02-05T12:00:00Z",
+      "trigger": "quantity_changed",
+      "expectedType": "EXPANSION",
+      "expectedAmount": 2000
+    },
+    {
+      "id": "discount-starts-contraction",
+      "before": 3000,
+      "after": 2250,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-02-10T00:00:00Z",
+      "trigger": "discount_started",
+      "expectedType": "CONTRACTION",
+      "expectedAmount": 750
+    },
+    {
+      "id": "one-of-two-subscriptions-cancels",
+      "before": 5000,
+      "after": 2000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-02-15T00:00:00Z",
+      "trigger": "period_end",
+      "expectedType": "CONTRACTION",
+      "expectedAmount": 3000
+    },
+    {
+      "id": "period-end-churn",
+      "before": 2000,
+      "after": 0,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-03-01T00:00:00Z",
+      "trigger": "period_end",
+      "expectedType": "CHURN",
+      "expectedAmount": 2000
+    },
+    {
+      "id": "resume-reactivation",
+      "before": 0,
+      "after": 2000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-03-10T09:30:00Z",
+      "trigger": "resume",
+      "expectedType": "REACTIVATION",
+      "expectedAmount": 2000
+    },
+    {
+      "id": "discount-ends-expansion",
+      "before": 1500,
+      "after": 2000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-04-01T00:00:00Z",
+      "trigger": "discount_ended",
+      "expectedType": "EXPANSION",
+      "expectedAmount": 500
+    },
+    {
+      "id": "immediate-cancellation",
+      "before": 2000,
+      "after": 0,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-04-02T11:12:13Z",
+      "trigger": "canceled_at",
+      "expectedType": "CHURN",
+      "expectedAmount": 2000
+    },
+    {
+      "id": "refund-no-movement",
+      "before": 2000,
+      "after": 2000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-04-03T00:00:00Z",
+      "trigger": "refund",
+      "expectedType": "NONE",
+      "expectedAmount": 0
+    },
+    {
+      "id": "failed-payment-no-movement",
+      "before": 2000,
+      "after": 2000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-04-04T00:00:00Z",
+      "trigger": "payment_failed",
+      "expectedType": "NONE",
+      "expectedAmount": 0
+    },
+    {
+      "id": "invoice-no-movement",
+      "before": 2000,
+      "after": 2000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-04-05T00:00:00Z",
+      "trigger": "invoice_paid",
+      "expectedType": "NONE",
+      "expectedAmount": 0
+    },
+    {
+      "id": "duplicate-state-no-movement",
+      "before": 2000,
+      "after": 2000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-04-06T00:00:00Z",
+      "trigger": "duplicate",
+      "expectedType": "NONE",
+      "expectedAmount": 0
+    },
+    {
+      "id": "same-timestamp-customer-netting",
+      "before": 5000,
+      "after": 5000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-04-07T00:00:00Z",
+      "trigger": "simultaneous_state_changes",
+      "changes": [
+        {
+          "before": 3000,
+          "after": 0
+        },
+        {
+          "before": 2000,
+          "after": 5000
+        }
+      ],
+      "expectedType": "NONE",
+      "expectedAmount": 0
+    }
+  ],
+  "retentionCases": [
+    {
+      "id": "retained-mrr-includes-active-expansion-and-reactivation",
+      "customerMrrAtAge": [1500, 0, 2500],
+      "expectedRetainedMrr": 4000
+    },
+    {
+      "id": "nrr-normal",
+      "startingMrr": 10000,
+      "expansion": 2000,
+      "contraction": 1000,
+      "churn": 3000,
+      "expectedNrrBasisPoints": 8000
+    },
+    {
+      "id": "nrr-over-100-percent",
+      "startingMrr": 10000,
+      "expansion": 5000,
+      "contraction": 0,
+      "churn": 0,
+      "expectedNrrBasisPoints": 15000
+    }
+  ],
+  "unsupportedCases": [
+    {
+      "id": "missing-effective-date",
+      "reason": "UNKNOWN_EFFECTIVE_AT"
+    },
+    {
+      "id": "missing-currency",
+      "reason": "UNKNOWN_CURRENCY"
+    },
+    {
+      "id": "weekly-price",
+      "reason": "UNSUPPORTED_INTERVAL"
+    },
+    {
+      "id": "zero-or-fractional-quantity",
+      "reason": "UNSUPPORTED_QUANTITY"
+    },
+    {
+      "id": "metered-or-tiered-price",
+      "reason": "UNSUPPORTED_USAGE_PRICING"
+    },
+    {
+      "id": "stacked-or-indefinite-discount",
+      "reason": "UNSUPPORTED_DISCOUNT"
+    },
+    {
+      "id": "fixed-discount-wrong-currency",
+      "reason": "DISCOUNT_CURRENCY_MISMATCH"
+    },
+    {
+      "id": "fixed-discount-multiple-items",
+      "reason": "AMBIGUOUS_FIXED_DISCOUNT_ALLOCATION"
+    },
+    {
+      "id": "mixed-currency-subscription",
+      "reason": "MIXED_CURRENCY_SUBSCRIPTION"
+    },
+    {
+      "id": "cross-currency-total",
+      "reason": "CROSS_CURRENCY_AGGREGATION"
+    },
+    {
+      "id": "nrr-zero-denominator",
+      "reason": "ZERO_STARTING_MRR_FOR_NRR"
+    }
+  ],
+  "currencyMovementCases": [
+    {
+      "id": "currency-switch-first-eur",
+      "effectiveAt": "2026-05-01T00:00:00Z",
+      "movements": [
+        {
+          "currency": "USD",
+          "before": 2000,
+          "after": 0,
+          "everPositiveBefore": true,
+          "expectedType": "CHURN",
+          "expectedAmount": 2000
+        },
+        {
+          "currency": "EUR",
+          "before": 0,
+          "after": 1800,
+          "everPositiveBefore": false,
+          "expectedType": "NEW",
+          "expectedAmount": 1800
+        }
+      ]
+    },
+    {
+      "id": "currency-switch-returning-to-eur",
+      "effectiveAt": "2026-06-01T00:00:00Z",
+      "movements": [
+        {
+          "currency": "USD",
+          "before": 2000,
+          "after": 0,
+          "everPositiveBefore": true,
+          "expectedType": "CHURN",
+          "expectedAmount": 2000
+        },
+        {
+          "currency": "EUR",
+          "before": 0,
+          "after": 1800,
+          "everPositiveBefore": true,
+          "expectedType": "REACTIVATION",
+          "expectedAmount": 1800
+        }
+      ]
+    }
+  ]
+}
