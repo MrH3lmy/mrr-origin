@@ -67,7 +67,8 @@ class AttributionV1GoldenFixtureTests {
                         "direct-return",
                         "first-touch-vs-last-touch-divergence",
                         "merged-anonymous-visitors",
-                        "window-boundary-timestamps");
+                        "window-boundary-timestamps",
+                        "utm-medium-is-non-direct");
     }
 
     @Test
@@ -95,7 +96,12 @@ class AttributionV1GoldenFixtureTests {
         }
 
         assertThat(caseIds("evidenceCases"))
-                .contains("explicit-external-user-to-stripe-customer-evidence", "no-evidence");
+                .contains(
+                        "stripe-metadata-verified-evidence",
+                        "explicit-external-user-to-stripe-customer-evidence",
+                        "keyed-email-alias-moderate-evidence",
+                        "no-evidence",
+                        "no-evidence-link-with-empty-pool");
     }
 
     @Test
@@ -216,7 +222,16 @@ class AttributionV1GoldenFixtureTests {
     // --- ADR-0005 pure selection rules ---
 
     private static boolean isDirect(Touchpoint touchpoint) {
-        return touchpoint.referrerUrl() == null && touchpoint.utmSource() == null;
+        return isBlank(touchpoint.referrerUrl())
+                && isBlank(touchpoint.utmSource())
+                && isBlank(touchpoint.utmMedium())
+                && isBlank(touchpoint.utmCampaign())
+                && isBlank(touchpoint.utmTerm())
+                && isBlank(touchpoint.utmContent());
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private static List<Touchpoint> eligiblePool(List<Touchpoint> touchpoints, OffsetDateTime anchor, long windowDays) {
@@ -256,7 +271,16 @@ class AttributionV1GoldenFixtureTests {
     // --- fixture plumbing ---
 
     private record Touchpoint(
-            String id, OffsetDateTime occurredAt, OffsetDateTime createdAt, String visitorId, String referrerUrl, String utmSource) {}
+            String id,
+            OffsetDateTime occurredAt,
+            OffsetDateTime createdAt,
+            String visitorId,
+            String referrerUrl,
+            String utmSource,
+            String utmMedium,
+            String utmCampaign,
+            String utmTerm,
+            String utmContent) {}
 
     private static List<Touchpoint> readTouchpoints(JsonNode node) {
         List<Touchpoint> touchpoints = new ArrayList<>();
@@ -265,9 +289,18 @@ class AttributionV1GoldenFixtureTests {
                 OffsetDateTime.parse(tp.path("occurredAt").asText()),
                 OffsetDateTime.parse(tp.path("createdAt").asText()),
                 tp.path("visitorId").asText(),
-                tp.path("referrerUrl").isNull() ? null : tp.path("referrerUrl").asText(),
-                tp.path("utmSource").isNull() ? null : tp.path("utmSource").asText())));
+                nullableText(tp, "referrerUrl"),
+                nullableText(tp, "utmSource"),
+                nullableText(tp, "utmMedium"),
+                nullableText(tp, "utmCampaign"),
+                nullableText(tp, "utmTerm"),
+                nullableText(tp, "utmContent"))));
         return touchpoints;
+    }
+
+    private static String nullableText(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isMissingNode() || value.isNull() ? null : value.asText();
     }
 
     private static List<String> ids(List<Touchpoint> touchpoints) {
