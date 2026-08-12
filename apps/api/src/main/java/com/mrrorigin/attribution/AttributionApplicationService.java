@@ -1,5 +1,6 @@
 package com.mrrorigin.attribution;
 
+import com.mrrorigin.revenue.RevenueCalculationService;
 import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -94,7 +95,7 @@ public class AttributionApplicationService {
                 .param("confidence", r.confidence()).param("reason", r.reason()).param("refs", r.references().toArray(String[]::new)).param("at", at).update();
     }
 
-    private List<Movement> movements(UUID w, String c) { return db.sql("SELECT id,movement_type,effective_at FROM customer_mrr_movements WHERE workspace_id=:w AND stripe_customer_id=:c AND calculation_version='mrr-v1' ORDER BY effective_at,id").param("w",w).param("c",c).query((r,n)->new Movement(r.getObject(1,UUID.class),r.getString(2),r.getObject(3,OffsetDateTime.class))).list(); }
+    private List<Movement> movements(UUID w, String c) { return db.sql("SELECT id,movement_type,effective_at FROM customer_mrr_movements WHERE workspace_id=:w AND stripe_customer_id=:c AND calculation_version=:v ORDER BY effective_at,id").param("w",w).param("c",c).param("v",RevenueCalculationService.CALCULATION_VERSION).query((r,n)->new Movement(r.getObject(1,UUID.class),r.getString(2),r.getObject(3,OffsetDateTime.class))).list(); }
     private Link activeLink(UUID w, String c) { return db.sql("SELECT id,workspace_id,project_id,external_identity_id,evidence_source FROM stripe_customer_links WHERE workspace_id=:w AND stripe_customer_id=:c AND superseded_at IS NULL").param("w",w).param("c",c).query((r,n)->new Link(r.getObject(1,UUID.class),r.getObject(2,UUID.class),r.getObject(3,UUID.class),r.getObject(4,UUID.class),r.getString(5))).optional().orElse(null); }
     private static CustomerAttributionExplanation.Evidence evidence(UUID id,String s,String c,String l){return id==null?null:new CustomerAttributionExplanation.Evidence(id,s,c,l);}
     private static UUID id(AttributionV1Engine.Touchpoint t){return t==null?null:UUID.fromString(t.id());} private static String source(AttributionV1Engine.Touchpoint t){return t==null?null:t.source();} private static String campaign(AttributionV1Engine.Touchpoint t){return t==null?null:t.campaign();} private static String landing(AttributionV1Engine.Touchpoint t){return t==null?null:t.landingPage();}
