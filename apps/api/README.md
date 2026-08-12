@@ -66,8 +66,8 @@ be linked by another tenant.
 
 Re-linking the same external user to the same Stripe customer is idempotent
 and returns the existing link unchanged. Attempting to link an external user
-already linked to a *different* Stripe customer, or a Stripe customer already
-linked to a *different* external user, returns a stable `409` with a
+already linked to a _different_ Stripe customer, or a Stripe customer already
+linked to a _different_ external user, returns a stable `409` with a
 distinguishing `code` (`external_user_already_linked` or
 `stripe_customer_already_linked`) — active links are structurally unique
 (one per tracked identity, one per Stripe customer) via partial unique
