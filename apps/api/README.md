@@ -75,17 +75,20 @@ indexes, so this holds under concurrent requests too. No repair/relink
 workflow exists yet, so a conflicting link must be resolved by a later,
 dedicated issue rather than this endpoint.
 
-`GET /api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links/{externalUserId}`
+`GET /api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links?externalUserId=...`
 returns the current active link, or `404 stripe_customer_link_not_found`.
+The external ID is a query parameter so opaque IDs containing path characters remain
+addressable; clients must URL-encode it normally.
 
 Every link row records its provenance: `evidenceSource`, `evidenceReference`,
 `linkedBySubjectId` (the authenticated actor), and `createdAt`. Only the
 `EXPLICIT_API` evidence source is populated today. `STRIPE_METADATA` is
 reserved in the schema for a follow-up issue — `billing_customers` does not
 yet persist Stripe `metadata`, so there is no deterministic, inspectable
-evidence available to drive it automatically. A `superseded_at` column is
-likewise reserved for a future repair-workflow issue; this endpoint never
-sets it.
+evidence available to drive it automatically. `superseded_at` and `superseded_by_id` are likewise reserved for a future
+repair workflow; they must be populated together and the replacement link is
+structurally constrained to the same workspace and project. This endpoint
+never sets either field.
 
 No IP address, device fingerprint, or email-guessing heuristic participates
 in this flow.
