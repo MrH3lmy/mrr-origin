@@ -17,8 +17,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * Covers #19's coverage numerator/denominator contract described on {@link AttributionCoverage}:
- * the denominator counts every recalculated NEW movement, the numerator counts the STRONG subset,
- * and the remainder is broken down by ADR-0005's two unattributed reason codes.
+ * the denominator counts distinct eligible NEW customers in project scope, the numerator counts
+ * the STRONG subset, and the remainder includes both attribution reasons and NOT_RECALCULATED.
  */
 @SpringBootTest
 @Testcontainers
@@ -57,21 +57,30 @@ class AttributionCoverageIntegrationTests {
         link("linked-but-no-touchpoint");
         attribution.recalculate(workspace, project, "linked-but-no-touchpoint");
 
+        movement("linked-not-recalculated");
+        link("linked-not-recalculated");
+
         AttributionCoverage coverage = attribution.coverage(workspace, project, AttributionV1Engine.MODEL_VERSION);
 
-        assertThat(coverage.eligibleNewCustomers()).isEqualTo(3);
+        assertThat(coverage.eligibleNewCustomers()).isEqualTo(4);
         assertThat(coverage.attributedNewCustomers()).isEqualTo(1);
-        assertThat(coverage.coverageRatio()).isEqualTo(1.0 / 3.0);
+        assertThat(coverage.coverageRatio()).isEqualTo(0.25);
         assertThat(coverage.exclusionReasonCounts()).containsExactlyInAnyOrderEntriesOf(
-                java.util.Map.of("NO_ACTIVE_LINK", 1L, "NO_ELIGIBLE_TOUCHPOINT", 1L));
+                java.util.Map.of("NO_ACTIVE_LINK", 1L, "NO_ELIGIBLE_TOUCHPOINT", 1L, "NOT_RECALCULATED", 1L));
     }
 
-    @Test void excludesCustomersThatHaveNotBeenRecalculatedYet() {
-        movement("never-recalculated");
+    @Test void countsAProjectCustomerOnceWhenMultipleNewMovementsExist() {
+        movement("multi-new-customer");
+        db.sql("INSERT INTO customer_mrr_movements(id,workspace_id,stripe_customer_id,currency,amount_minor,movement_type,effective_at,calculation_version,source_billing_references) VALUES(:id,:w,'multi-new-customer','EUR',100,'NEW',:at,'mrr-v1',ARRAY['billing:eur'])")
+                .param("id", UUID.randomUUID()).param("w", workspace).param("at", OffsetDateTime.parse("2026-04-02T00:00:00Z")).update();
+        link("multi-new-customer");
+        touchpoint("multi-new-customer", "2026-03-15T00:00:00Z");
+        attribution.recalculate(workspace, project, "multi-new-customer");
+
         AttributionCoverage coverage = attribution.coverage(workspace, project, AttributionV1Engine.MODEL_VERSION);
-        assertThat(coverage.eligibleNewCustomers()).isZero();
-        assertThat(coverage.attributedNewCustomers()).isZero();
-        assertThat(coverage.coverageRatio()).isZero();
+        assertThat(coverage.eligibleNewCustomers()).isEqualTo(1);
+        assertThat(coverage.attributedNewCustomers()).isEqualTo(1);
+        assertThat(coverage.coverageRatio()).isEqualTo(1.0);
         assertThat(coverage.exclusionReasonCounts()).isEmpty();
     }
 
@@ -81,7 +90,10 @@ class AttributionCoverageIntegrationTests {
         touchpoint("cus", "2026-03-15T00:00:00Z");
         attribution.recalculate(workspace, project, "cus");
 
-        assertThat(attribution.coverage(workspace, project, "attribution-v0").eligibleNewCustomers()).isZero();
+        AttributionCoverage oldModel = attribution.coverage(workspace, project, "attribution-v0");
+        assertThat(oldModel.eligibleNewCustomers()).isEqualTo(1);
+        assertThat(oldModel.attributedNewCustomers()).isZero();
+        assertThat(oldModel.exclusionReasonCounts()).containsEntry("NOT_RECALCULATED", 1L);
 
         UUID otherProject = UUID.randomUUID();
         db.sql("INSERT INTO projects(id,workspace_id,name,domain,public_key) VALUES(:p,:w,'p','two.example',:k)")
