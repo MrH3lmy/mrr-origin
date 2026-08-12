@@ -17,7 +17,9 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.validation.annotation.Validated;
 
 /**
  * Server-side identity bridge per #16: links a project's tracked external-user identity to a
@@ -25,6 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
  * tracker, since it deals in Stripe customer IDs.
  */
 @RestController
+@Validated
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links")
 public class StripeCustomerLinkingController {
 
@@ -41,9 +44,11 @@ public class StripeCustomerLinkingController {
                 service.link(workspaceId, projectId, request.externalUserId(), request.stripeCustomerId()));
     }
 
-    @GetMapping("/{externalUserId}")
+    @GetMapping
     public LinkResponse activeLink(
-            @PathVariable UUID workspaceId, @PathVariable UUID projectId, @PathVariable String externalUserId) {
+            @PathVariable UUID workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam @NotBlank @Size(max = 160) String externalUserId) {
         return service
                 .activeLink(workspaceId, projectId, externalUserId)
                 .map(LinkResponse::from)
