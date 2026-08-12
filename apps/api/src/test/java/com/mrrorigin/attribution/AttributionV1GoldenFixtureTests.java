@@ -19,9 +19,8 @@ import tools.jackson.databind.ObjectMapper;
 
 /**
  * Proves ADR-0005's selection, evidence, conflict, inheritance, and recalculation rules are
- * internally consistent against the provider-neutral fixture. This is the decision contract for
- * #17 -- it re-implements the ADR's pure selection rules to validate the fixture, not the
- * attribution engine itself, which is #18's scope.
+ * internally consistent against the provider-neutral fixture. The golden selection cases execute
+ * the production attribution-v1 engine rather than a duplicate test-only selector.
  */
 class AttributionV1GoldenFixtureTests {
 
@@ -37,24 +36,24 @@ class AttributionV1GoldenFixtureTests {
 
     @Test
     void selectionCasesProvePoolingWindowingAndDirectHandling() {
+        AttributionV1Engine engine = new AttributionV1Engine();
         for (JsonNode testCase : fixture.path("selectionCases")) {
             String caseId = testCase.path("id").asText();
             OffsetDateTime anchor = OffsetDateTime.parse(testCase.path("anchor").asText());
-            long windowDays = testCase.path("windowDays").asLong(fixture.path("defaultWindowDays").asLong());
-
             List<Touchpoint> all = readTouchpoints(testCase.path("touchpoints"));
-            List<Touchpoint> pool = eligiblePool(all, anchor, windowDays);
+            var selected = engine.select(anchor, all.stream().map(AttributionV1GoldenFixtureTests::productionTouchpoint).toList());
+            List<String> selectedIds = selected.eligible().stream().map(AttributionV1Engine.Touchpoint::id).toList();
 
-            assertThat(ids(pool)).as(caseId)
+            assertThat(selectedIds).as(caseId)
                     .containsExactlyInAnyOrderElementsOf(textList(testCase.path("expectedEligibleTouchpointIds")));
 
-            assertThat(idOrNull(selectFirstTouch(pool))).as(caseId + " first-touch")
+            assertThat(selected.first() == null ? null : selected.first().id()).as(caseId + " first-touch")
                     .isEqualTo(testCase.path("expectedFirstTouchId").asText(null));
-            assertThat(idOrNull(selectLastTouch(pool, anchor))).as(caseId + " last-touch")
+            assertThat(selected.last() == null ? null : selected.last().id()).as(caseId + " last-touch")
                     .isEqualTo(testCase.path("expectedLastTouchId").asText(null));
 
             if (testCase.has("expectedDistinctVisitorCount")) {
-                long distinctVisitors = pool.stream().map(Touchpoint::visitorId).distinct().count();
+                long distinctVisitors = all.stream().filter(t -> selectedIds.contains(t.id())).map(Touchpoint::visitorId).distinct().count();
                 assertThat(distinctVisitors).as(caseId)
                         .isEqualTo(testCase.path("expectedDistinctVisitorCount").asLong());
             }
@@ -228,6 +227,12 @@ class AttributionV1GoldenFixtureTests {
                 && isBlank(touchpoint.utmCampaign())
                 && isBlank(touchpoint.utmTerm())
                 && isBlank(touchpoint.utmContent());
+    }
+
+    private static AttributionV1Engine.Touchpoint productionTouchpoint(Touchpoint t) {
+        return new AttributionV1Engine.Touchpoint(t.id(), t.occurredAt(), t.createdAt(), t.utmSource(),
+                t.utmCampaign(), "https://fixture.example/", t.referrerUrl(), t.utmMedium(),
+                t.utmTerm(), t.utmContent());
     }
 
     private static boolean isBlank(String value) {
