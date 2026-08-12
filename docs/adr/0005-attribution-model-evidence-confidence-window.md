@@ -204,6 +204,10 @@ result per `PRODUCT.md`'s evidence principle — it is never converted to
 
 ### Model versioning, stored evidence references, recalculation, and backward compatibility
 
+The initial policy identifier is `attribution-v1`, matching the golden fixture. A
+configuration-only window variant must use a distinct identifier so stored results
+remain explainable.
+
 - Every derived attribution result stores a `model_version` string, references
   to the evidence it used (the `stripe_customer_links` row id, and the
   selected touchpoint id(s) for first-touch/last-touch), a computed
