@@ -1,5 +1,6 @@
 package com.mrrorigin.identity;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -24,6 +25,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -200,8 +202,9 @@ class StripeCustomerLinkingIntegrationTests {
                 .andExpect(status().isNotFound());
 
         mockMvc.perform(get(
-                                "/api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links/{externalUserId}",
-                                workspaceId, projectId, "user_1")
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links",
+                                workspaceId, projectId)
+                        .queryParam("externalUserId", "user_1")
                         .with(token(OTHER_OWNER)))
                 .andExpect(status().isNotFound());
     }
@@ -227,12 +230,64 @@ class StripeCustomerLinkingIntegrationTests {
         mockMvc.perform(link(workspaceId, projectId, OWNER, "user_1", "cus_1")).andExpect(status().isOk());
 
         mockMvc.perform(get(
-                                "/api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links/{externalUserId}",
-                                workspaceId, projectId, "user_1")
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links",
+                                workspaceId, projectId)
+                        .queryParam("externalUserId", "user_1")
                         .with(token(OWNER)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.stripeCustomerId").value("cus_1"))
                 .andExpect(jsonPath("$.linkedBySubjectId").value(OWNER));
+    }
+
+    @Test
+    void queryParameterSupportsPathLikeExternalUserIds() throws Exception {
+        UUID workspaceId = createWorkspace(OWNER);
+        UUID projectId = createProject(workspaceId);
+        String externalUserId = "auth0/user|123";
+        identify(workspaceId, projectId, externalUserId);
+        insertBillingCustomer(workspaceId, "cus_path");
+        mockMvc.perform(link(workspaceId, projectId, OWNER, externalUserId, "cus_path"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get(
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links",
+                                workspaceId, projectId)
+                        .queryParam("externalUserId", externalUserId)
+                        .with(token(OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.externalUserId").value(externalUserId));
+    }
+
+    @Test
+    void supersessionReferenceCannotCrossWorkspaceOrOmitItsTimestamp() throws Exception {
+        UUID workspaceA = createWorkspace(OWNER);
+        UUID projectA = createProject(workspaceA);
+        identify(workspaceA, projectA, "user_a");
+        insertBillingCustomer(workspaceA, "cus_a");
+        mockMvc.perform(link(workspaceA, projectA, OWNER, "user_a", "cus_a")).andExpect(status().isOk());
+
+        UUID workspaceB = createWorkspace(OWNER);
+        UUID projectB = createProject(workspaceB);
+        identify(workspaceB, projectB, "user_b");
+        insertBillingCustomer(workspaceB, "cus_b");
+        mockMvc.perform(link(workspaceB, projectB, OWNER, "user_b", "cus_b")).andExpect(status().isOk());
+
+        UUID linkA = activeLinkId(workspaceA);
+        UUID linkB = activeLinkId(workspaceB);
+
+        assertThatThrownBy(() -> jdbc.sql(
+                                "UPDATE stripe_customer_links SET superseded_at = CURRENT_TIMESTAMP, "
+                                        + "superseded_by_id = :replacement WHERE id = :id")
+                        .param("replacement", linkB)
+                        .param("id", linkA)
+                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(() -> jdbc.sql(
+                                "UPDATE stripe_customer_links SET superseded_at = CURRENT_TIMESTAMP WHERE id = :id")
+                        .param("id", linkA)
+                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
     }
 
     @Test
@@ -270,6 +325,14 @@ class StripeCustomerLinkingIntegrationTests {
         }
 
         assertActiveLinkCount(workspaceId, 1);
+    }
+
+    private UUID activeLinkId(UUID workspaceId) {
+        return jdbc.sql(
+                        "SELECT id FROM stripe_customer_links WHERE workspace_id = :workspaceId AND superseded_at IS NULL")
+                .param("workspaceId", workspaceId)
+                .query(UUID.class)
+                .single();
     }
 
     private void assertActiveLinkCount(UUID workspaceId, int expected) {
