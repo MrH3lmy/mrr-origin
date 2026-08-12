@@ -14,8 +14,7 @@ public class AttributionApplicationService {
     private final Clock clock;
     private final AttributionV1Engine engine = new AttributionV1Engine();
 
-    public AttributionApplicationService(JdbcClient db) { this(db, Clock.systemUTC()); }
-    AttributionApplicationService(JdbcClient db, Clock clock) { this.db = db; this.clock = clock; }
+    public AttributionApplicationService(JdbcClient db, Clock clock) { this.db = db; this.clock = clock; }
 
     /** Recalculates all movements from the original NEW movement in one atomic operation. */
     @Transactional
@@ -25,7 +24,10 @@ public class AttributionApplicationService {
         if (movements.isEmpty()) return List.of();
         Movement acquisition = movements.stream().filter(m -> m.type().equals("NEW")).findFirst()
                 .orElseThrow(() -> new IllegalStateException("customer has no New MRR movement"));
-        Link link = activeLink(workspaceId, projectId, customerId);
+        Link link = activeLink(workspaceId, customerId);
+        if (link != null && !projectId.equals(link.projectId())) {
+            throw new IllegalArgumentException("customer is linked in a different project");
+        }
         Result result = link == null ? Result.unattributed("NO_ACTIVE_LINK") : calculate(link, acquisition.at());
         OffsetDateTime calculatedAt = OffsetDateTime.now(clock);
         for (Movement movement : movements) upsert(workspaceId, projectId, movement, acquisition, result, calculatedAt);
@@ -66,7 +68,7 @@ public class AttributionApplicationService {
                         r.getObject(2, OffsetDateTime.class), r.getObject(3, OffsetDateTime.class), r.getString(4),
                         r.getString(5), r.getString(6), r.getString(7), r.getString(8), r.getString(9), r.getString(10))).list();
         var selected = engine.select(anchor, pool);
-        if (selected.first() == null) return Result.unattributed("NO_ELIGIBLE_TOUCHPOINT");
+        if (selected.first() == null) return Result.unattributed("NO_ELIGIBLE_TOUCHPOINT", link.id());
         return new Result(selected.first(), selected.last(), link.id(), "STRONG", null,
                 List.of("stripe_customer_links:" + link.id(), "touchpoints:" + selected.first().id(),
                         "touchpoints:" + selected.last().id()));
@@ -93,10 +95,10 @@ public class AttributionApplicationService {
     }
 
     private List<Movement> movements(UUID w, String c) { return db.sql("SELECT id,movement_type,effective_at FROM customer_mrr_movements WHERE workspace_id=:w AND stripe_customer_id=:c AND calculation_version='mrr-v1' ORDER BY effective_at,id").param("w",w).param("c",c).query((r,n)->new Movement(r.getObject(1,UUID.class),r.getString(2),r.getObject(3,OffsetDateTime.class))).list(); }
-    private Link activeLink(UUID w, UUID p, String c) { return db.sql("SELECT id,workspace_id,project_id,external_identity_id,evidence_source FROM stripe_customer_links WHERE workspace_id=:w AND project_id=:p AND stripe_customer_id=:c AND superseded_at IS NULL").param("w",w).param("p",p).param("c",c).query((r,n)->new Link(r.getObject(1,UUID.class),r.getObject(2,UUID.class),r.getObject(3,UUID.class),r.getObject(4,UUID.class),r.getString(5))).optional().orElse(null); }
+    private Link activeLink(UUID w, String c) { return db.sql("SELECT id,workspace_id,project_id,external_identity_id,evidence_source FROM stripe_customer_links WHERE workspace_id=:w AND stripe_customer_id=:c AND superseded_at IS NULL").param("w",w).param("c",c).query((r,n)->new Link(r.getObject(1,UUID.class),r.getObject(2,UUID.class),r.getObject(3,UUID.class),r.getObject(4,UUID.class),r.getString(5))).optional().orElse(null); }
     private static CustomerAttributionExplanation.Evidence evidence(UUID id,String s,String c,String l){return id==null?null:new CustomerAttributionExplanation.Evidence(id,s,c,l);}
     private static UUID id(AttributionV1Engine.Touchpoint t){return t==null?null:UUID.fromString(t.id());} private static String source(AttributionV1Engine.Touchpoint t){return t==null?null:t.source();} private static String campaign(AttributionV1Engine.Touchpoint t){return t==null?null:t.campaign();} private static String landing(AttributionV1Engine.Touchpoint t){return t==null?null:t.landingPage();}
     private static void require(UUID w,UUID p,String c){if(w==null||p==null||c==null||c.isBlank())throw new IllegalArgumentException("workspace, project and customer are required");}
     private record Movement(UUID id,String type,OffsetDateTime at){} private record Link(UUID id,UUID workspaceId,UUID projectId,UUID identityId,String source){}
-    private record Result(AttributionV1Engine.Touchpoint first,AttributionV1Engine.Touchpoint last,UUID linkId,String confidence,String reason,List<String> references){static Result unattributed(String reason){return new Result(null,null,null,"UNATTRIBUTED",reason,List.of());}}
+    private record Result(AttributionV1Engine.Touchpoint first,AttributionV1Engine.Touchpoint last,UUID linkId,String confidence,String reason,List<String> references){static Result unattributed(String reason){return unattributed(reason,null);} static Result unattributed(String reason,UUID linkId){return new Result(null,null,linkId,"UNATTRIBUTED",reason,linkId==null?List.of():List.of("stripe_customer_links:"+linkId));}}
 }

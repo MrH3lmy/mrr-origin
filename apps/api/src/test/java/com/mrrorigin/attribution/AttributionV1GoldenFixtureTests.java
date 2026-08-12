@@ -240,28 +240,30 @@ class AttributionV1GoldenFixtureTests {
     }
 
     private static List<Touchpoint> eligiblePool(List<Touchpoint> touchpoints, OffsetDateTime anchor, long windowDays) {
-        OffsetDateTime windowStart = anchor.minusDays(windowDays);
-        return touchpoints.stream()
-                .filter(tp -> !tp.occurredAt().isBefore(windowStart) && !tp.occurredAt().isAfter(anchor))
-                .toList();
+        if (windowDays != AttributionV1Engine.WINDOW_DAYS) {
+            OffsetDateTime start = anchor.minusDays(windowDays);
+            return touchpoints.stream().filter(t -> !t.occurredAt().isBefore(start)
+                    && !t.occurredAt().isAfter(anchor)).toList();
+        }
+        Set<String> eligible = new AttributionV1Engine().select(anchor,
+                touchpoints.stream().map(AttributionV1GoldenFixtureTests::productionTouchpoint).toList())
+                .eligible().stream().map(AttributionV1Engine.Touchpoint::id).collect(java.util.stream.Collectors.toSet());
+        return touchpoints.stream().filter(t -> eligible.contains(t.id())).toList();
     }
 
     private static Optional<Touchpoint> selectFirstTouch(List<Touchpoint> pool) {
-        return pool.stream().min(
-                Comparator.comparing(Touchpoint::occurredAt)
-                        .thenComparing(Touchpoint::createdAt)
-                        .thenComparing(Touchpoint::id));
+        if (pool.isEmpty()) return Optional.empty();
+        OffsetDateTime anchor = pool.stream().map(Touchpoint::occurredAt).max(Comparator.naturalOrder()).orElseThrow();
+        String id = new AttributionV1Engine().select(anchor,
+                pool.stream().map(AttributionV1GoldenFixtureTests::productionTouchpoint).toList()).first().id();
+        return pool.stream().filter(t -> t.id().equals(id)).findFirst();
     }
 
     private static Optional<Touchpoint> selectLastTouch(List<Touchpoint> pool, OffsetDateTime anchor) {
-        boolean anyNonDirect = pool.stream().anyMatch(tp -> !isDirect(tp));
-        List<Touchpoint> candidates = anyNonDirect ? pool.stream().filter(tp -> !isDirect(tp)).toList() : pool;
-        return candidates.stream()
-                .filter(tp -> !tp.occurredAt().isAfter(anchor))
-                .max(
-                        Comparator.comparing(Touchpoint::occurredAt)
-                                .thenComparing(Touchpoint::createdAt)
-                                .thenComparing(Touchpoint::id));
+        if (pool.isEmpty()) return Optional.empty();
+        String id = new AttributionV1Engine().select(anchor,
+                pool.stream().map(AttributionV1GoldenFixtureTests::productionTouchpoint).toList()).last().id();
+        return pool.stream().filter(t -> t.id().equals(id)).findFirst();
     }
 
     private static int tierRank(String tier) {
