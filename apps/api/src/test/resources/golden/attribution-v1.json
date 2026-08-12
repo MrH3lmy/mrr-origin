@@ -15,7 +15,9 @@
           "utmSource": "google"
         }
       ],
-      "expectedEligibleTouchpointIds": ["tp-delayed-1"],
+      "expectedEligibleTouchpointIds": [
+        "tp-delayed-1"
+      ],
       "expectedFirstTouchId": "tp-delayed-1",
       "expectedLastTouchId": "tp-delayed-1"
     },
@@ -40,7 +42,10 @@
           "utmSource": "newsletter"
         }
       ],
-      "expectedEligibleTouchpointIds": ["tp-session-a", "tp-session-b"],
+      "expectedEligibleTouchpointIds": [
+        "tp-session-a",
+        "tp-session-b"
+      ],
       "expectedFirstTouchId": "tp-session-a",
       "expectedLastTouchId": "tp-session-b"
     },
@@ -85,7 +90,9 @@
           "utmSource": null
         }
       ],
-      "expectedEligibleTouchpointIds": ["tp-direct-only"],
+      "expectedEligibleTouchpointIds": [
+        "tp-direct-only"
+      ],
       "expectedFirstTouchId": "tp-direct-only",
       "expectedLastTouchId": "tp-direct-only"
     },
@@ -200,6 +207,35 @@
       ],
       "expectedFirstTouchId": "tp-window-start-inclusive",
       "expectedLastTouchId": "tp-window-end-inclusive"
+    },
+    {
+      "id": "utm-medium-is-non-direct",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-medium-only",
+          "occurredAt": "2026-01-10T00:00:00Z",
+          "createdAt": "2026-01-10T00:00:02Z",
+          "visitorId": "visitor-medium",
+          "referrerUrl": null,
+          "utmSource": null,
+          "utmMedium": "paid-social"
+        },
+        {
+          "id": "tp-direct-return-after-medium",
+          "occurredAt": "2026-02-20T00:00:00Z",
+          "createdAt": "2026-02-20T00:00:02Z",
+          "visitorId": "visitor-medium",
+          "referrerUrl": null,
+          "utmSource": null
+        }
+      ],
+      "expectedEligibleTouchpointIds": [
+        "tp-medium-only",
+        "tp-direct-return-after-medium"
+      ],
+      "expectedFirstTouchId": "tp-medium-only",
+      "expectedLastTouchId": "tp-medium-only"
     }
   ],
   "evidenceCases": [
@@ -249,6 +285,52 @@
       "expectedEvidenceReference": null,
       "expectedFirstTouchId": null,
       "expectedLastTouchId": null
+    },
+    {
+      "id": "stripe-metadata-verified-evidence",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-verified-evidence",
+          "visitorId": "visitor-verified-evidence",
+          "occurredAt": "2026-01-15T00:00:00Z",
+          "createdAt": "2026-01-15T00:00:02Z",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        }
+      ],
+      "link": {
+        "tier": "VERIFIED",
+        "evidenceSource": "STRIPE_METADATA",
+        "evidenceReference": "link-verified-metadata-1"
+      },
+      "expectedConfidence": "VERIFIED",
+      "expectedEvidenceReference": "link-verified-metadata-1",
+      "expectedFirstTouchId": "tp-verified-evidence",
+      "expectedLastTouchId": "tp-verified-evidence"
+    },
+    {
+      "id": "keyed-email-alias-moderate-evidence",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-moderate-evidence",
+          "visitorId": "visitor-moderate-evidence",
+          "occurredAt": "2026-01-15T00:00:00Z",
+          "createdAt": "2026-01-15T00:00:02Z",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        }
+      ],
+      "link": {
+        "tier": "MODERATE",
+        "evidenceSource": "WORKSPACE_KEYED_EMAIL_HMAC",
+        "evidenceReference": "alias-moderate-hmac-1"
+      },
+      "expectedConfidence": "MODERATE",
+      "expectedEvidenceReference": "alias-moderate-hmac-1",
+      "expectedFirstTouchId": "tp-moderate-evidence",
+      "expectedLastTouchId": "tp-moderate-evidence"
     }
   ],
   "conflictCases": [
@@ -260,13 +342,17 @@
           "tier": "VERIFIED",
           "evidenceSource": "STRIPE_METADATA",
           "evidenceReference": "link-verified-conflict-1",
-          "poolVisitorIds": ["visitor-verified-conflict"]
+          "poolVisitorIds": [
+            "visitor-verified-conflict"
+          ]
         },
         {
           "tier": "STRONG",
           "evidenceSource": "EXPLICIT_API",
           "evidenceReference": "link-strong-conflict-1",
-          "poolVisitorIds": ["visitor-strong-conflict"]
+          "poolVisitorIds": [
+            "visitor-strong-conflict"
+          ]
         }
       ],
       "touchpoints": [
