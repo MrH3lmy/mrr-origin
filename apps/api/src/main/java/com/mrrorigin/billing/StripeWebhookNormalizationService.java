@@ -21,9 +21,10 @@ import com.mrrorigin.billing.BillingSourceVersion.SourceVersion;
 /**
  * Normalizes verified, durably stored Stripe webhook events (V5, #11) into the billing ledger
  * (V7, #12), so the webhook and backfill paths converge on the same normalized state per #12's
- * acceptance criteria. Only the bookkeeping columns V5 reserved for this worker --
+ * acceptance criteria. Only the bookkeeping columns V5/V12 reserved for this worker --
  * {@code processing_state}, {@code attempt_count}, {@code last_attempted_at}, {@code last_error},
- * {@code updated_at} -- are ever written here; {@code raw_payload}/{@code payload} are read-only.
+ * {@code failure_kind}, {@code updated_at} -- are ever written here; {@code raw_payload}/{@code
+ * payload} are read-only.
  *
  * <p><b>Claim, then work outside any transaction, then apply.</b> {@link #processBatch} runs in
  * three phases, deliberately never holding a database transaction open across a Stripe network
@@ -119,7 +120,7 @@ class StripeWebhookNormalizationService {
                     case SKIPPED, LEASE_LOST -> skipped++;
                 }
             } catch (RuntimeException failure) {
-                if (markFailed(event, failure.getMessage())) {
+                if (markFailed(event, failure.getMessage(), StripeWebhookFailureKind.classify(failure))) {
                     failed++;
                 } else {
                     // A newer worker reclaimed or completed this row after our lease expired. The
@@ -309,18 +310,19 @@ class StripeWebhookNormalizationService {
         }
     }
 
-    boolean markFailed(PendingEvent event, String error) {
+    boolean markFailed(PendingEvent event, String error, StripeWebhookFailureKind failureKind) {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         return jdbc.sql(
                         """
                         UPDATE stripe_webhook_events
-                        SET processing_state = 'FAILED', last_error = :error, updated_at = :now
+                        SET processing_state = 'FAILED', last_error = :error, failure_kind = :failureKind, updated_at = :now
                         WHERE id = :id AND processing_state = 'PENDING' AND last_attempted_at = :claimedAt
                         """)
                 .param("id", event.id())
                 .param("claimedAt", event.claimedAt())
                 .param("now", now)
                 .param("error", error)
+                .param("failureKind", failureKind.name())
                 .update()
                 == 1;
     }
