@@ -67,10 +67,10 @@ public class StripeCustomerLinkingService {
         }
 
         try {
-            Optional<LinkOutcome> inserted =
-                    tryInsertLink(workspaceId, projectId, externalIdentityId, externalUserId, stripeCustomerId);
-            if (inserted.isPresent()) {
-                return inserted.get();
+            boolean inserted = tryInsertLink(workspaceId, projectId, externalIdentityId, stripeCustomerId);
+            if (inserted) {
+                return findActiveLinkByIdentity(externalIdentityId)
+                        .orElseThrow(() -> new IllegalStateException("Inserted Stripe customer link was not readable"));
             }
             // Lost a race on the active-identity unique index: a concurrent request linked this
             // identity between the check above and this insert. Resolve deterministically instead of
@@ -148,10 +148,16 @@ public class StripeCustomerLinkingService {
     private Optional<LinkOutcome> findActiveLinkByIdentity(UUID externalIdentityId) {
         return jdbc.sql(
                         """
-                        SELECT id, workspace_id, project_id, external_user_id, stripe_customer_id,
-                               evidence_source, evidence_reference, linked_by_subject_id, created_at
-                        FROM stripe_customer_links
-                        WHERE external_identity_id = :externalIdentityId AND superseded_at IS NULL
+                        SELECT link.id, link.workspace_id, link.project_id, identity.external_user_id,
+                               link.stripe_customer_id, link.evidence_source, link.evidence_reference,
+                               link.linked_by_subject_id, link.created_at
+                        FROM stripe_customer_links link
+                        JOIN external_identities identity
+                          ON identity.id = link.external_identity_id
+                         AND identity.project_id = link.project_id
+                         AND identity.workspace_id = link.workspace_id
+                        WHERE link.external_identity_id = :externalIdentityId
+                          AND link.superseded_at IS NULL
                         """)
                 .param("externalIdentityId", externalIdentityId)
                 .query(LinkOutcome.ROW_MAPPER)
@@ -161,10 +167,17 @@ public class StripeCustomerLinkingService {
     private Optional<LinkOutcome> findActiveLinkByCustomer(UUID workspaceId, String stripeCustomerId) {
         return jdbc.sql(
                         """
-                        SELECT id, workspace_id, project_id, external_user_id, stripe_customer_id,
-                               evidence_source, evidence_reference, linked_by_subject_id, created_at
-                        FROM stripe_customer_links
-                        WHERE workspace_id = :workspaceId AND stripe_customer_id = :stripeCustomerId AND superseded_at IS NULL
+                        SELECT link.id, link.workspace_id, link.project_id, identity.external_user_id,
+                               link.stripe_customer_id, link.evidence_source, link.evidence_reference,
+                               link.linked_by_subject_id, link.created_at
+                        FROM stripe_customer_links link
+                        JOIN external_identities identity
+                          ON identity.id = link.external_identity_id
+                         AND identity.project_id = link.project_id
+                         AND identity.workspace_id = link.workspace_id
+                        WHERE link.workspace_id = :workspaceId
+                          AND link.stripe_customer_id = :stripeCustomerId
+                          AND link.superseded_at IS NULL
                         """)
                 .param("workspaceId", workspaceId)
                 .param("stripeCustomerId", stripeCustomerId)
@@ -172,31 +185,30 @@ public class StripeCustomerLinkingService {
                 .optional();
     }
 
-    private Optional<LinkOutcome> tryInsertLink(
-            UUID workspaceId, UUID projectId, UUID externalIdentityId, String externalUserId, String stripeCustomerId) {
+    private boolean tryInsertLink(
+            UUID workspaceId, UUID projectId, UUID externalIdentityId, String stripeCustomerId) {
         String actor = workspaceContext.subjectId();
         return jdbc.sql(
                         """
                         INSERT INTO stripe_customer_links
-                            (id, workspace_id, project_id, external_identity_id, external_user_id, stripe_customer_id,
+                            (id, workspace_id, project_id, external_identity_id, stripe_customer_id,
                              evidence_source, evidence_reference, linked_by_subject_id)
-                        VALUES (:id, :workspaceId, :projectId, :externalIdentityId, :externalUserId, :stripeCustomerId,
+                        VALUES (:id, :workspaceId, :projectId, :externalIdentityId, :stripeCustomerId,
                                 :evidenceSource, :evidenceReference, :linkedBy)
                         ON CONFLICT (external_identity_id) WHERE superseded_at IS NULL DO NOTHING
-                        RETURNING id, workspace_id, project_id, external_user_id, stripe_customer_id,
-                                  evidence_source, evidence_reference, linked_by_subject_id, created_at
+                        RETURNING id
                         """)
                 .param("id", UUID.randomUUID())
                 .param("workspaceId", workspaceId)
                 .param("projectId", projectId)
                 .param("externalIdentityId", externalIdentityId)
-                .param("externalUserId", externalUserId)
                 .param("stripeCustomerId", stripeCustomerId)
                 .param("evidenceSource", EVIDENCE_SOURCE_EXPLICIT_API)
                 .param("evidenceReference", EVIDENCE_REFERENCE_EXPLICIT_API)
                 .param("linkedBy", actor)
-                .query(LinkOutcome.ROW_MAPPER)
-                .optional();
+                .query(UUID.class)
+                .optional()
+                .isPresent();
     }
 
     public record LinkOutcome(
