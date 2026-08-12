@@ -17,8 +17,6 @@ public enum StripeBillingHealthReason {
     WEBHOOK_FAILURES_PRESENT,
     /** DEGRADED: the local ledger contains a record referencing another record that is not (yet) present. */
     RECONCILIATION_MISMATCH_PRESENT,
-    /** STALE: no successful sync activity has ever been recorded for this connection. */
-    NEVER_SYNCED,
     /** STALE: the most recent sync activity is older than the staleness threshold. */
     SYNC_LAG_EXCEEDED,
     /** Informational: the initial backfill has not reached DONE yet. Does not by itself degrade status. */

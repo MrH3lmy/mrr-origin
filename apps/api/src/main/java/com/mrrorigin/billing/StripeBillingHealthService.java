@@ -151,17 +151,16 @@ public class StripeBillingHealthService {
                 reasons.add(StripeBillingHealthReason.ORPHANED_EVENTS_PRESENT);
             }
 
+            // connection.updatedAt() is a NOT NULL column with a default, stamped at insert and on
+            // every subsequent change, so lastSyncAt (which falls back to it) is never null here --
+            // there is no reachable "connection exists but has no timestamp at all" state to report.
             lastSyncAt = lastSyncAt(workspaceId, connection);
             boolean anyDegradingReason = reasons.contains(StripeBillingHealthReason.CONNECTION_NOT_ACTIVE)
                     || reasons.contains(StripeBillingHealthReason.CONNECTION_UNVERIFIED)
                     || reasons.contains(StripeBillingHealthReason.WEBHOOK_FAILURES_PRESENT)
                     || reasons.contains(StripeBillingHealthReason.RECONCILIATION_MISMATCH_PRESENT);
-            if (!anyDegradingReason) {
-                if (lastSyncAt == null) {
-                    reasons.add(StripeBillingHealthReason.NEVER_SYNCED);
-                } else if (Duration.between(lastSyncAt, now).compareTo(STALE_THRESHOLD) > 0) {
-                    reasons.add(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
-                }
+            if (!anyDegradingReason && Duration.between(lastSyncAt, now).compareTo(STALE_THRESHOLD) > 0) {
+                reasons.add(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
             }
             if (!backfillComplete) {
                 reasons.add(StripeBillingHealthReason.BACKFILL_IN_PROGRESS);
@@ -318,8 +317,7 @@ public class StripeBillingHealthService {
         if (degraded) {
             return StripeBillingHealthStatus.DEGRADED;
         }
-        boolean stale = reasons.contains(StripeBillingHealthReason.NEVER_SYNCED)
-                || reasons.contains(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
+        boolean stale = reasons.contains(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
         return stale ? StripeBillingHealthStatus.STALE : StripeBillingHealthStatus.HEALTHY;
     }
 
