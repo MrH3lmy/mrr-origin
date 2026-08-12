@@ -15,15 +15,15 @@
 -- `metadata`, so there is no deterministic, inspectable evidence available today to drive it.
 --
 -- Supersession: `superseded_at`/`superseded_by_id` are reserved, append-only-friendly columns for a
--- future repair-workflow issue to correct a link without deleting its history (per ADR-0002). #16
--- itself never marks a row superseded -- a conflicting active link is rejected outright (see the
--- partial unique indexes below), since no repair workflow is approved yet.
+-- future repair-workflow issue to correct a link without deleting its history (per ADR-0002). Both
+-- values must be null or non-null together, self-supersession is rejected, and the deferred
+-- composite foreign key requires the replacement link to belong to the same workspace and project.
+-- #16 itself never marks a row superseded -- a conflicting active link is rejected outright.
 CREATE TABLE stripe_customer_links (
     id UUID PRIMARY KEY,
     workspace_id UUID NOT NULL,
     project_id UUID NOT NULL,
     external_identity_id UUID NOT NULL,
-    external_user_id VARCHAR(160) NOT NULL,
     stripe_customer_id VARCHAR(255) NOT NULL,
     evidence_source VARCHAR(24) NOT NULL,
     evidence_reference VARCHAR(512) NOT NULL,
@@ -31,6 +31,12 @@ CREATE TABLE stripe_customer_links (
     superseded_at TIMESTAMPTZ,
     superseded_by_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_stripe_customer_links_owner
+        UNIQUE (id, project_id, workspace_id),
+    CONSTRAINT chk_stripe_customer_links_supersession_pair
+        CHECK ((superseded_at IS NULL) = (superseded_by_id IS NULL)),
+    CONSTRAINT chk_stripe_customer_links_not_self_superseded
+        CHECK (superseded_by_id IS NULL OR superseded_by_id <> id),
     CONSTRAINT fk_stripe_customer_links_identity
         FOREIGN KEY (external_identity_id, project_id, workspace_id)
         REFERENCES external_identities (id, project_id, workspace_id) ON DELETE RESTRICT,
@@ -38,7 +44,9 @@ CREATE TABLE stripe_customer_links (
         FOREIGN KEY (workspace_id, stripe_customer_id)
         REFERENCES billing_customers (workspace_id, stripe_customer_id) ON DELETE RESTRICT,
     CONSTRAINT fk_stripe_customer_links_superseded_by
-        FOREIGN KEY (superseded_by_id) REFERENCES stripe_customer_links (id),
+        FOREIGN KEY (superseded_by_id, project_id, workspace_id)
+        REFERENCES stripe_customer_links (id, project_id, workspace_id)
+        DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT chk_stripe_customer_links_evidence_source
         CHECK (evidence_source IN ('EXPLICIT_API', 'STRIPE_METADATA'))
 );
