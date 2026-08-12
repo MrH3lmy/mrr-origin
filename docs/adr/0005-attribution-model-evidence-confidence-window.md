@@ -15,7 +15,7 @@ place and constrain what this ADR can assume:
 
 - V2's tracking schema (`visitors`, `tracking_sessions`, `touchpoints`) and V6's
   identity schema (`external_identities`, `visitor_aliases`) — `identify()`
-  (#8) allows exactly one active alias per `(project_id, visitor_id)`, but an
+  (#8) allows exactly one immutable alias per `(project_id, visitor_id)`, but an
   `external_identity_id` can be the target of many `visitor_aliases` rows, so a
   single application user can already be linked from more than one anonymous
   visitor.
@@ -37,7 +37,7 @@ any migration for stored attribution results.
 A touchpoint (V2 `touchpoints` row) is eligible evidence for a customer's
 acquisition attribution when all of the following hold:
 
-- It belongs to a visitor that has an active `visitor_aliases` row into the
+- It belongs to a visitor that has a `visitor_aliases` row into the
   `external_identity` that resolves (directly or through a merge, see below)
   to the Stripe customer behind the MRR movement being attributed.
 - `occurred_at` falls inside the attribution window computed for that movement
@@ -55,7 +55,7 @@ is classified as **direct** (see below), not discarded.
 
 Because `visitor_aliases` allows many visitors to point at one
 `external_identity_id`, the eligible pool for a customer is the **union** of
-touchpoints across every visitor with an active alias into that identity — not
+touchpoints across every visitor with an alias into that identity — not
 just the visitor active at conversion time. A visitor merge (the founder's
 customer browsed anonymously on two devices, then called `identify()` from
 both) does not create a new evidence tier; it simply widens the pool that
@@ -81,8 +81,10 @@ by latest `created_at`, then by the higher touchpoint `id`.
 
 ### Direct-traffic handling
 
-A touchpoint is **direct** when `referrer_url` is null or empty and no UTM
-parameter is present. Direct touchpoints are eligible evidence, and first-touch
+A touchpoint is **direct** when `referrer_url` is null or blank after trimming and all
+five UTM fields (`utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, and
+`utm_content`) are null or blank after trimming. Any populated UTM field makes the
+touchpoint non-direct. Direct touchpoints are eligible evidence, and first-touch
 and last-touch treat them asymmetrically on purpose:
 
 - **First-touch** is simply the earliest eligible touchpoint, direct or not,
@@ -139,6 +141,13 @@ merged visitors, are pooled together and ordered as described above; sessions
 themselves are not a unit of attribution, only a grouping visible in the
 customer evidence timeline.
 
+Identity evidence is evaluated at calculation time, not frozen at the acquisition
+instant. An `identify()` call or a second-device alias created after New MRR may therefore
+make older, in-window touchpoints eligible on recalculation. This is deliberate late-link
+repair: the touchpoint timestamp must still precede the acquisition anchor, and the alias
+and customer link remain inspectable. The engine never rewrites the historical touchpoint
+or pretends the identity was known earlier.
+
 ### Evidence precedence: Verified, Strong, Moderate, Unattributed
 
 Every confidence label maps to one inspectable, deterministic, stored record —
@@ -147,8 +156,8 @@ never a score, a probability, or an unstored inference:
 | Confidence       | Stored evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Touchpoint pool source                                                                                                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Verified**     | A visitor identifier explicitly present in Stripe object metadata (e.g. `Customer.metadata`, a Checkout Session's `client_reference_id`) that matches a `visitors.external_visitor_id` row 1:1, recorded as a `stripe_customer_links` row with `evidence_source = STRIPE_METADATA` and `evidence_reference` pointing at the exact metadata field and Stripe object ID read. Reserved by V8; not populated until billing persists Stripe metadata (tracked separately from #18). | The visitor named directly by the metadata, plus any other visitor merged into the same `external_identity` via `visitor_aliases`, if the metadata visitor itself was later identified. |
-| **Strong**       | An `identify(externalUserId)` call recorded in `visitor_aliases`, bridged to a Stripe customer by an explicit, authenticated `stripe_customer_links` row with `evidence_source = EXPLICIT_API` (#16). `evidence_reference` is that link row's `id`.                                                                                                                                                                                                                             | Every visitor with an active `visitor_aliases` row into that `external_identity`.                                                                                                       |
-| **Moderate**     | An approved deterministic alias — in V1 scope, an exact match between a normalized (lowercased, trimmed) email hash captured by the tracker's `identify()` payload and the email Stripe reports for that customer. Reserved for a future evidence source and schema; not implemented by #16 or this ADR. It is exact-match only: any similarity, edit-distance, or partial-match scheme is Moderate in name only and is out of scope permanently, not just for V1.              | Same shape as Strong, once the alias schema exists.                                                                                                                                     |
+| **Strong**       | An `identify(externalUserId)` call recorded in `visitor_aliases`, bridged to a Stripe customer by an explicit, authenticated `stripe_customer_links` row with `evidence_source = EXPLICIT_API` (#16). `evidence_reference` is that link row's `id`.                                                                                                                                                                                                                             | Every visitor with a `visitor_aliases` row into that `external_identity`.                                                                                                       |
+| **Moderate**     | An approved deterministic alias. The V1 contract reserves an exact match of a workspace-keyed HMAC computed server-side from an explicitly supplied, lowercased and trimmed email on both sides. Raw email and an unkeyed, enumerable email hash must not be stored as evidence. The capture/API path, key management, and evidence table are future scope; Moderate is not produced by #16 or #18 until that storage exists. Any similarity, edit-distance, partial-match, or inferred-email scheme is permanently out of scope. | Same shape as Strong once the alias schema exists.                                                                                                                                     |
 | **Unattributed** | No active link of any of the above kinds, or a link exists but its touchpoint pool has no eligible touchpoint inside the window.                                                                                                                                                                                                                                                                                                                                                | None.                                                                                                                                                                                   |
 
 Confidence is a property of the **link**, not of how many touchpoints it
@@ -160,36 +169,36 @@ acquisition source to show next to it).
 
 ### Conflict behavior when deterministic evidence disagrees
 
-Two conflict shapes are possible:
+V8 permits at most one non-superseded `stripe_customer_links` row per external
+identity and per Stripe customer, regardless of evidence tier. Consequently, the
+attribution engine never receives two active link rows for one customer and must not
+invent a precedence contest that the schema cannot represent.
 
-1. **Same-tier conflict** — two attempts to create an active link of the same
-   evidence source disagree (e.g. two different `EXPLICIT_API` calls try to
-   link the same external identity to different Stripe customers). This is
-   already rejected outright at write time by #16's service and V8's partial
-   unique indexes; it cannot exist as two simultaneous active rows. There is
-   nothing for the attribution layer to resolve.
-2. **Cross-tier conflict** — a higher-tier and a lower-tier link both resolve
-   to the same Stripe customer but imply **disjoint** touchpoint pools (e.g.
-   Verified metadata names visitor A, but Strong's alias-derived pool for the
-   same customer is built entirely from visitor B, and B was never merged with
-   A). The higher tier wins for both the reported confidence and the
-   touchpoint pool used — Strong evidence is never blended with or averaged
-   against Verified evidence, and a lower tier is never used to "fill in" gaps
-   in a higher tier's pool. The disagreement itself is not discarded: it is
-   recorded as a stored conflict marker alongside the winning evidence so it
-   surfaces in data health / the unattributed-revenue inbox (`PRODUCT.md` job 4) for manual repair, instead of silently picking a side with no trace.
-   This marker, and the repair flow that consumes it, is #18/dashboard scope;
-   this ADR only commits to "record it, don't hide it."
+Conflict behavior applies while deterministic evidence candidates are being resolved:
 
-Blending evidence tiers, picking whichever pool has more touchpoints, or
-picking whichever pool is more recent are all explicitly rejected as resolution
-strategies — precedence is by tier only.
+1. **Same-tier conflict** — candidates at the same tier that disagree are rejected.
+   The existing active link, if any, remains unchanged; no attribution is recalculated
+   from the rejected candidate.
+2. **Cross-tier agreement** — when candidates at different tiers resolve to the same
+   external identity and therefore the same touchpoint pool, the highest tier wins:
+   Verified, then Strong, then Moderate.
+3. **Cross-tier disagreement** — when a higher- and lower-tier candidate imply
+   different identities or disjoint pools, the higher tier is the proposed winner, but
+   the lower-tier pool is never blended in or used to fill a gap. Before any automatic
+   supersession, the resolver must durably record the conflict and the winning and
+   losing evidence references. Until that conflict-recording write path exists, the
+   attempt is rejected and the existing active link remains authoritative.
+
+This separates candidate resolution from stored active-link selection and matches V8's
+uniqueness constraints. Blending tiers, picking the pool with more touchpoints, or
+picking the most recent pool are explicitly rejected.
 
 ### No-evidence behavior
 
 When no active link exists at all, or an active link's touchpoint pool is
 empty for the window, the stored attribution result is `Unattributed` with
-null evidence references. `Unattributed` is a first-class, permanently visible
+null evidence references and a stable reason: `NO_ACTIVE_LINK` or
+`NO_ELIGIBLE_TOUCHPOINT`. `Unattributed` is a first-class, permanently visible
 result per `PRODUCT.md`'s evidence principle — it is never converted to
 "direct," omitted from reports, or backfilled with a guess.
 
@@ -198,7 +207,8 @@ result per `PRODUCT.md`'s evidence principle — it is never converted to
 - Every derived attribution result stores a `model_version` string, references
   to the evidence it used (the `stripe_customer_links` row id, and the
   selected touchpoint id(s) for first-touch/last-touch), a computed
-  `confidence`, and a `calculated_at` timestamp — mirroring
+  `confidence`, an `unattributed_reason` when applicable, and a `calculated_at`
+  timestamp — mirroring
   `ARCHITECTURE.md`'s attribution-path description and ADR-0002's
   raw/derived split. Raw touchpoints, aliases, and links are never mutated by
   attribution; only derived result rows change.
@@ -276,9 +286,9 @@ evidence, not merely deferred:
 
 - #18 can implement the engine directly against this contract: pool
   construction, first/last-touch selection, direct handling, window
-  evaluation, and the four confidence tiers are all fully specified without
-  further product input, except Moderate evidence's alias schema (explicitly
-  deferred) and the conflict-marker repair UI (dashboard scope).
+  evaluation, and confidence precedence are fully specified. Strong and Unattributed are
+  implementable from current storage; Verified and Moderate stay disabled until their
+  explicitly deferred evidence writers and schemas exist.
 - A 90-day default window and last-non-direct-touch handling are now committed
   V1 behavior; changing either later is a model-version bump under this ADR,
   not a new ADR, unless the change also touches which evidence tiers exist.
@@ -291,9 +301,9 @@ evidence, not merely deferred:
   not yet backed by data (no email-hash alias table exists; billing does not
   persist Stripe metadata yet) — until then, real attribution results in V1
   can only be Strong or Unattributed. This is expected, not a gap in this ADR.
-- Cross-tier conflicts are recorded rather than silently resolved, which means
-  #18 must design a storage shape for the conflict marker even though the
-  repair workflow that consumes it is out of scope here.
+- V8 prevents multiple active links for one customer. A future evidence writer must
+  durably record cross-tier disagreements before superseding an active link; #18 does
+  not need to model impossible simultaneous active links.
 
 ## Open product decisions
 
