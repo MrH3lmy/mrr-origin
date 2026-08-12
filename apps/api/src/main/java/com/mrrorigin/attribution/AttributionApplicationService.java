@@ -75,12 +75,33 @@ public class AttributionApplicationService {
         long eligible = 0, attributed = 0;
         Map<String, Long> exclusionReasons = new LinkedHashMap<>();
         for (var row : db.sql("""
-                SELECT r.confidence,r.unattributed_reason,count(*)
-                FROM customer_attribution_results r
-                JOIN customer_mrr_movements m ON m.workspace_id=r.workspace_id AND m.id=r.movement_id
-                WHERE r.workspace_id=:w AND r.project_id=:p AND r.model_version=:v AND m.movement_type='NEW'
-                GROUP BY r.confidence,r.unattributed_reason
+                WITH candidates AS (
+                  SELECT stripe_customer_id AS customer_id
+                  FROM stripe_customer_links
+                  WHERE workspace_id=:w AND project_id=:p AND superseded_at IS NULL
+                  UNION
+                  SELECT m.stripe_customer_id AS customer_id
+                  FROM customer_attribution_results r
+                  JOIN customer_mrr_movements m ON m.workspace_id=r.workspace_id AND m.id=r.movement_id
+                  WHERE r.workspace_id=:w AND r.project_id=:p
+                ),
+                acquisitions AS (
+                  SELECT DISTINCT ON (m.stripe_customer_id) m.stripe_customer_id,m.id AS movement_id
+                  FROM customer_mrr_movements m
+                  JOIN candidates c ON c.customer_id=m.stripe_customer_id
+                  WHERE m.workspace_id=:w AND m.calculation_version=:calculationVersion
+                    AND m.movement_type='NEW'
+                  ORDER BY m.stripe_customer_id,m.effective_at,m.id
+                )
+                SELECT r.confidence,
+                  CASE WHEN r.id IS NULL THEN 'NOT_RECALCULATED' ELSE r.unattributed_reason END AS exclusion_reason,
+                  count(*)
+                FROM acquisitions a
+                LEFT JOIN customer_attribution_results r
+                  ON r.workspace_id=:w AND r.project_id=:p AND r.movement_id=a.movement_id AND r.model_version=:v
+                GROUP BY r.confidence,exclusion_reason
                 """).param("w", workspaceId).param("p", projectId).param("v", modelVersion)
+                .param("calculationVersion", RevenueCalculationService.CALCULATION_VERSION)
                 .query((rs, n) -> new CoverageRow(rs.getString(1), rs.getString(2), rs.getLong(3))).list()) {
             eligible += row.count();
             if ("STRONG".equals(row.confidence())) attributed += row.count();
