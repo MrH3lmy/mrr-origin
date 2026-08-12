@@ -27,8 +27,41 @@ CREATE TABLE customer_mrr_snapshots (
  effective_at TIMESTAMPTZ NOT NULL, calculation_version VARCHAR(32) NOT NULL, supported BOOLEAN NOT NULL,
  unsupported_reason VARCHAR(64), source_billing_references TEXT[] NOT NULL,
  calculated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
- UNIQUE(workspace_id,stripe_customer_id,currency,effective_at,calculation_version),
- CHECK((supported AND amount_minor IS NOT NULL AND unsupported_reason IS NULL AND currency IS NOT NULL)
+ UNIQUE NULLS NOT DISTINCT(workspace_id,stripe_customer_id,currency,effective_at,calculation_version),
+ CHECK(currency IS NULL OR currency ~ '^[A-Z]{3}
+    OR (NOT supported AND amount_minor IS NULL AND unsupported_reason IS NOT NULL))
+);
+CREATE INDEX idx_customer_mrr_snapshots_tenant ON customer_mrr_snapshots(workspace_id,stripe_customer_id,effective_at);
+CREATE TABLE customer_mrr_movements (
+ id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+ stripe_customer_id VARCHAR(255) NOT NULL, currency VARCHAR(3) NOT NULL, amount_minor BIGINT NOT NULL,
+ movement_type VARCHAR(16) NOT NULL, effective_at TIMESTAMPTZ NOT NULL, calculation_version VARCHAR(32) NOT NULL,
+ source_billing_references TEXT[] NOT NULL, calculated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(workspace_id,stripe_customer_id,currency,effective_at,calculation_version), CHECK(amount_minor>0),
+ CHECK(currency ~ '^[A-Z]{3}
+ CHECK(movement_type IN ('NEW','EXPANSION','CONTRACTION','CHURN','REACTIVATION'))
+);
+CREATE INDEX idx_customer_mrr_movements_tenant ON customer_mrr_movements(workspace_id,stripe_customer_id,effective_at);
+),
+ CHECK((supported AND amount_minor IS NOT NULL AND amount_minor>=0 AND unsupported_reason IS NULL AND currency IS NOT NULL)
+    OR (NOT supported AND amount_minor IS NULL AND unsupported_reason IS NOT NULL))
+);
+CREATE INDEX idx_customer_mrr_snapshots_tenant ON customer_mrr_snapshots(workspace_id,stripe_customer_id,effective_at);
+CREATE TABLE customer_mrr_movements (
+ id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+ stripe_customer_id VARCHAR(255) NOT NULL, currency VARCHAR(3) NOT NULL, amount_minor BIGINT NOT NULL,
+ movement_type VARCHAR(16) NOT NULL, effective_at TIMESTAMPTZ NOT NULL, calculation_version VARCHAR(32) NOT NULL,
+ source_billing_references TEXT[] NOT NULL, calculated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(workspace_id,stripe_customer_id,currency,effective_at,calculation_version), CHECK(amount_minor>0),
+ CHECK(movement_type IN ('NEW','EXPANSION','CONTRACTION','CHURN','REACTIVATION'))
+);
+CREATE INDEX idx_customer_mrr_movements_tenant ON customer_mrr_movements(workspace_id,stripe_customer_id,effective_at);
+),
+ CHECK(movement_type IN ('NEW','EXPANSION','CONTRACTION','CHURN','REACTIVATION'))
+);
+CREATE INDEX idx_customer_mrr_movements_tenant ON customer_mrr_movements(workspace_id,stripe_customer_id,effective_at);
+),
+ CHECK((supported AND amount_minor IS NOT NULL AND amount_minor>=0 AND unsupported_reason IS NULL AND currency IS NOT NULL)
     OR (NOT supported AND amount_minor IS NULL AND unsupported_reason IS NOT NULL))
 );
 CREATE INDEX idx_customer_mrr_snapshots_tenant ON customer_mrr_snapshots(workspace_id,stripe_customer_id,effective_at);
