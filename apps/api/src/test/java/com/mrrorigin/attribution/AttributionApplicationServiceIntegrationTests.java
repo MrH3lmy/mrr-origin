@@ -41,6 +41,9 @@ class AttributionApplicationServiceIntegrationTests {
     @Test void storesStrongExplanationAndAllMovementsInheritItIdempotently() {
         movement("new", "NEW", "2026-04-01T00:00:00Z");
         movement("expansion", "EXPANSION", "2026-05-01T00:00:00Z");
+        movement("contraction", "CONTRACTION", "2026-06-01T00:00:00Z");
+        movement("churn", "CHURN", "2026-07-01T00:00:00Z");
+        movement("reactivation", "REACTIVATION", "2026-08-01T00:00:00Z");
         UUID link = identityLink("cus", "EXPLICIT_API");
         UUID first = touchpoint("2026-01-01T00:00:00Z", "google", null);
         touchpoint("2026-03-20T00:00:00Z", null, null); // direct return is not last touch
@@ -48,7 +51,7 @@ class AttributionApplicationServiceIntegrationTests {
         var firstRun = service.recalculate(workspace, project, "cus");
         var secondRun = service.recalculate(workspace, project, "cus");
 
-        assertThat(firstRun).hasSize(2).allSatisfy(result -> {
+        assertThat(firstRun).hasSize(5).allSatisfy(result -> {
             assertThat(result.acquisitionMovementId()).isEqualTo(firstRun.getFirst().acquisitionMovementId());
             assertThat(result.firstTouch().touchpointId()).isEqualTo(first);
             assertThat(result.lastTouch().touchpointId()).isEqualTo(first);
@@ -57,7 +60,9 @@ class AttributionApplicationServiceIntegrationTests {
         });
         assertThat(secondRun).extracting(CustomerAttributionExplanation::movementId)
                 .containsExactlyElementsOf(firstRun.stream().map(CustomerAttributionExplanation::movementId).toList());
-        assertThat(countResults()).isEqualTo(2);
+        assertThat(firstRun).extracting(CustomerAttributionExplanation::movementType)
+                .containsExactly("NEW", "EXPANSION", "CONTRACTION", "CHURN", "REACTIVATION");
+        assertThat(countResults()).isEqualTo(5);
     }
 
     @Test void distinguishesMissingLinkFromEmptyPoolAndKeepsStrongIdentityEvidence() {
@@ -72,6 +77,72 @@ class AttributionApplicationServiceIntegrationTests {
             assertThat(result.customerLinkEvidenceId()).isEqualTo(link);
             assertThat(result.sourceReferences()).containsExactly("stripe_customer_links:" + link);
         });
+
+        UUID lateTouchpoint = touchpoint("2026-01-15T00:00:00Z", "google", "late-link");
+        assertThat(service.recalculate(workspace, project, "cus")).singleElement().satisfies(result -> {
+            assertThat(result.confidence()).isEqualTo("STRONG");
+            assertThat(result.unattributedReason()).isNull();
+            assertThat(result.firstTouch().touchpointId()).isEqualTo(lateTouchpoint);
+        });
+        assertThat(countResults()).isOne();
+    }
+
+    @Test void appliesClosedWindowThroughTheIdentityGraphAndRejectsExpiredAndFutureTouches() {
+        movement("new", "NEW", "2026-04-01T00:00:00Z");
+        identityLink("cus", "EXPLICIT_API");
+        UUID boundary = touchpoint("2026-01-01T00:00:00Z", "google", "window-start");
+        UUID lastEligible = touchpoint("2026-03-31T00:00:00Z", "bing", "last-eligible");
+        UUID expired = touchpoint("2025-12-31T23:59:59Z", "expired", null);
+        UUID future = touchpoint("2026-04-01T00:00:01Z", "future", null);
+
+        assertThat(service.recalculate(workspace, project, "cus")).singleElement().satisfies(result -> {
+            assertThat(result.firstTouch().touchpointId()).isEqualTo(boundary);
+            assertThat(result.lastTouch().touchpointId()).isEqualTo(lastEligible);
+            assertThat(result.sourceReferences())
+                    .doesNotContain("touchpoints:" + expired, "touchpoints:" + future);
+        });
+    }
+
+    @Test void keepsWorkspacesIsolatedEvenWhenStripeCustomerIdsMatch() {
+        movement("original-new", "NEW", "2026-04-01T00:00:00Z");
+        identityLink("cus", "EXPLICIT_API");
+
+        UUID originalWorkspace = workspace;
+        UUID originalProject = project;
+        workspace = UUID.randomUUID();
+        project = UUID.randomUUID();
+        db.sql("INSERT INTO workspaces(id,name,slug) VALUES(:w,'other',:slug)")
+                .param("w",workspace).param("slug","w-"+workspace).update();
+        project(project, workspace, "other.example");
+        movement("other-new", "NEW", "2026-04-01T00:00:00Z");
+
+        assertThat(service.recalculate(workspace, project, "cus")).singleElement().satisfies(result -> {
+            assertThat(result.workspaceId()).isEqualTo(workspace);
+            assertThat(result.projectId()).isEqualTo(project);
+            assertThat(result.confidence()).isEqualTo("UNATTRIBUTED");
+            assertThat(result.unattributedReason()).isEqualTo("NO_ACTIVE_LINK");
+        });
+        assertThat(db.sql("SELECT count(*) FROM customer_attribution_results WHERE workspace_id=:w")
+                .param("w",originalWorkspace).query(Long.class).single()).isZero();
+
+        workspace = originalWorkspace;
+        project = originalProject;
+    }
+
+    @Test void upstreamRevenueReplayCanReplaceMovementsWithoutBeingBlockedByAttribution() {
+        movement("new", "NEW", "2026-04-01T00:00:00Z");
+        identityLink("cus", "EXPLICIT_API");
+        touchpoint("2026-03-01T00:00:00Z", "google", null);
+        assertThat(service.recalculate(workspace, project, "cus")).hasSize(1);
+        assertThat(countResults()).isOne();
+
+        db.sql("DELETE FROM customer_mrr_movements WHERE workspace_id=:w AND stripe_customer_id='cus'")
+                .param("w",workspace).update();
+        assertThat(countResults()).isZero();
+
+        movement("replayed-new", "NEW", "2026-04-01T00:00:00Z");
+        assertThat(service.recalculate(workspace, project, "cus")).hasSize(1);
+        assertThat(countResults()).isOne();
     }
 
     @Test void rejectsWrongProjectRatherThanPersistingFalseNoActiveLink() {
