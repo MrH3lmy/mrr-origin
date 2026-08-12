@@ -15,9 +15,7 @@
           "utmSource": "google"
         }
       ],
-      "expectedEligibleTouchpointIds": [
-        "tp-delayed-1"
-      ],
+      "expectedEligibleTouchpointIds": ["tp-delayed-1"],
       "expectedFirstTouchId": "tp-delayed-1",
       "expectedLastTouchId": "tp-delayed-1"
     },
@@ -42,10 +40,7 @@
           "utmSource": "newsletter"
         }
       ],
-      "expectedEligibleTouchpointIds": [
-        "tp-session-a",
-        "tp-session-b"
-      ],
+      "expectedEligibleTouchpointIds": ["tp-session-a", "tp-session-b"],
       "expectedFirstTouchId": "tp-session-a",
       "expectedLastTouchId": "tp-session-b"
     },
@@ -90,9 +85,7 @@
           "utmSource": null
         }
       ],
-      "expectedEligibleTouchpointIds": [
-        "tp-direct-only"
-      ],
+      "expectedEligibleTouchpointIds": ["tp-direct-only"],
       "expectedFirstTouchId": "tp-direct-only",
       "expectedLastTouchId": "tp-direct-only"
     },
@@ -342,17 +335,13 @@
           "tier": "VERIFIED",
           "evidenceSource": "STRIPE_METADATA",
           "evidenceReference": "link-verified-conflict-1",
-          "poolVisitorIds": [
-            "visitor-verified-conflict"
-          ]
+          "poolVisitorIds": ["visitor-verified-conflict"]
         },
         {
           "tier": "STRONG",
           "evidenceSource": "EXPLICIT_API",
           "evidenceReference": "link-strong-conflict-1",
-          "poolVisitorIds": [
-            "visitor-strong-conflict"
-          ]
+          "poolVisitorIds": ["visitor-strong-conflict"]
         }
       ],
       "touchpoints": [
