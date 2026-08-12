@@ -26,8 +26,10 @@ CREATE TABLE customer_attribution_results (
         REFERENCES projects (id, workspace_id) ON DELETE CASCADE,
     CONSTRAINT fk_attribution_movement FOREIGN KEY (workspace_id, movement_id)
         REFERENCES customer_mrr_movements (workspace_id, id) ON DELETE CASCADE,
+    -- Revenue movements are derived and V9 replay replaces them. Attribution is also derived,
+    -- so stale results must cascade instead of blocking the upstream revenue replay.
     CONSTRAINT fk_attribution_acquisition FOREIGN KEY (workspace_id, acquisition_movement_id)
-        REFERENCES customer_mrr_movements (workspace_id, id) ON DELETE RESTRICT,
+        REFERENCES customer_mrr_movements (workspace_id, id) ON DELETE CASCADE,
     CONSTRAINT fk_attribution_first_touch FOREIGN KEY (first_touchpoint_id, project_id, workspace_id)
         REFERENCES touchpoints (id, project_id, workspace_id) ON DELETE RESTRICT,
     CONSTRAINT fk_attribution_last_touch FOREIGN KEY (last_touchpoint_id, project_id, workspace_id)
@@ -39,8 +41,13 @@ CREATE TABLE customer_attribution_results (
         (confidence = 'STRONG' AND unattributed_reason IS NULL AND first_touchpoint_id IS NOT NULL
             AND last_touchpoint_id IS NOT NULL AND customer_link_evidence_id IS NOT NULL)
         OR
-        (confidence = 'UNATTRIBUTED' AND unattributed_reason IN ('NO_ACTIVE_LINK', 'NO_ELIGIBLE_TOUCHPOINT')
-            AND first_touchpoint_id IS NULL AND last_touchpoint_id IS NULL)
+        (confidence = 'UNATTRIBUTED'
+            AND first_touchpoint_id IS NULL AND last_touchpoint_id IS NULL
+            AND (
+                (unattributed_reason = 'NO_ACTIVE_LINK' AND customer_link_evidence_id IS NULL)
+                OR
+                (unattributed_reason = 'NO_ELIGIBLE_TOUCHPOINT' AND customer_link_evidence_id IS NOT NULL)
+            ))
     )
 );
 
