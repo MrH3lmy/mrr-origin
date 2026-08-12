@@ -1,6 +1,6 @@
 # ADR-0004: V1 MRR normalization and movement semantics
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-12
 
 ## Context
@@ -55,12 +55,19 @@ quantity`, after eligible discounts. Quantities must be positive integers; missi
 
 - A trial contributes zero MRR. When the paid recurring state begins, `trial_end` is
   the effective date; trial creation is not New MRR.
-- Active paid and delinquent (`past_due` or `unpaid`) subscriptions retain normalized
-  MRR. Failed, late, retried, or recovered payments are cash/collection events and do
-  not themselves change recurring-revenue state.
-- A billing-collection pause contributes zero MRR from the provider's effective pause
-  timestamp. Resume restores MRR at the effective resume timestamp. A pause without a
-  reliable effective timestamp is unsupported.
+- `active` and `past_due` subscriptions retain normalized MRR. A temporary failed
+  renewal does not itself change recurring-revenue state while Stripe continues its
+  recovery process.
+- `incomplete`, `incomplete_expired`, `unpaid`, `canceled`, and `paused`
+  subscriptions contribute zero MRR. The transition to one of these zero-MRR states
+  uses the provider-declared status-effective timestamp and produces customer-level
+  contraction or churn. A later transition back to positive recurring state produces
+  expansion or reactivation according to the customer's prior per-currency history.
+- Stripe's actual subscription status `paused` contributes zero MRR because invoicing
+  has stopped. This is distinct from `pause_collection`: pausing payment collection
+  leaves the subscription status and invoicing lifecycle active, so
+  `pause_collection` alone does not change MRR. Resume from actual `paused` status
+  restores MRR only when the subscription becomes active at a reliable provider time.
 - Immediate cancellation churns at the provider's effective cancellation timestamp.
   A scheduled period-end cancellation retains MRR until `current_period_end` and
   churns then. A cancel request or webhook receipt time is not the effective date.
@@ -71,9 +78,11 @@ quantity`, after eligible discounts. Quantities must be positive integers; missi
   or cancellation change is effective at the provider-declared state-change time.
   Event creation, ingestion, and processing timestamps are fallback evidence only and
   must not be substituted when the effective time is unknown.
-- Equal effective timestamps are resolved from the complete normalized state at that
-  instant, producing at most one net customer movement per currency. Reprocessing or
-  duplicate inputs produces no additional movement.
+- Equal effective timestamps are grouped before classification. The engine compares
+  the complete customer state immediately before the timestamp with the complete state
+  immediately after all changes at that timestamp, producing at most one net movement
+  per currency. It must not emit offsetting intermediate expansion and contraction.
+  Reprocessing or duplicate inputs produces no additional movement.
 
 ### Customer movements
 
@@ -91,8 +100,10 @@ effective timestamp, independently per currency:
 
 Movement amount is the absolute integer-minor-unit difference. Customer aggregation
 means canceling one of several subscriptions is contraction unless total customer MRR
-reaches zero. Moving directly between currencies is a churn in the old currency and
-new/reactivation in the new currency; the amounts are never netted.
+reaches zero. Movement history is tracked independently per currency: moving directly
+between currencies is a churn in the old currency and New in a currency where that
+customer has never had positive MRR, or Reactivation where that customer previously
+had positive MRR in that currency. Currency amounts are never netted or converted.
 
 ### Retained MRR and NRR
 
@@ -135,7 +146,8 @@ Initial V1 reason codes are:
 - Results are deterministic, replayable, and independent of cash collection.
 - Annual normalization and percentage discounts can create fractional minor units;
   the documented subscription-boundary rounding makes those results stable.
-- Delinquent MRR may remain positive even when cash has not been collected. The UI
+- `past_due` MRR may remain positive during recovery even when cash has not been
+  collected; `unpaid` is zero because Stripe's recovery lifecycle has ended. The UI
   must present billing health separately rather than silently redefining MRR.
 - V1 reports separate currency series and cannot show a truthful global MRR/NRR total.
   A reporting-currency source and historical FX policy require a later ADR.
