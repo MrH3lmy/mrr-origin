@@ -81,10 +81,14 @@ class StripeWebhookReplayIntegrationTests extends AbstractBillingLedgerIntegrati
         assertThat(replayCount(eventId)).isZero();
         assertThat(subscriptionSnapshot(workspaceId, subscriptionId)).isEmpty();
 
-        // Now seed the expanded subscription (no bare discount id) so reprocessing succeeds, and replay.
+        // Now seed the expanded subscription, with a full discount object resolving the same
+        // "di_bare_unexpanded" id the raw event referenced only by id, so reprocessing succeeds.
+        String expandedDiscount = BillingFixtures.discount(
+                "di_bare_unexpanded", null, subscriptionId, "coupon_transient_fix", 10L, null, null,
+                BASE.getEpochSecond(), null);
         String expandedSubscription = BillingFixtures.subscription(
                 subscriptionId, "cus_transient_fail", "active", "usd", BASE.getEpochSecond(),
-                BASE.plusSeconds(2_592_000).getEpochSecond(), false, null, null, item, null);
+                BASE.plusSeconds(2_592_000).getEpochSecond(), false, null, null, item, expandedDiscount);
         STRIPE_LIST_STUB.seedSingleSubscription(subscriptionId, expandedSubscription);
 
         StripeWebhookReplayService.ReplayOutcome outcome = replayService.replayEvent(workspaceId, eventId);
@@ -149,10 +153,15 @@ class StripeWebhookReplayIntegrationTests extends AbstractBillingLedgerIntegrati
         assertThat(processingState(eventId)).isEqualTo("FAILED");
         assertThat(failureKind(eventId)).isEqualTo("TRANSIENT");
 
-        // Now make it fixable: seed the expanded subscription the normalizer will fetch on retry.
+        // Now make it fixable: seed the expanded subscription, with a full discount object resolving
+        // the same "di_bare_interrupt" id the raw event referenced only by id, for the normalizer to
+        // fetch on retry.
+        String expandedDiscount = BillingFixtures.discount(
+                "di_bare_interrupt", null, subscriptionId, "coupon_interrupt_fix", 10L, null, null,
+                BASE.getEpochSecond(), null);
         String expandedSubscription = BillingFixtures.subscription(
                 subscriptionId, "cus_interrupt", "active", "usd", BASE.getEpochSecond(),
-                BASE.plusSeconds(2_592_000).getEpochSecond(), false, null, null, item, null);
+                BASE.plusSeconds(2_592_000).getEpochSecond(), false, null, null, item, expandedDiscount);
         STRIPE_LIST_STUB.seedSingleSubscription(subscriptionId, expandedSubscription);
 
         // Replay requeues to PENDING, then a worker claims it (starting reprocessing)...
