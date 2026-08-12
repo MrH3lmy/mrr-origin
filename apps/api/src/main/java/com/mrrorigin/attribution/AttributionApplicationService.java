@@ -3,7 +3,9 @@ package com.mrrorigin.attribution;
 import com.mrrorigin.revenue.RevenueCalculationService;
 import java.time.Clock;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
@@ -17,10 +19,20 @@ public class AttributionApplicationService {
 
     public AttributionApplicationService(JdbcClient db, Clock clock) { this.db = db; this.clock = clock; }
 
-    /** Recalculates all movements from the original NEW movement in one atomic operation. */
+    /**
+     * Recalculates all movements from the original NEW movement in one atomic operation.
+     *
+     * <p>Holds the same {@code hashtext(workspace, customer)} advisory lock {@link
+     * com.mrrorigin.revenue.RevenueCalculationService} uses for MRR replay, so a concurrent
+     * recalculation (a second caller, or {@link AttributionRecalculationService}'s batch job
+     * revisiting the same customer) and a concurrent upstream revenue replay for the same customer
+     * always serialize instead of racing -- recalculation can never observe a half-replayed
+     * movement history, and two recalculations for the same customer can never interleave.
+     */
     @Transactional
     public List<CustomerAttributionExplanation> recalculate(UUID workspaceId, UUID projectId, String customerId) {
         require(workspaceId, projectId, customerId);
+        lockCustomer(workspaceId, customerId);
         List<Movement> movements = movements(workspaceId, customerId);
         if (movements.isEmpty()) return List.of();
         Movement acquisition = movements.stream().filter(m -> m.type().equals("NEW")).findFirst()
@@ -53,6 +65,49 @@ public class AttributionApplicationService {
                         evidence(rs.getObject(10, UUID.class), rs.getString(11), rs.getString(12), rs.getString(13)),
                         rs.getObject(14, UUID.class), rs.getString(15), rs.getString(16),
                         List.of((String[]) rs.getArray(17).getArray()), rs.getObject(18, OffsetDateTime.class))).list();
+    }
+
+    /** See {@link AttributionCoverage} for the numerator/denominator/exclusion-reason contract. */
+    public AttributionCoverage coverage(UUID workspaceId, UUID projectId, String modelVersion) {
+        if (workspaceId == null || projectId == null || modelVersion == null || modelVersion.isBlank()) {
+            throw new IllegalArgumentException("workspace, project and model version are required");
+        }
+        long eligible = 0, attributed = 0;
+        Map<String, Long> exclusionReasons = new LinkedHashMap<>();
+        for (var row : db.sql("""
+                WITH candidates AS (
+                  SELECT stripe_customer_id AS customer_id
+                  FROM stripe_customer_links
+                  WHERE workspace_id=:w AND project_id=:p AND superseded_at IS NULL
+                  UNION
+                  SELECT m.stripe_customer_id AS customer_id
+                  FROM customer_attribution_results r
+                  JOIN customer_mrr_movements m ON m.workspace_id=r.workspace_id AND m.id=r.movement_id
+                  WHERE r.workspace_id=:w AND r.project_id=:p
+                ),
+                acquisitions AS (
+                  SELECT DISTINCT ON (m.stripe_customer_id) m.stripe_customer_id,m.id AS movement_id
+                  FROM customer_mrr_movements m
+                  JOIN candidates c ON c.customer_id=m.stripe_customer_id
+                  WHERE m.workspace_id=:w AND m.calculation_version=:calculationVersion
+                    AND m.movement_type='NEW'
+                  ORDER BY m.stripe_customer_id,m.effective_at,m.id
+                )
+                SELECT r.confidence,
+                  CASE WHEN r.id IS NULL THEN 'NOT_RECALCULATED' ELSE r.unattributed_reason END AS exclusion_reason,
+                  count(*)
+                FROM acquisitions a
+                LEFT JOIN customer_attribution_results r
+                  ON r.workspace_id=:w AND r.project_id=:p AND r.movement_id=a.movement_id AND r.model_version=:v
+                GROUP BY r.confidence,exclusion_reason
+                """).param("w", workspaceId).param("p", projectId).param("v", modelVersion)
+                .param("calculationVersion", RevenueCalculationService.CALCULATION_VERSION)
+                .query((rs, n) -> new CoverageRow(rs.getString(1), rs.getString(2), rs.getLong(3))).list()) {
+            eligible += row.count();
+            if ("STRONG".equals(row.confidence())) attributed += row.count();
+            else exclusionReasons.merge(row.reason(), row.count(), Long::sum);
+        }
+        return new AttributionCoverage(workspaceId, projectId, modelVersion, eligible, attributed, exclusionReasons);
     }
 
     private Result calculate(Link link, OffsetDateTime anchor) {
@@ -95,11 +150,13 @@ public class AttributionApplicationService {
                 .param("confidence", r.confidence()).param("reason", r.reason()).param("refs", r.references().toArray(String[]::new)).param("at", at).update();
     }
 
+    private void lockCustomer(UUID w, String c) { db.sql("SELECT pg_advisory_xact_lock(hashtext(:w),hashtext(:c))").param("w", w.toString()).param("c", c).query((r,n)->0).single(); }
     private List<Movement> movements(UUID w, String c) { return db.sql("SELECT id,movement_type,effective_at FROM customer_mrr_movements WHERE workspace_id=:w AND stripe_customer_id=:c AND calculation_version=:v ORDER BY effective_at,id").param("w",w).param("c",c).param("v",RevenueCalculationService.CALCULATION_VERSION).query((r,n)->new Movement(r.getObject(1,UUID.class),r.getString(2),r.getObject(3,OffsetDateTime.class))).list(); }
     private Link activeLink(UUID w, String c) { return db.sql("SELECT id,workspace_id,project_id,external_identity_id,evidence_source FROM stripe_customer_links WHERE workspace_id=:w AND stripe_customer_id=:c AND superseded_at IS NULL").param("w",w).param("c",c).query((r,n)->new Link(r.getObject(1,UUID.class),r.getObject(2,UUID.class),r.getObject(3,UUID.class),r.getObject(4,UUID.class),r.getString(5))).optional().orElse(null); }
     private static CustomerAttributionExplanation.Evidence evidence(UUID id,String s,String c,String l){return id==null?null:new CustomerAttributionExplanation.Evidence(id,s,c,l);}
     private static UUID id(AttributionV1Engine.Touchpoint t){return t==null?null:UUID.fromString(t.id());} private static String source(AttributionV1Engine.Touchpoint t){return t==null?null:t.source();} private static String campaign(AttributionV1Engine.Touchpoint t){return t==null?null:t.campaign();} private static String landing(AttributionV1Engine.Touchpoint t){return t==null?null:t.landingPage();}
     private static void require(UUID w,UUID p,String c){if(w==null||p==null||c==null||c.isBlank())throw new IllegalArgumentException("workspace, project and customer are required");}
     private record Movement(UUID id,String type,OffsetDateTime at){} private record Link(UUID id,UUID workspaceId,UUID projectId,UUID identityId,String source){}
+    private record CoverageRow(String confidence,String reason,long count){}
     private record Result(AttributionV1Engine.Touchpoint first,AttributionV1Engine.Touchpoint last,UUID linkId,String confidence,String reason,List<String> references){static Result unattributed(String reason){return unattributed(reason,null);} static Result unattributed(String reason,UUID linkId){return new Result(null,null,linkId,"UNATTRIBUTED",reason,linkId==null?List.of():List.of("stripe_customer_links:"+linkId));}}
 }
