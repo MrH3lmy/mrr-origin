@@ -43,3 +43,68 @@ Status codes are:
 
 Clients may retry network failures and ambiguous responses with the same batch
 ID and unchanged body. They must generate a new batch ID when changing content.
+
+# Stripe customer linking contract
+
+`POST /api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links`
+links a project's tracked external-user identity (created by `identify()`
+above) to a Stripe customer already observed in the workspace's billing
+ledger. This is a workspace-management API, authenticated with the same OIDC
+bearer token as the rest of `/api/workspaces/**`, and called from the
+founder's own backend — never from the browser tracker, since it deals in
+Stripe customer IDs. The caller must hold `OWNER` or `ADMIN` on the
+workspace.
+
+Request body: `{"externalUserId": "...", "stripeCustomerId": "..."}`. Both
+IDs must already exist: `externalUserId` as an `external_identities` row for
+`projectId` (i.e. already `identify()`-ed), and `stripeCustomerId` as a
+`billing_customers` row for `workspaceId` (i.e. already observed via Stripe
+backfill or webhook normalization). Neither can be guessed into existence —
+each is checked structurally, scoped by workspace and project, so one
+tenant's visitor, application user, Stripe connection, or customer can never
+be linked by another tenant.
+
+Re-linking the same external user to the same Stripe customer is idempotent
+and returns the existing link unchanged. Attempting to link an external user
+already linked to a _different_ Stripe customer, or a Stripe customer already
+linked to a _different_ external user, returns a stable `409` with a
+distinguishing `code` (`external_user_already_linked` or
+`stripe_customer_already_linked`) — active links are structurally unique
+(one per tracked identity, one per Stripe customer) via partial unique
+indexes, so this holds under concurrent requests too. No repair/relink
+workflow exists yet, so a conflicting link must be resolved by a later,
+dedicated issue rather than this endpoint.
+
+`GET /api/workspaces/{workspaceId}/projects/{projectId}/stripe-customer-links?externalUserId=...`
+returns the current active link, or `404 stripe_customer_link_not_found`.
+The external ID is a query parameter so opaque IDs containing path characters remain
+addressable; clients must URL-encode it normally.
+
+The link row references the tracked identity directly instead of duplicating its
+external-user ID; reads derive the ID from that workspace/project-owned identity
+record.
+
+Every link row records its provenance: `evidenceSource`, `evidenceReference`,
+`linkedBySubjectId` (the authenticated actor), and `createdAt`. Only the
+`EXPLICIT_API` evidence source is populated today. `STRIPE_METADATA` is
+reserved in the schema for a follow-up issue — `billing_customers` does not
+yet persist Stripe `metadata`, so there is no deterministic, inspectable
+evidence available to drive it automatically. `superseded_at` and `superseded_by_id` are likewise reserved for a future
+repair workflow; they must be populated together and the replacement link is
+structurally constrained to the same workspace and project. This endpoint
+never sets either field.
+
+No IP address, device fingerprint, or email-guessing heuristic participates
+in this flow.
+
+Status codes are:
+
+- `200` for a created or idempotently-repeated link, and for a successful
+  read;
+- `400` for a missing/oversized `externalUserId` or `stripeCustomerId`;
+- `403` for a member without `OWNER`/`ADMIN` on the workspace;
+- `404` for an unknown workspace/project (membership-gated, matching the rest
+  of `/api/workspaces/**`), an `externalUserId` never `identify()`-ed for
+  that project, a `stripeCustomerId` never observed in that workspace's
+  ledger, or no active link on the `GET`; and
+- `409` for a conflicting active link in either direction.
