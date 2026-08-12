@@ -53,6 +53,8 @@ class MrrV1GoldenFixtureTests {
         assertThat(caseIds("snapshotCases"))
                 .contains(
                         "trial-is-zero",
+                        "incomplete-is-zero",
+                        "incomplete-expired-is-zero",
                         "monthly-quantity",
                         "multi-month",
                         "annual-round-half-up",
@@ -60,8 +62,11 @@ class MrrV1GoldenFixtureTests {
                         "percent-discount",
                         "fixed-discount-clamped",
                         "past-due-retained",
-                        "unpaid-retained",
+                        "unpaid-is-zero",
                         "paused-is-zero",
+                        "pause-collection-retains-mrr",
+                        "canceled-is-zero",
+                        "multi-item-round-once",
                         "zero-decimal-jpy");
     }
 
@@ -128,6 +133,40 @@ class MrrV1GoldenFixtureTests {
     }
 
     @Test
+    void sameTimestampChangesAreNettedFromCompleteCustomerState() {
+        JsonNode testCase = findCase("movementCases", "same-timestamp-customer-netting");
+        long before = 0;
+        long after = 0;
+        for (JsonNode change : testCase.path("changes")) {
+            before += change.path("before").asLong();
+            after += change.path("after").asLong();
+        }
+
+        assertThat(before).isEqualTo(testCase.path("before").asLong());
+        assertThat(after).isEqualTo(testCase.path("after").asLong());
+        assertThat(classify(before, after, testCase.path("everPositiveBefore").asBoolean()))
+                .isEqualTo("NONE");
+    }
+
+    @Test
+    void currencySwitchesClassifyIndependentlyWithoutNettingAmounts() {
+        for (JsonNode testCase : fixture.path("currencyMovementCases")) {
+            Set<String> currencies = new HashSet<>();
+            for (JsonNode movement : testCase.path("movements")) {
+                assertThat(currencies.add(movement.path("currency").asText()))
+                        .as(testCase.path("id").asText())
+                        .isTrue();
+                long before = movement.path("before").asLong();
+                long after = movement.path("after").asLong();
+                assertThat(classify(before, after, movement.path("everPositiveBefore").asBoolean()))
+                        .isEqualTo(movement.path("expectedType").asText());
+                assertThat(Math.abs(after - before)).isEqualTo(movement.path("expectedAmount").asLong());
+            }
+            assertThat(currencies).containsExactlyInAnyOrder("USD", "EUR");
+        }
+    }
+
+    @Test
     void everyUnsupportedCaseFailsWithAUniqueStableReasonInsteadOfAValue() {
         Set<String> seenReasons = new HashSet<>();
         for (JsonNode testCase : fixture.path("unsupportedCases")) {
@@ -140,27 +179,41 @@ class MrrV1GoldenFixtureTests {
     }
 
     private static long normalizeSnapshot(JsonNode testCase) {
-        if (Set.of("trialing", "paused").contains(testCase.path("state").asText())) {
+        if (Set.of("trialing", "incomplete", "incomplete_expired", "unpaid", "paused", "canceled")
+                .contains(testCase.path("state").asText())) {
             return 0;
         }
 
-        BigDecimal discountedPeriodAmount = BigDecimal.valueOf(testCase.path("periodAmount").asLong())
-                .multiply(BigDecimal.valueOf(testCase.path("quantity").asLong()));
-        if (testCase.has("discountPercent")) {
-            discountedPeriodAmount = discountedPeriodAmount.multiply(
-                    BigDecimal.valueOf(100 - testCase.path("discountPercent").asLong()).movePointLeft(2));
+        BigDecimal exactSubscriptionMrr = BigDecimal.ZERO;
+        if (testCase.has("items")) {
+            for (JsonNode item : testCase.path("items")) {
+                exactSubscriptionMrr = exactSubscriptionMrr.add(normalizedItemContribution(item));
+            }
+        } else {
+            exactSubscriptionMrr = normalizedItemContribution(testCase);
         }
-        if (testCase.has("discountAmount")) {
-            discountedPeriodAmount = discountedPeriodAmount.subtract(BigDecimal.valueOf(testCase.path("discountAmount").asLong()));
+        return exactSubscriptionMrr.setScale(0, HALF_UP).longValueExact();
+    }
+
+    private static BigDecimal normalizedItemContribution(JsonNode item) {
+        BigDecimal discountedPeriodAmount = BigDecimal.valueOf(item.path("periodAmount").asLong())
+                .multiply(BigDecimal.valueOf(item.path("quantity").asLong()));
+        if (item.has("discountPercent")) {
+            discountedPeriodAmount = discountedPeriodAmount.multiply(
+                    BigDecimal.valueOf(100 - item.path("discountPercent").asLong()).movePointLeft(2));
+        }
+        if (item.has("discountAmount")) {
+            discountedPeriodAmount =
+                    discountedPeriodAmount.subtract(BigDecimal.valueOf(item.path("discountAmount").asLong()));
         }
         discountedPeriodAmount = discountedPeriodAmount.max(BigDecimal.ZERO);
 
-        long months = switch (testCase.path("interval").asText()) {
-            case "month" -> testCase.path("intervalCount").asLong();
-            case "year" -> Math.multiplyExact(12, testCase.path("intervalCount").asLong());
+        long months = switch (item.path("interval").asText()) {
+            case "month" -> item.path("intervalCount").asLong();
+            case "year" -> Math.multiplyExact(12, item.path("intervalCount").asLong());
             default -> throw new AssertionError("unsupported interval accidentally entered supported snapshots");
         };
-        return discountedPeriodAmount.divide(BigDecimal.valueOf(months), 0, HALF_UP).longValueExact();
+        return discountedPeriodAmount.divide(BigDecimal.valueOf(months), 20, HALF_UP);
     }
 
     private static String classify(long before, long after, boolean everPositiveBefore) {
