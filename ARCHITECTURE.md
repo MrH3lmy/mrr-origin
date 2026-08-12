@@ -78,7 +78,7 @@ Confidence is based on deterministic evidence, not probabilistic fingerprinting.
 | Approved deterministic alias such as normalized email hash       | Moderate           |
 | No deterministic link                                            | Unattributed       |
 
-The exact labels and precedence rules will be finalized with the attribution-engine issue and covered by fixtures.
+Selection rules, precedence, conflict behavior, window shape, and recalculation are defined in [ADR-0005](docs/adr/0005-attribution-model-evidence-confidence-window.md) and covered by fixtures; #18 implements the engine against that contract.
 
 ## Tenancy
 
@@ -133,17 +133,17 @@ The API must remain horizontally safe: scheduled work uses database leases, inge
 
 ## Architecture decisions
 
-| ADR                                                                | Decision                                                                                                            |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| [ADR-0001](docs/adr/0001-modular-monolith.md)                      | Start with a modular monolith                                                                                       |
-| [ADR-0002](docs/adr/0002-immutable-inputs-derived-results.md)      | Separate immutable inputs from derived results                                                                      |
-| [ADR-0003](docs/adr/0003-stripe-connection-credential-security.md) | Stripe Standard-account OAuth consent (`read_only`) plus platform-key/`Stripe-Account` API calls                    |
-| [ADR-0004](docs/adr/0004-v1-mrr-semantics.md)                      | Normalize V1 MRR as auditable recurring-revenue state with explicit effective dates and visible unsupported results |
+| ADR                                                                       | Decision                                                                                                                   |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| [ADR-0001](docs/adr/0001-modular-monolith.md)                             | Start with a modular monolith                                                                                              |
+| [ADR-0002](docs/adr/0002-immutable-inputs-derived-results.md)             | Separate immutable inputs from derived results                                                                             |
+| [ADR-0003](docs/adr/0003-stripe-connection-credential-security.md)        | Stripe Standard-account OAuth consent (`read_only`) plus platform-key/`Stripe-Account` API calls                           |
+| [ADR-0004](docs/adr/0004-v1-mrr-semantics.md)                             | Normalize V1 MRR as auditable recurring-revenue state with explicit effective dates and visible unsupported results        |
+| [ADR-0005](docs/adr/0005-attribution-model-evidence-confidence-window.md) | First-touch/last-touch selection, last-non-direct handling, 90-day window, evidence precedence, and recalculation contract |
 
 ## Deferred decisions
 
 - Production identity provider and session/BFF topology
 - Reporting-currency conversion source and historical FX behavior
-- Attribution-window defaults and last-direct handling
 - Tracker storage mode and consent configuration
 - Hosting vendors and regional data residency

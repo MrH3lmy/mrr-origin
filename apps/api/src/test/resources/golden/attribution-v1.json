@@ -1,0 +1,437 @@
+{
+  "policyVersion": "attribution-v1",
+  "defaultWindowDays": 90,
+  "selectionCases": [
+    {
+      "id": "delayed-conversion",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-delayed-1",
+          "occurredAt": "2026-01-01T00:00:00Z",
+          "createdAt": "2026-01-01T00:00:05Z",
+          "visitorId": "visitor-delayed",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        }
+      ],
+      "expectedEligibleTouchpointIds": ["tp-delayed-1"],
+      "expectedFirstTouchId": "tp-delayed-1",
+      "expectedLastTouchId": "tp-delayed-1"
+    },
+    {
+      "id": "multiple-sessions",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-session-a",
+          "occurredAt": "2026-01-05T09:00:00Z",
+          "createdAt": "2026-01-05T09:00:02Z",
+          "visitorId": "visitor-multi-session",
+          "referrerUrl": "https://newsletter.example/issue-12",
+          "utmSource": "newsletter"
+        },
+        {
+          "id": "tp-session-b",
+          "occurredAt": "2026-01-20T18:30:00Z",
+          "createdAt": "2026-01-20T18:30:02Z",
+          "visitorId": "visitor-multi-session",
+          "referrerUrl": "https://newsletter.example/issue-14",
+          "utmSource": "newsletter"
+        }
+      ],
+      "expectedEligibleTouchpointIds": ["tp-session-a", "tp-session-b"],
+      "expectedFirstTouchId": "tp-session-a",
+      "expectedLastTouchId": "tp-session-b"
+    },
+    {
+      "id": "direct-return",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-direct-return-original",
+          "occurredAt": "2026-01-10T00:00:00Z",
+          "createdAt": "2026-01-10T00:00:02Z",
+          "visitorId": "visitor-direct-return",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        },
+        {
+          "id": "tp-direct-return-bookmark",
+          "occurredAt": "2026-02-25T00:00:00Z",
+          "createdAt": "2026-02-25T00:00:02Z",
+          "visitorId": "visitor-direct-return",
+          "referrerUrl": null,
+          "utmSource": null
+        }
+      ],
+      "expectedEligibleTouchpointIds": [
+        "tp-direct-return-original",
+        "tp-direct-return-bookmark"
+      ],
+      "expectedFirstTouchId": "tp-direct-return-original",
+      "expectedLastTouchId": "tp-direct-return-original"
+    },
+    {
+      "id": "direct-only-pool-wins-both",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-direct-only",
+          "occurredAt": "2026-02-01T00:00:00Z",
+          "createdAt": "2026-02-01T00:00:02Z",
+          "visitorId": "visitor-direct-only",
+          "referrerUrl": null,
+          "utmSource": null
+        }
+      ],
+      "expectedEligibleTouchpointIds": ["tp-direct-only"],
+      "expectedFirstTouchId": "tp-direct-only",
+      "expectedLastTouchId": "tp-direct-only"
+    },
+    {
+      "id": "first-touch-vs-last-touch-divergence",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-divergence-organic",
+          "occurredAt": "2026-01-02T00:00:00Z",
+          "createdAt": "2026-01-02T00:00:02Z",
+          "visitorId": "visitor-divergence",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        },
+        {
+          "id": "tp-divergence-paid",
+          "occurredAt": "2026-02-20T00:00:00Z",
+          "createdAt": "2026-02-20T00:00:02Z",
+          "visitorId": "visitor-divergence",
+          "referrerUrl": "https://ads.example/click",
+          "utmSource": "paid-search"
+        }
+      ],
+      "expectedEligibleTouchpointIds": [
+        "tp-divergence-organic",
+        "tp-divergence-paid"
+      ],
+      "expectedFirstTouchId": "tp-divergence-organic",
+      "expectedLastTouchId": "tp-divergence-paid"
+    },
+    {
+      "id": "merged-anonymous-visitors",
+      "anchor": "2026-03-01T00:00:00Z",
+      "visitorAliases": [
+        {
+          "visitorId": "visitor-mobile",
+          "externalIdentityId": "identity-merged"
+        },
+        {
+          "visitorId": "visitor-desktop",
+          "externalIdentityId": "identity-merged"
+        }
+      ],
+      "touchpoints": [
+        {
+          "id": "tp-merged-mobile",
+          "occurredAt": "2026-01-08T00:00:00Z",
+          "createdAt": "2026-01-08T00:00:02Z",
+          "visitorId": "visitor-mobile",
+          "referrerUrl": "https://www.facebook.com/",
+          "utmSource": "facebook"
+        },
+        {
+          "id": "tp-merged-desktop",
+          "occurredAt": "2026-02-10T00:00:00Z",
+          "createdAt": "2026-02-10T00:00:02Z",
+          "visitorId": "visitor-desktop",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        }
+      ],
+      "expectedEligibleTouchpointIds": [
+        "tp-merged-mobile",
+        "tp-merged-desktop"
+      ],
+      "expectedFirstTouchId": "tp-merged-mobile",
+      "expectedLastTouchId": "tp-merged-desktop",
+      "expectedDistinctVisitorCount": 2
+    },
+    {
+      "id": "window-boundary-timestamps",
+      "anchor": "2026-03-01T00:00:00Z",
+      "windowDays": 90,
+      "touchpoints": [
+        {
+          "id": "tp-window-start-inclusive",
+          "occurredAt": "2025-12-01T00:00:00Z",
+          "createdAt": "2025-12-01T00:00:02Z",
+          "visitorId": "visitor-window",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        },
+        {
+          "id": "tp-window-end-inclusive",
+          "occurredAt": "2026-03-01T00:00:00Z",
+          "createdAt": "2026-03-01T00:00:02Z",
+          "visitorId": "visitor-window",
+          "referrerUrl": "https://www.bing.com/search",
+          "utmSource": "bing"
+        },
+        {
+          "id": "tp-window-expired",
+          "occurredAt": "2025-11-30T23:59:59Z",
+          "createdAt": "2025-11-30T23:59:59Z",
+          "visitorId": "visitor-window",
+          "referrerUrl": "https://old-campaign.example/",
+          "utmSource": "old-campaign"
+        },
+        {
+          "id": "tp-window-future",
+          "occurredAt": "2026-03-01T00:00:01Z",
+          "createdAt": "2026-03-01T00:00:01Z",
+          "visitorId": "visitor-window",
+          "referrerUrl": "https://after-conversion.example/",
+          "utmSource": "after-conversion"
+        }
+      ],
+      "expectedEligibleTouchpointIds": [
+        "tp-window-start-inclusive",
+        "tp-window-end-inclusive"
+      ],
+      "expectedFirstTouchId": "tp-window-start-inclusive",
+      "expectedLastTouchId": "tp-window-end-inclusive"
+    }
+  ],
+  "evidenceCases": [
+    {
+      "id": "explicit-external-user-to-stripe-customer-evidence",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-strong-evidence",
+          "occurredAt": "2026-01-15T00:00:00Z",
+          "createdAt": "2026-01-15T00:00:02Z",
+          "visitorId": "visitor-strong-evidence",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        }
+      ],
+      "link": {
+        "tier": "STRONG",
+        "evidenceSource": "EXPLICIT_API",
+        "evidenceReference": "link-strong-explicit-1"
+      },
+      "expectedConfidence": "STRONG",
+      "expectedEvidenceReference": "link-strong-explicit-1",
+      "expectedFirstTouchId": "tp-strong-evidence",
+      "expectedLastTouchId": "tp-strong-evidence"
+    },
+    {
+      "id": "no-evidence",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [],
+      "link": null,
+      "expectedConfidence": "UNATTRIBUTED",
+      "expectedEvidenceReference": null,
+      "expectedFirstTouchId": null,
+      "expectedLastTouchId": null
+    },
+    {
+      "id": "no-evidence-link-with-empty-pool",
+      "anchor": "2026-03-01T00:00:00Z",
+      "touchpoints": [],
+      "link": {
+        "tier": "STRONG",
+        "evidenceSource": "EXPLICIT_API",
+        "evidenceReference": "link-strong-empty-pool"
+      },
+      "expectedConfidence": "UNATTRIBUTED",
+      "expectedEvidenceReference": null,
+      "expectedFirstTouchId": null,
+      "expectedLastTouchId": null
+    }
+  ],
+  "conflictCases": [
+    {
+      "id": "conflicting-deterministic-evidence",
+      "anchor": "2026-03-01T00:00:00Z",
+      "links": [
+        {
+          "tier": "VERIFIED",
+          "evidenceSource": "STRIPE_METADATA",
+          "evidenceReference": "link-verified-conflict-1",
+          "poolVisitorIds": ["visitor-verified-conflict"]
+        },
+        {
+          "tier": "STRONG",
+          "evidenceSource": "EXPLICIT_API",
+          "evidenceReference": "link-strong-conflict-1",
+          "poolVisitorIds": ["visitor-strong-conflict"]
+        }
+      ],
+      "touchpoints": [
+        {
+          "id": "tp-conflict-verified",
+          "occurredAt": "2026-01-04T00:00:00Z",
+          "createdAt": "2026-01-04T00:00:02Z",
+          "visitorId": "visitor-verified-conflict",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        },
+        {
+          "id": "tp-conflict-strong",
+          "occurredAt": "2026-01-06T00:00:00Z",
+          "createdAt": "2026-01-06T00:00:02Z",
+          "visitorId": "visitor-strong-conflict",
+          "referrerUrl": "https://www.twitter.com/",
+          "utmSource": "twitter"
+        }
+      ],
+      "expectedConfidence": "VERIFIED",
+      "expectedEvidenceReference": "link-verified-conflict-1",
+      "expectedFirstTouchId": "tp-conflict-verified",
+      "expectedLastTouchId": "tp-conflict-verified",
+      "expectedConflictRecorded": true
+    }
+  ],
+  "inheritanceCases": [
+    {
+      "id": "reactivation-inherits-original-acquisition-evidence",
+      "acquisitionAnchor": "2026-01-01T00:00:00Z",
+      "acquisitionTouchpoints": [
+        {
+          "id": "tp-reactivation-acquisition",
+          "occurredAt": "2025-12-01T00:00:00Z",
+          "createdAt": "2025-12-01T00:00:02Z",
+          "visitorId": "visitor-reactivation",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        }
+      ],
+      "link": {
+        "tier": "STRONG",
+        "evidenceSource": "EXPLICIT_API",
+        "evidenceReference": "link-strong-reactivation-1"
+      },
+      "dependentMovements": [
+        {
+          "id": "churn-2026-04",
+          "type": "CHURN",
+          "effectiveAt": "2026-04-01T00:00:00Z",
+          "distractorTouchpoint": null
+        },
+        {
+          "id": "reactivation-2026-07",
+          "type": "REACTIVATION",
+          "effectiveAt": "2026-07-01T00:00:00Z",
+          "distractorTouchpoint": {
+            "id": "tp-reactivation-distractor",
+            "occurredAt": "2026-06-25T00:00:00Z",
+            "createdAt": "2026-06-25T00:00:02Z",
+            "visitorId": "visitor-reactivation",
+            "referrerUrl": "https://www.facebook.com/",
+            "utmSource": "facebook"
+          }
+        }
+      ],
+      "expectedEvidenceReference": "link-strong-reactivation-1",
+      "expectedFirstTouchId": "tp-reactivation-acquisition",
+      "expectedLastTouchId": "tp-reactivation-acquisition"
+    },
+    {
+      "id": "expansion-contraction-churn-inherit-acquisition-evidence",
+      "acquisitionAnchor": "2026-01-01T00:00:00Z",
+      "acquisitionTouchpoints": [
+        {
+          "id": "tp-inherit-acquisition",
+          "occurredAt": "2025-12-05T00:00:00Z",
+          "createdAt": "2025-12-05T00:00:02Z",
+          "visitorId": "visitor-inherit",
+          "referrerUrl": "https://www.bing.com/search",
+          "utmSource": "bing"
+        }
+      ],
+      "link": {
+        "tier": "STRONG",
+        "evidenceSource": "EXPLICIT_API",
+        "evidenceReference": "link-strong-inherit-1"
+      },
+      "dependentMovements": [
+        {
+          "id": "expansion-2026-03",
+          "type": "EXPANSION",
+          "effectiveAt": "2026-03-01T00:00:00Z",
+          "distractorTouchpoint": {
+            "id": "tp-inherit-expansion-distractor",
+            "occurredAt": "2026-02-25T00:00:00Z",
+            "createdAt": "2026-02-25T00:00:02Z",
+            "visitorId": "visitor-inherit",
+            "referrerUrl": "https://www.twitter.com/",
+            "utmSource": "twitter"
+          }
+        },
+        {
+          "id": "contraction-2026-05",
+          "type": "CONTRACTION",
+          "effectiveAt": "2026-05-01T00:00:00Z",
+          "distractorTouchpoint": {
+            "id": "tp-inherit-contraction-distractor",
+            "occurredAt": "2026-04-25T00:00:00Z",
+            "createdAt": "2026-04-25T00:00:02Z",
+            "visitorId": "visitor-inherit",
+            "referrerUrl": "mailto:campaign@example.com",
+            "utmSource": "email"
+          }
+        },
+        {
+          "id": "churn-2026-06",
+          "type": "CHURN",
+          "effectiveAt": "2026-06-01T00:00:00Z",
+          "distractorTouchpoint": null
+        }
+      ],
+      "expectedEvidenceReference": "link-strong-inherit-1",
+      "expectedFirstTouchId": "tp-inherit-acquisition",
+      "expectedLastTouchId": "tp-inherit-acquisition"
+    }
+  ],
+  "recalculationCases": [
+    {
+      "id": "recalculation-under-newer-model-version",
+      "anchor": "2026-06-01T00:00:00Z",
+      "touchpoints": [
+        {
+          "id": "tp-recalc-1",
+          "occurredAt": "2026-04-02T00:00:00Z",
+          "createdAt": "2026-04-02T00:00:02Z",
+          "visitorId": "visitor-recalc",
+          "referrerUrl": "https://www.google.com/search",
+          "utmSource": "google"
+        }
+      ],
+      "link": {
+        "tier": "STRONG",
+        "evidenceSource": "EXPLICIT_API",
+        "evidenceReference": "link-strong-recalc-1"
+      },
+      "modelVersions": [
+        {
+          "version": "attribution-v1-window30",
+          "windowDays": 30,
+          "expectedConfidence": "UNATTRIBUTED",
+          "expectedEvidenceReference": null,
+          "expectedFirstTouchId": null,
+          "expectedLastTouchId": null
+        },
+        {
+          "version": "attribution-v1-window90",
+          "windowDays": 90,
+          "expectedConfidence": "STRONG",
+          "expectedEvidenceReference": "link-strong-recalc-1",
+          "expectedFirstTouchId": "tp-recalc-1",
+          "expectedLastTouchId": "tp-recalc-1"
+        }
+      ]
+    }
+  ]
+}
