@@ -12,6 +12,24 @@
       "expectedMrr": 0
     },
     {
+      "id": "incomplete-is-zero",
+      "periodAmount": 12000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "incomplete",
+      "expectedMrr": 0
+    },
+    {
+      "id": "incomplete-expired-is-zero",
+      "periodAmount": 12000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "incomplete_expired",
+      "expectedMrr": 0
+    },
+    {
       "id": "monthly-quantity",
       "periodAmount": 2500,
       "interval": "month",
@@ -77,13 +95,13 @@
       "expectedMrr": 5000
     },
     {
-      "id": "unpaid-retained",
+      "id": "unpaid-is-zero",
       "periodAmount": 5000,
       "interval": "month",
       "intervalCount": 1,
       "quantity": 1,
       "state": "unpaid",
-      "expectedMrr": 5000
+      "expectedMrr": 0
     },
     {
       "id": "paused-is-zero",
@@ -93,6 +111,44 @@
       "quantity": 1,
       "state": "paused",
       "expectedMrr": 0
+    },
+    {
+      "id": "pause-collection-retains-mrr",
+      "periodAmount": 5000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "active",
+      "pauseCollection": true,
+      "expectedMrr": 5000
+    },
+    {
+      "id": "canceled-is-zero",
+      "periodAmount": 5000,
+      "interval": "month",
+      "intervalCount": 1,
+      "quantity": 1,
+      "state": "canceled",
+      "expectedMrr": 0
+    },
+    {
+      "id": "multi-item-round-once",
+      "items": [
+        {
+          "periodAmount": 1000,
+          "interval": "year",
+          "intervalCount": 1,
+          "quantity": 1
+        },
+        {
+          "periodAmount": 1000,
+          "interval": "year",
+          "intervalCount": 1,
+          "quantity": 1
+        }
+      ],
+      "state": "active",
+      "expectedMrr": 167
     },
     {
       "id": "zero-decimal-jpy",
@@ -225,12 +281,36 @@
       "trigger": "duplicate",
       "expectedType": "NONE",
       "expectedAmount": 0
+    },
+    {
+      "id": "same-timestamp-customer-netting",
+      "before": 5000,
+      "after": 5000,
+      "everPositiveBefore": true,
+      "effectiveAt": "2026-04-07T00:00:00Z",
+      "trigger": "simultaneous_state_changes",
+      "changes": [
+        {
+          "before": 3000,
+          "after": 0
+        },
+        {
+          "before": 2000,
+          "after": 5000
+        }
+      ],
+      "expectedType": "NONE",
+      "expectedAmount": 0
     }
   ],
   "retentionCases": [
     {
       "id": "retained-mrr-includes-active-expansion-and-reactivation",
-      "customerMrrAtAge": [1500, 0, 2500],
+      "customerMrrAtAge": [
+        1500,
+        0,
+        2500
+      ],
       "expectedRetainedMrr": 4000
     },
     {
@@ -251,11 +331,26 @@
     }
   ],
   "unsupportedCases": [
-    { "id": "missing-effective-date", "reason": "UNKNOWN_EFFECTIVE_AT" },
-    { "id": "missing-currency", "reason": "UNKNOWN_CURRENCY" },
-    { "id": "weekly-price", "reason": "UNSUPPORTED_INTERVAL" },
-    { "id": "zero-or-fractional-quantity", "reason": "UNSUPPORTED_QUANTITY" },
-    { "id": "metered-or-tiered-price", "reason": "UNSUPPORTED_USAGE_PRICING" },
+    {
+      "id": "missing-effective-date",
+      "reason": "UNKNOWN_EFFECTIVE_AT"
+    },
+    {
+      "id": "missing-currency",
+      "reason": "UNKNOWN_CURRENCY"
+    },
+    {
+      "id": "weekly-price",
+      "reason": "UNSUPPORTED_INTERVAL"
+    },
+    {
+      "id": "zero-or-fractional-quantity",
+      "reason": "UNSUPPORTED_QUANTITY"
+    },
+    {
+      "id": "metered-or-tiered-price",
+      "reason": "UNSUPPORTED_USAGE_PRICING"
+    },
     {
       "id": "stacked-or-indefinite-discount",
       "reason": "UNSUPPORTED_DISCOUNT"
@@ -272,7 +367,59 @@
       "id": "mixed-currency-subscription",
       "reason": "MIXED_CURRENCY_SUBSCRIPTION"
     },
-    { "id": "cross-currency-total", "reason": "CROSS_CURRENCY_AGGREGATION" },
-    { "id": "nrr-zero-denominator", "reason": "ZERO_STARTING_MRR_FOR_NRR" }
+    {
+      "id": "cross-currency-total",
+      "reason": "CROSS_CURRENCY_AGGREGATION"
+    },
+    {
+      "id": "nrr-zero-denominator",
+      "reason": "ZERO_STARTING_MRR_FOR_NRR"
+    }
+  ],
+  "currencyMovementCases": [
+    {
+      "id": "currency-switch-first-eur",
+      "effectiveAt": "2026-05-01T00:00:00Z",
+      "movements": [
+        {
+          "currency": "USD",
+          "before": 2000,
+          "after": 0,
+          "everPositiveBefore": true,
+          "expectedType": "CHURN",
+          "expectedAmount": 2000
+        },
+        {
+          "currency": "EUR",
+          "before": 0,
+          "after": 1800,
+          "everPositiveBefore": false,
+          "expectedType": "NEW",
+          "expectedAmount": 1800
+        }
+      ]
+    },
+    {
+      "id": "currency-switch-returning-to-eur",
+      "effectiveAt": "2026-06-01T00:00:00Z",
+      "movements": [
+        {
+          "currency": "USD",
+          "before": 2000,
+          "after": 0,
+          "everPositiveBefore": true,
+          "expectedType": "CHURN",
+          "expectedAmount": 2000
+        },
+        {
+          "currency": "EUR",
+          "before": 0,
+          "after": 1800,
+          "everPositiveBefore": true,
+          "expectedType": "REACTIVATION",
+          "expectedAmount": 1800
+        }
+      ]
+    }
   ]
 }
