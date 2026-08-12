@@ -80,6 +80,10 @@ returns the current active link, or `404 stripe_customer_link_not_found`.
 The external ID is a query parameter so opaque IDs containing path characters remain
 addressable; clients must URL-encode it normally.
 
+The link row references the tracked identity directly instead of duplicating its
+external-user ID; reads derive the ID from that workspace/project-owned identity
+record.
+
 Every link row records its provenance: `evidenceSource`, `evidenceReference`,
 `linkedBySubjectId` (the authenticated actor), and `createdAt`. Only the
 `EXPLICIT_API` evidence source is populated today. `STRIPE_METADATA` is
