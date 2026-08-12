@@ -273,10 +273,10 @@ evidence, not merely deferred:
   or attribution purposes.
 - **Device fingerprinting** — no canvas, font, header-combination, or other
   passive fingerprinting signal is collected or used.
-- **Email guessing** — Moderate evidence requires an exact match of an
-  already-known, tracker-captured normalized email against Stripe's email; it
-  never infers, normalizes-and-guesses, or fuzzy-matches an email that was not
-  explicitly supplied to both systems.
+- **Email guessing** — Moderate evidence requires an exact match of
+  workspace-keyed HMACs computed server-side from emails explicitly supplied to both
+  systems. It never infers, guesses, fuzzy-matches, or stores a raw or unkeyed email
+  hash as attribution evidence.
 - **Any probabilistic identity resolution** — no scoring, weighting, or
   "most likely" match of any kind contributes to confidence or touchpoint
   selection anywhere in this ADR. Every selection rule above is a deterministic
