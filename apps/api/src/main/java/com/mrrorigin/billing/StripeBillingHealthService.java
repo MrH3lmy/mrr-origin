@@ -5,21 +5,22 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
  * Computes workspace-scoped Stripe billing-data health (#15): connection/checkpoint visibility,
- * webhook processing failures, and reconciliation mismatches within the locally normalized ledger.
- * Entirely read-only and computed live from existing V5/V7 state -- no new persisted snapshot, so
- * the report is always current and there is nothing here that could itself go stale.
+ * webhook processing failures, reconciliation mismatches within the locally normalized ledger, and
+ * a bounded live spot-check against Stripe's own current state.
  *
  * <p><b>Reconciliation.</b> Per V7's migration comment, {@code billing_subscriptions},
  * {@code billing_invoices}, etc. deliberately reference other billing objects by plain Stripe ID
@@ -27,19 +28,31 @@ import tools.jackson.databind.ObjectMapper;
  * across object types. That means a real gap -- e.g. a subscription webhook processed before its
  * customer ever arrived, and the customer webhook then permanently missed -- is only detectable by
  * checking those references at query time. {@link #mismatches} does exactly that, bounded by {@link
- * #MISMATCH_SAMPLE_LIMIT} rows per kind, and reports it as a DEGRADED reason without ever touching
- * (or needing to touch) any raw Stripe payload.
+ * #MISMATCH_SAMPLE_LIMIT} rows per kind.
  *
- * <p><b>Sync lag.</b> There is no dedicated "last successful sync" column. {@link #lastSyncAt} uses
- * the latest of: this connection's {@code updated_at} (touched on every verification outcome and
- * every backfill checkpoint advance) and the most recent {@code updated_at} among this workspace's
- * {@code PROCESSED} webhook events. This is a deliberately conservative proxy, not a precise "last
- * successful write" timestamp -- it can be pushed forward by an unrelated verification retry -- but
- * it can never hide genuine staleness: if nothing has touched the connection or processed a webhook
- * recently, none of these timestamps advance either.
+ * <p>Intra-ledger reference checks can never detect a Stripe object that is missing locally end to
+ * end -- one with no dependent local row pointing at it at all (e.g. a customer Stripe has that we
+ * never received any webhook or backfill page for). {@link #providerSpotCheck} closes that gap with
+ * a bounded live comparison: Stripe's List API does not expose a total-count endpoint for
+ * customers/subscriptions (asking "how many does Stripe have" is not a cheap, or even available,
+ * operation), so instead of an exact count comparison this fetches exactly one page (the existing,
+ * already-bounded {@link StripeBackfillClient#PAGE_SIZE}) of Stripe's most-recently-created
+ * customers and subscriptions -- reusing the same client the resumable backfill already uses -- and
+ * checks which of those specific ids have no local row at all. This is only trusted once the initial
+ * backfill has reached {@code DONE}: before that, every not-yet-imported object would otherwise look
+ * like a false "missing" gap.
+ *
+ * <p><b>Sync lag.</b> {@link #lastSyncAt} is the latest {@code updated_at} across every {@code
+ * billing_*} ledger table for this workspace -- i.e. the last time any billing object actually
+ * changed as a result of a successful backfill page or webhook normalization. It deliberately does
+ * NOT fall back to {@code stripe_connections.updated_at}: that column is also touched by
+ * verification checks, reconnects, and disconnects, none of which mean billing data has advanced, so
+ * using it as a proxy could mask genuine staleness (a workspace whose webhook pipeline has been
+ * silently broken for days could still look "just synced" purely because a routine verification
+ * happened to run). The one carve-out is a connection whose initial backfill has completed and whose
+ * ledger is (correctly) still empty -- nothing to have gone stale.
  */
 @Service
-@Transactional(readOnly = true)
 public class StripeBillingHealthService {
 
     /** Sync activity older than this, with no other degrading reason present, marks the workspace STALE. */
@@ -50,6 +63,10 @@ public class StripeBillingHealthService {
 
     /** How many sample Stripe IDs are echoed back per mismatch kind in the report. */
     private static final int MISMATCH_PREVIEW_LIMIT = 10;
+
+    private static final List<String> LEDGER_TABLES = List.of(
+            "billing_customers", "billing_prices", "billing_subscriptions", "billing_invoices",
+            "billing_payments", "billing_refunds", "billing_discounts");
 
     private static final List<MismatchDefinition> MISMATCH_DEFINITIONS = List.of(
             new MismatchDefinition(
@@ -105,13 +122,19 @@ public class StripeBillingHealthService {
 
     private final JdbcClient jdbc;
     private final StripeConnectionRepository connections;
+    private final StripeBackfillClient backfillClient;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
     public StripeBillingHealthService(
-            JdbcClient jdbc, StripeConnectionRepository connections, ObjectMapper objectMapper, Clock clock) {
+            JdbcClient jdbc,
+            StripeConnectionRepository connections,
+            StripeBackfillClient backfillClient,
+            ObjectMapper objectMapper,
+            Clock clock) {
         this.jdbc = jdbc;
         this.connections = connections;
+        this.backfillClient = backfillClient;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -122,11 +145,13 @@ public class StripeBillingHealthService {
 
         WebhookCounts webhookCounts = webhookCounts(workspaceId);
         List<ReconciliationMismatch> mismatches = mismatches(workspaceId);
+        LedgerTotals totals = ledgerTotals(workspaceId);
 
         List<StripeBillingHealthReason> reasons = new ArrayList<>();
         String backfillPhase = null;
         boolean backfillComplete = false;
         OffsetDateTime lastSyncAt = null;
+        ProviderSpotCheck providerSpotCheck = ProviderSpotCheck.unavailable("no active, verified connection");
 
         if (connection == null) {
             reasons.add(StripeBillingHealthReason.NO_ACTIVE_CONNECTION);
@@ -141,7 +166,7 @@ public class StripeBillingHealthService {
             if (connection.verificationStatus() != StripeVerificationStatus.VERIFIED) {
                 reasons.add(StripeBillingHealthReason.CONNECTION_UNVERIFIED);
             }
-            if (webhookCounts.failedTransient() + webhookCounts.failedUnsupported() > 0) {
+            if (webhookCounts.failedTransient() + webhookCounts.failedUnsupported() + webhookCounts.failedLegacy() > 0) {
                 reasons.add(StripeBillingHealthReason.WEBHOOK_FAILURES_PRESENT);
             }
             if (!mismatches.isEmpty()) {
@@ -151,15 +176,29 @@ public class StripeBillingHealthService {
                 reasons.add(StripeBillingHealthReason.ORPHANED_EVENTS_PRESENT);
             }
 
-            // connection.updatedAt() is a NOT NULL column with a default, stamped at insert and on
-            // every subsequent change, so lastSyncAt (which falls back to it) is never null here --
-            // there is no reachable "connection exists but has no timestamp at all" state to report.
-            lastSyncAt = lastSyncAt(workspaceId, connection);
+            boolean connectionEligible = connection.status() == StripeConnectionStatus.ACTIVE
+                    && connection.verificationStatus() == StripeVerificationStatus.VERIFIED;
+            if (connectionEligible) {
+                providerSpotCheck = providerSpotCheck(workspaceId, connection, backfillComplete);
+                if (providerSpotCheck.available()) {
+                    if (!providerSpotCheck.missingCustomerIds().isEmpty()
+                            || !providerSpotCheck.missingSubscriptionIds().isEmpty()) {
+                        reasons.add(StripeBillingHealthReason.PROVIDER_RECONCILIATION_MISMATCH_PRESENT);
+                    }
+                } else {
+                    reasons.add(StripeBillingHealthReason.PROVIDER_CHECK_UNAVAILABLE);
+                }
+            }
+
+            lastSyncAt = lastSyncAt(workspaceId);
+            boolean emptyAndFullySynced = backfillComplete && totals.isEmpty();
             boolean anyDegradingReason = reasons.contains(StripeBillingHealthReason.CONNECTION_NOT_ACTIVE)
                     || reasons.contains(StripeBillingHealthReason.CONNECTION_UNVERIFIED)
                     || reasons.contains(StripeBillingHealthReason.WEBHOOK_FAILURES_PRESENT)
-                    || reasons.contains(StripeBillingHealthReason.RECONCILIATION_MISMATCH_PRESENT);
-            if (!anyDegradingReason && Duration.between(lastSyncAt, now).compareTo(STALE_THRESHOLD) > 0) {
+                    || reasons.contains(StripeBillingHealthReason.RECONCILIATION_MISMATCH_PRESENT)
+                    || reasons.contains(StripeBillingHealthReason.PROVIDER_RECONCILIATION_MISMATCH_PRESENT);
+            if (!anyDegradingReason && !emptyAndFullySynced
+                    && (lastSyncAt == null || Duration.between(lastSyncAt, now).compareTo(STALE_THRESHOLD) > 0)) {
                 reasons.add(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
             }
             if (!backfillComplete) {
@@ -169,7 +208,6 @@ public class StripeBillingHealthService {
 
         StripeBillingHealthStatus status = overallStatus(reasons);
         Long syncLagSeconds = lastSyncAt == null ? null : Duration.between(lastSyncAt, now).toSeconds();
-        LedgerTotals totals = ledgerTotals(workspaceId);
 
         return new StripeBillingHealthReport(
                 workspaceId,
@@ -188,8 +226,10 @@ public class StripeBillingHealthService {
                 webhookCounts.processed(),
                 webhookCounts.failedTransient(),
                 webhookCounts.failedUnsupported(),
+                webhookCounts.failedLegacy(),
                 totals,
                 mismatches,
+                providerSpotCheck,
                 now);
     }
 
@@ -232,23 +272,22 @@ public class StripeBillingHealthService {
                 .list()
                 .forEach(entry -> byState.put(entry.getKey(), entry.getValue()));
 
-        long failedTransient = jdbc.sql(
-                        "SELECT COUNT(*) FROM stripe_webhook_events WHERE workspace_id = :workspaceId AND processing_state = 'FAILED' AND failure_kind = 'TRANSIENT'")
-                .param("workspaceId", workspaceId)
-                .query(Long.class)
-                .single();
-        long failedUnsupported = jdbc.sql(
-                        "SELECT COUNT(*) FROM stripe_webhook_events WHERE workspace_id = :workspaceId AND processing_state = 'FAILED' AND failure_kind = 'UNSUPPORTED'")
-                .param("workspaceId", workspaceId)
-                .query(Long.class)
-                .single();
-
         return new WebhookCounts(
                 byState.getOrDefault("PENDING", 0L),
                 byState.getOrDefault("ORPHANED", 0L),
                 byState.getOrDefault("PROCESSED", 0L),
-                failedTransient,
-                failedUnsupported);
+                failedCountByKind(workspaceId, "TRANSIENT"),
+                failedCountByKind(workspaceId, "UNSUPPORTED"),
+                failedCountByKind(workspaceId, "LEGACY"));
+    }
+
+    private long failedCountByKind(UUID workspaceId, String failureKind) {
+        return jdbc.sql(
+                        "SELECT COUNT(*) FROM stripe_webhook_events WHERE workspace_id = :workspaceId AND processing_state = 'FAILED' AND failure_kind = :failureKind")
+                .param("workspaceId", workspaceId)
+                .param("failureKind", failureKind)
+                .query(Long.class)
+                .single();
     }
 
     private List<ReconciliationMismatch> mismatches(UUID workspaceId) {
@@ -270,24 +309,79 @@ public class StripeBillingHealthService {
         return mismatches;
     }
 
-    private OffsetDateTime lastSyncAt(UUID workspaceId, StripeConnection connection) {
+    /**
+     * A bounded, live, single-page comparison against Stripe's own most-recently-created customers
+     * and subscriptions -- see the class Javadoc for why this (rather than a total-count comparison,
+     * which Stripe's List API does not support) is the reconciliation this method performs. Runs
+     * outside of any database transaction, exactly like {@link StripeBackfillService}'s own page
+     * fetches, since it is a blocking network call.
+     */
+    private ProviderSpotCheck providerSpotCheck(UUID workspaceId, StripeConnection connection, boolean backfillComplete) {
+        if (!backfillComplete) {
+            return ProviderSpotCheck.unavailable("initial backfill still in progress");
+        }
+        try {
+            List<String> customerIds = providerIds(backfillClient.listCustomers(connection.mode(), connection.stripeAccountId(), null));
+            List<String> missingCustomers = missingLocally(workspaceId, customerIds, "billing_customers", "stripe_customer_id");
+            List<String> subscriptionIds =
+                    providerIds(backfillClient.listSubscriptions(connection.mode(), connection.stripeAccountId(), null));
+            List<String> missingSubscriptions =
+                    missingLocally(workspaceId, subscriptionIds, "billing_subscriptions", "stripe_subscription_id");
+            return new ProviderSpotCheck(
+                    true, null, customerIds.size(), missingCustomers, subscriptionIds.size(), missingSubscriptions);
+        } catch (RuntimeException requestFailed) {
+            // The underlying StripeBackfillException message never includes response/payload
+            // content (see its Javadoc), but a fixed message is used here regardless, so this
+            // diagnostic surface can never depend on what a failure happens to say.
+            return ProviderSpotCheck.unavailable("Stripe request failed");
+        }
+    }
+
+    private static List<String> providerIds(StripeBackfillClient.StripePage page) {
+        List<String> ids = new ArrayList<>();
+        for (JsonNode item : page.data()) {
+            JsonNode id = item.get("id");
+            if (id != null && id.isTextual()) {
+                ids.add(id.textValue());
+            }
+        }
+        return ids;
+    }
+
+    private List<String> missingLocally(UUID workspaceId, List<String> candidateIds, String table, String column) {
+        if (candidateIds.isEmpty()) {
+            return List.of();
+        }
+        List<String> existing = jdbc.sql(
+                        "SELECT " + column + " FROM " + table + " WHERE workspace_id = :workspaceId AND " + column + " IN (:ids)")
+                .param("workspaceId", workspaceId)
+                .param("ids", candidateIds)
+                .query(String.class)
+                .list();
+        Set<String> existingSet = new HashSet<>(existing);
+        return candidateIds.stream().filter(id -> !existingSet.contains(id)).toList();
+    }
+
+    /**
+     * The latest {@code updated_at} across every {@code billing_*} ledger table for this workspace --
+     * see the class Javadoc for why {@code stripe_connections.updated_at} is deliberately not used as
+     * a fallback.
+     */
+    private OffsetDateTime lastSyncAt(UUID workspaceId) {
+        StringBuilder sql = new StringBuilder("SELECT MAX(updated_at) FROM (");
+        for (int i = 0; i < LEDGER_TABLES.size(); i++) {
+            if (i > 0) {
+                sql.append(" UNION ALL ");
+            }
+            sql.append("SELECT updated_at FROM ").append(LEDGER_TABLES.get(i)).append(" WHERE workspace_id = :workspaceId");
+        }
+        sql.append(") all_ledger_updates");
         // A bare MAX(...) aggregate always returns exactly one row, whose value is null rather than
         // absent when nothing matches -- .list() (which tolerates a null element) is used instead of
         // .optional() (which would wrap that null in Optional.of(null) and throw) for exactly that reason.
-        List<OffsetDateTime> rows = jdbc.sql(
-                        "SELECT MAX(updated_at) FROM stripe_webhook_events WHERE workspace_id = :workspaceId AND processing_state = 'PROCESSED'")
-                .param("workspaceId", workspaceId)
-                .query(OffsetDateTime.class)
-                .list();
-        OffsetDateTime lastProcessedWebhookAt = rows.isEmpty() ? null : rows.get(0);
-        OffsetDateTime connectionUpdatedAt = connection.updatedAt();
-        if (lastProcessedWebhookAt == null) {
-            return connectionUpdatedAt;
-        }
-        if (connectionUpdatedAt == null) {
-            return lastProcessedWebhookAt;
-        }
-        return lastProcessedWebhookAt.isAfter(connectionUpdatedAt) ? lastProcessedWebhookAt : connectionUpdatedAt;
+        List<OffsetDateTime> rows =
+                jdbc.sql(sql.toString()).param("workspaceId", workspaceId).query(OffsetDateTime.class).list();
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     private LedgerTotals ledgerTotals(UUID workspaceId) {
@@ -313,7 +407,8 @@ public class StripeBillingHealthService {
                 || reasons.contains(StripeBillingHealthReason.CONNECTION_NOT_ACTIVE)
                 || reasons.contains(StripeBillingHealthReason.CONNECTION_UNVERIFIED)
                 || reasons.contains(StripeBillingHealthReason.WEBHOOK_FAILURES_PRESENT)
-                || reasons.contains(StripeBillingHealthReason.RECONCILIATION_MISMATCH_PRESENT);
+                || reasons.contains(StripeBillingHealthReason.RECONCILIATION_MISMATCH_PRESENT)
+                || reasons.contains(StripeBillingHealthReason.PROVIDER_RECONCILIATION_MISMATCH_PRESENT);
         if (degraded) {
             return StripeBillingHealthStatus.DEGRADED;
         }
@@ -323,12 +418,32 @@ public class StripeBillingHealthService {
 
     private record MismatchDefinition(String kind, String sql) {}
 
-    private record WebhookCounts(long pending, long orphaned, long processed, long failedTransient, long failedUnsupported) {}
+    private record WebhookCounts(
+            long pending, long orphaned, long processed, long failedTransient, long failedUnsupported, long failedLegacy) {}
 
     public record LedgerTotals(
-            long customers, long prices, long subscriptions, long invoices, long payments, long refunds, long discounts) {}
+            long customers, long prices, long subscriptions, long invoices, long payments, long refunds, long discounts) {
+
+        boolean isEmpty() {
+            return customers == 0 && prices == 0 && subscriptions == 0 && invoices == 0
+                    && payments == 0 && refunds == 0 && discounts == 0;
+        }
+    }
 
     public record ReconciliationMismatch(String kind, int count, boolean truncated, List<String> sampleStripeIds) {}
+
+    public record ProviderSpotCheck(
+            boolean available,
+            String unavailableReason,
+            int customersChecked,
+            List<String> missingCustomerIds,
+            int subscriptionsChecked,
+            List<String> missingSubscriptionIds) {
+
+        static ProviderSpotCheck unavailable(String reason) {
+            return new ProviderSpotCheck(false, reason, 0, List.of(), 0, List.of());
+        }
+    }
 
     public record FailedEventDiagnostic(
             UUID id,
@@ -359,7 +474,9 @@ public class StripeBillingHealthService {
             long processedWebhookEvents,
             long failedWebhookEventsTransient,
             long failedWebhookEventsUnsupported,
+            long failedWebhookEventsLegacy,
             LedgerTotals ledgerTotals,
             List<ReconciliationMismatch> reconciliationMismatches,
+            ProviderSpotCheck providerSpotCheck,
             OffsetDateTime computedAt) {}
 }

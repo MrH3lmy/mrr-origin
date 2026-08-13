@@ -17,10 +17,22 @@ public enum StripeBillingHealthReason {
     WEBHOOK_FAILURES_PRESENT,
     /** DEGRADED: the local ledger contains a record referencing another record that is not (yet) present. */
     RECONCILIATION_MISMATCH_PRESENT,
+    /**
+     * DEGRADED: a bounded live check against Stripe's most recent customers/subscriptions found at
+     * least one that does not exist locally at all -- a gap {@link #RECONCILIATION_MISMATCH_PRESENT}
+     * cannot see, since it only checks references between local records.
+     */
+    PROVIDER_RECONCILIATION_MISMATCH_PRESENT,
     /** STALE: the most recent sync activity is older than the staleness threshold. */
     SYNC_LAG_EXCEEDED,
     /** Informational: the initial backfill has not reached DONE yet. Does not by itself degrade status. */
     BACKFILL_IN_PROGRESS,
     /** Informational: at least one webhook event could not be routed to a connection at receipt time. */
-    ORPHANED_EVENTS_PRESENT
+    ORPHANED_EVENTS_PRESENT,
+    /**
+     * Informational: the live provider spot-check did not run this time (backfill still in progress,
+     * or the Stripe request itself failed). Does not by itself degrade status -- it means the absence
+     * of a {@link #PROVIDER_RECONCILIATION_MISMATCH_PRESENT} reason cannot be trusted as confirmation.
+     */
+    PROVIDER_CHECK_UNAVAILABLE
 }

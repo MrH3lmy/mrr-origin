@@ -9,6 +9,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -42,6 +43,22 @@ class StripeBillingHealthIntegrationTests extends AbstractBillingLedgerIntegrati
     private StripeBillingHealthService healthService;
 
     private static final Instant BASE = Instant.parse("2026-03-01T00:00:00Z");
+
+    /**
+     * STRIPE_LIST_STUB is a single static instance shared by every test in this class (mirroring
+     * {@code StripeBackfillCheckpointIntegrationTests}' convention), so a path one test seeds would
+     * otherwise leak into a later test that never touches it. Reset every path to empty before each
+     * test; tests that need specific provider-side data seed it explicitly afterward.
+     */
+    @BeforeEach
+    void resetProviderCatalog() {
+        STRIPE_LIST_STUB.seed("/v1/customers", List.of());
+        STRIPE_LIST_STUB.seed("/v1/prices", List.of());
+        STRIPE_LIST_STUB.seed("/v1/subscriptions", List.of());
+        STRIPE_LIST_STUB.seed("/v1/invoices", List.of());
+        STRIPE_LIST_STUB.seed("/v1/charges", List.of());
+        STRIPE_LIST_STUB.seed("/v1/refunds", List.of());
+    }
 
     @Test
     void healthyWhenConnectionActiveAndFullySyncedWithNoIssues() {
@@ -77,12 +94,22 @@ class StripeBillingHealthIntegrationTests extends AbstractBillingLedgerIntegrati
 
     // ---- Stale checkpoint detection ---------------------------------------------------------------
 
+    /**
+     * Regression for a prior bug: {@code stripe_connections.updated_at} is touched by verification
+     * (among other unrelated events) and must never be used, even as a fallback, to judge sync
+     * freshness -- a recent verification must not be able to mask billing data that has genuinely
+     * stopped advancing. Backdates the ledger row itself (the only legitimate signal) while leaving
+     * the connection's own {@code updated_at} recent, so a bug that fell back to the connection
+     * timestamp would incorrectly report HEALTHY here.
+     */
     @Test
-    void staleWhenSyncActivityIsOlderThanTheThreshold() {
+    void staleWhenSyncActivityIsOlderThanTheThresholdEvenWithRecentConnectionVerification() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_health_stale", StripeConnectionMode.TEST);
         runBackfillToCompletion(connectionId);
-        backdateConnectionUpdatedAt(connectionId, Duration.ofHours(30));
+        insertSyncedCustomer(connectionId, workspaceId, "cus_health_stale");
+        backdateLedgerRowUpdatedAt("billing_customers", workspaceId, "cus_health_stale", Duration.ofHours(30));
+        touchConnectionUpdatedAt(connectionId);
 
         StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
 
@@ -92,16 +119,76 @@ class StripeBillingHealthIntegrationTests extends AbstractBillingLedgerIntegrati
     }
 
     @Test
-    void notYetStaleWhenSyncActivityIsRecent() {
+    void notYetStaleWhenLedgerActivityIsRecent() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_health_recent", StripeConnectionMode.TEST);
         runBackfillToCompletion(connectionId);
-        backdateConnectionUpdatedAt(connectionId, Duration.ofHours(1));
+        insertSyncedCustomer(connectionId, workspaceId, "cus_health_recent");
+        backdateLedgerRowUpdatedAt("billing_customers", workspaceId, "cus_health_recent", Duration.ofHours(1));
 
         StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
 
         assertThat(report.status()).isEqualTo(StripeBillingHealthStatus.HEALTHY);
         assertThat(report.reasons()).doesNotContain(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
+    }
+
+    @Test
+    void anEmptyButFullySyncedAccountIsHealthyRatherThanPermanentlyStale() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_health_empty", StripeConnectionMode.TEST);
+        runBackfillToCompletion(connectionId);
+
+        StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
+
+        assertThat(report.status()).isEqualTo(StripeBillingHealthStatus.HEALTHY);
+        assertThat(report.reasons()).doesNotContain(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
+        assertThat(report.lastSyncAt()).isNull();
+        assertThat(report.ledgerTotals().customers()).isZero();
+    }
+
+    // ---- Provider spot-check (live comparison against Stripe) ---------------------------------------
+
+    /**
+     * Regression: intra-ledger reconciliation ({@link #reconciliationMismatchIsDetectedThenResolvedOnceTheMissingCustomerArrives})
+     * can only see a gap between two local records; it cannot see a Stripe object with no dependent
+     * local row at all. This seeds a customer directly on Stripe's (stubbed) side, past a completed
+     * backfill and with no webhook ever received for it, and asserts the bounded live spot-check
+     * catches it.
+     */
+    @Test
+    void providerSpotCheckDetectsACustomerThatExistsOnStripeButNotLocallyAtAll() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_health_provider_gap", StripeConnectionMode.TEST);
+        runBackfillToCompletion(connectionId);
+
+        STRIPE_LIST_STUB.seed(
+                "/v1/customers",
+                List.of(BillingFixtures.customer("cus_provider_gap", "usd", BASE.getEpochSecond(), false, null)));
+
+        StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
+
+        assertThat(report.status()).isEqualTo(StripeBillingHealthStatus.DEGRADED);
+        assertThat(report.reasons()).contains(StripeBillingHealthReason.PROVIDER_RECONCILIATION_MISMATCH_PRESENT);
+        assertThat(report.providerSpotCheck().available()).isTrue();
+        assertThat(report.providerSpotCheck().missingCustomerIds()).containsExactly("cus_provider_gap");
+    }
+
+    @Test
+    void providerSpotCheckDoesNotRunAndDoesNotFalselyDegradeWhileInitialBackfillIsIncomplete() {
+        UUID workspaceId = createWorkspace();
+        insertActiveConnection(workspaceId, "acct_health_provider_incomplete", StripeConnectionMode.TEST);
+        STRIPE_LIST_STUB.seed(
+                "/v1/customers",
+                List.of(BillingFixtures.customer("cus_provider_incomplete", "usd", BASE.getEpochSecond(), false, null)));
+
+        StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
+
+        assertThat(report.providerSpotCheck().available()).isFalse();
+        assertThat(report.reasons()).contains(StripeBillingHealthReason.PROVIDER_CHECK_UNAVAILABLE);
+        assertThat(report.reasons()).doesNotContain(StripeBillingHealthReason.PROVIDER_RECONCILIATION_MISMATCH_PRESENT);
+        // No billing data has synced at all yet (backfill still on its first phase), so this is
+        // correctly STALE ("not yet trusted as current"), never a false DEGRADED.
+        assertThat(report.status()).isEqualTo(StripeBillingHealthStatus.STALE);
     }
 
     // ---- Failed webhook recovery / visibility -----------------------------------------------------
@@ -194,9 +281,26 @@ class StripeBillingHealthIntegrationTests extends AbstractBillingLedgerIntegrati
         assertThat(healthService.failedEvents(workspaceB, 10)).isEmpty();
     }
 
-    private void backdateConnectionUpdatedAt(UUID connectionId, Duration age) {
-        jdbc().sql("UPDATE stripe_connections SET updated_at = :updatedAt WHERE id = :id")
+    private void insertSyncedCustomer(UUID connectionId, UUID workspaceId, String stripeCustomerId) {
+        String customer = BillingFixtures.customer(stripeCustomerId, "usd", BASE.getEpochSecond(), false, null);
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_sync_" + stripeCustomerId, "customer.created",
+                BASE, customer);
+        drainWebhookQueue();
+    }
+
+    private void backdateLedgerRowUpdatedAt(String table, UUID workspaceId, String stripeCustomerId, Duration age) {
+        jdbc().sql("UPDATE " + table + " SET updated_at = :updatedAt WHERE workspace_id = :w AND stripe_customer_id = :id")
                 .param("updatedAt", OffsetDateTime.now(ZoneOffset.UTC).minus(age))
+                .param("w", workspaceId)
+                .param("id", stripeCustomerId)
+                .update();
+    }
+
+    /** Simulates an unrelated connection event (e.g. a routine verification) touching updated_at. */
+    private void touchConnectionUpdatedAt(UUID connectionId) {
+        jdbc().sql("UPDATE stripe_connections SET updated_at = :updatedAt WHERE id = :id")
+                .param("updatedAt", OffsetDateTime.now(ZoneOffset.UTC))
                 .param("id", connectionId)
                 .update();
     }
