@@ -432,7 +432,8 @@ public class StripeBillingHealthService {
             return StripeBillingHealthStatus.DEGRADED;
         }
         boolean stale = reasons.contains(StripeBillingHealthReason.SYNC_LAG_EXCEEDED)
-                || reasons.contains(StripeBillingHealthReason.BACKFILL_IN_PROGRESS);
+                || reasons.contains(StripeBillingHealthReason.BACKFILL_IN_PROGRESS)
+                || reasons.contains(StripeBillingHealthReason.PROVIDER_CHECK_UNAVAILABLE);
         return stale ? StripeBillingHealthStatus.STALE : StripeBillingHealthStatus.HEALTHY;
     }
 
