@@ -29,17 +29,25 @@ public class IdentityLinkingService {
     }
 
     /**
-     * Deletes up to {@code maxRows} of this project's {@code visitor_aliases} rows (unconditional --
-     * nothing else references a {@code visitor_aliases} row by foreign key), then up to {@code maxRows}
-     * {@code external_identities} rows that are <em>not</em> linked to a Stripe customer ({@code
-     * stripe_customer_links.fk_stripe_customer_links_identity}, V8, is {@code ON DELETE RESTRICT}).
-     * Aliases are removed first because {@code fk_visitor_aliases_identity} (V6) is also {@code ON
-     * DELETE RESTRICT}: an identity can only be deleted once nothing still points to it.
+     * Deletes up to {@code maxRows} of this project's {@code visitor_aliases} rows, then up to {@code
+     * maxRows} {@code external_identities} rows -- both restricted to identities that are <em>not</em>
+     * linked to a Stripe customer ({@code stripe_customer_links.fk_stripe_customer_links_identity}, V8,
+     * is {@code ON DELETE RESTRICT}). Aliases are removed first because {@code
+     * fk_visitor_aliases_identity} (V6) is also {@code ON DELETE RESTRICT}: an identity can only be
+     * deleted once nothing still points to it.
      *
      * <p>An identity that any {@code stripe_customer_links} row still references -- active or
      * superseded -- is Stripe-attribution evidence and is skipped, not force-removed, matching how
-     * {@code customer_attribution_results} protects touchpoints (V10). {@link #countProtectedIdentities}
-     * reports how many are being left in place once this phase is otherwise exhausted.
+     * {@code customer_attribution_results} protects touchpoints (V10). Critically, its {@code
+     * visitor_aliases} rows are skipped right alongside it, <em>not</em> deleted unconditionally: {@code
+     * AttributionApplicationService#recalculate} re-derives a customer's evidence by joining {@code
+     * visitor_aliases} to {@code touchpoints} on {@code visitor_id} for the exact identity a {@code
+     * stripe_customer_links} row points at, so deleting those aliases would silently turn a future
+     * recalculation of an already-STRONG, still-linked customer into UNATTRIBUTED even though its
+     * touchpoint and Stripe link both still exist -- corrupting derived results for the very evidence
+     * this method is supposed to preserve. {@link #countProtectedIdentities} and {@link
+     * #countProtectedAliases} report how many of each are being left in place once this phase is
+     * otherwise exhausted.
      *
      * <p>Both deletes are plain {@code DELETE ... LIMIT}-style bounded statements (via a subquery), so
      * this method is naturally idempotent and safe to call repeatedly by {@code
@@ -49,8 +57,10 @@ public class IdentityLinkingService {
         int aliasesDeleted = jdbc.sql("""
                         DELETE FROM visitor_aliases
                         WHERE id IN (
-                            SELECT id FROM visitor_aliases
-                            WHERE workspace_id = :workspaceId AND project_id = :projectId
+                            SELECT va.id FROM visitor_aliases va
+                            WHERE va.workspace_id = :workspaceId AND va.project_id = :projectId
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM stripe_customer_links l WHERE l.external_identity_id = va.external_identity_id)
                             LIMIT :maxRows
                         )
                         """)
@@ -73,6 +83,19 @@ public class IdentityLinkingService {
                 .param("maxRows", maxRows)
                 .update();
         return new IdentityDeletionBatch(aliasesDeleted, identitiesDeleted);
+    }
+
+    /** Remaining {@code visitor_aliases} rows this project cannot delete because their identity's Stripe link protects them. */
+    public long countProtectedAliases(UUID workspaceId, UUID projectId) {
+        return jdbc.sql("""
+                        SELECT COUNT(*) FROM visitor_aliases va
+                        WHERE va.workspace_id = :workspaceId AND va.project_id = :projectId
+                          AND EXISTS (SELECT 1 FROM stripe_customer_links l WHERE l.external_identity_id = va.external_identity_id)
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("projectId", projectId)
+                .query(Long.class)
+                .single();
     }
 
     /** Remaining {@code external_identities} rows this project cannot delete because a Stripe link protects them. */

@@ -104,7 +104,7 @@ public class EventIngestionService {
                 verification.tryMarkSucceeded(
                         project.workspaceId(), project.projectId(),
                         TrackingVerificationService.verificationToken(event.payload()),
-                        event.occurredAt(), event.eventId());
+                        event.eventId());
             }
             results.add(new EventIngestionResponse.EventResult(
                     event.eventId(), EventIngestionResponse.Status.ACCEPTED));

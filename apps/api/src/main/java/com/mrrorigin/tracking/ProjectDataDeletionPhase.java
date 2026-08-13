@@ -9,6 +9,7 @@ enum ProjectDataDeletionPhase {
     EVENTS,
     BATCHES,
     FAILURE_DIAGNOSTICS,
+    VERIFICATION,
     IDENTITY,
     TOUCHPOINTS,
     SESSIONS,
@@ -19,7 +20,8 @@ enum ProjectDataDeletionPhase {
         return switch (this) {
             case EVENTS -> BATCHES;
             case BATCHES -> FAILURE_DIAGNOSTICS;
-            case FAILURE_DIAGNOSTICS -> IDENTITY;
+            case FAILURE_DIAGNOSTICS -> VERIFICATION;
+            case VERIFICATION -> IDENTITY;
             case IDENTITY -> TOUCHPOINTS;
             case TOUCHPOINTS -> SESSIONS;
             case SESSIONS -> VISITORS;

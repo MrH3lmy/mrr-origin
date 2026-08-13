@@ -52,6 +52,26 @@ class ProjectDataDeletionIntegrationTests extends AbstractTrackingIntegrationTes
     @Autowired
     private ProjectDataDeletionService deletionService;
 
+    @Autowired
+    private TrackingVerificationService verification;
+
+    @Test
+    void deletionClearsVerificationAttemptsButNeverAnotherProjectsAttempt() throws Exception {
+        UUID workspaceId = createWorkspace(OWNER);
+        UUID projectA = createProject(workspaceId);
+        UUID projectB = createProject(workspaceId);
+        verification.start(workspaceId, projectA);
+        verification.start(workspaceId, projectB);
+        assertThat(count("tracking_verification_attempts", workspaceId, projectA)).isEqualTo(1);
+
+        runToCompletion(workspaceId, projectA, 100);
+
+        assertThat(verification.status(workspaceId, projectA)).isEmpty();
+        assertThat(count("tracking_verification_attempts", workspaceId, projectA)).isZero();
+        assertThat(verification.status(workspaceId, projectB)).isPresent();
+        assertThat(count("tracking_verification_attempts", workspaceId, projectB)).isEqualTo(1);
+    }
+
     @Test
     void deletionInterruptedAndResumedAcrossManyBoundedBatchesConvergesToComplete() throws Exception {
         UUID workspaceId = createWorkspace(OWNER);
@@ -152,7 +172,8 @@ class ProjectDataDeletionIntegrationTests extends AbstractTrackingIntegrationTes
         var outcome = runToCompletion(workspaceId, projectId, 100);
 
         assertThat(outcome.complete()).isTrue();
-        assertThat(outcome.skippedEvidenceRows()).isEqualTo(2); // 1 protected touchpoint + 1 protected identity
+        // 1 protected touchpoint + 1 protected identity + 1 protected alias
+        assertThat(outcome.skippedEvidenceRows()).isEqualTo(3);
         assertThat(count("touchpoints", workspaceId, projectId)).isEqualTo(1);
         assertThat(jdbc().sql("SELECT COUNT(*) FROM touchpoints WHERE id = :id").param("id", protectedTouchpoint)
                 .query(Integer.class).single()).isEqualTo(1);
@@ -162,8 +183,25 @@ class ProjectDataDeletionIntegrationTests extends AbstractTrackingIntegrationTes
         // The unprotected visitor/session (with no surviving touchpoint) is fully removed.
         assertThat(jdbc().sql("SELECT COUNT(*) FROM visitors WHERE id = :id").param("id", freeVisitor)
                 .query(Integer.class).single()).isZero();
-        // visitor_aliases are always removed unconditionally, protected identity or not.
-        assertThat(count("visitor_aliases", workspaceId, projectId)).isZero();
+        // The free identity's alias is gone, but the Stripe-linked identity's alias survives: deleting
+        // it would silently break AttributionApplicationService#recalculate's visitor_aliases-to-
+        // touchpoints join for this still-linked customer, downgrading an already-STRONG result to
+        // UNATTRIBUTED on next recalculation even though the touchpoint and Stripe link both remain.
+        assertThat(count("visitor_aliases", workspaceId, projectId)).isEqualTo(1);
+        assertThat(jdbc().sql(
+                        "SELECT COUNT(*) FROM visitor_aliases WHERE visitor_id = :v AND external_identity_id = :i")
+                        .param("v", protectedVisitor).param("i", protectedIdentity)
+                        .query(Integer.class).single())
+                .isEqualTo(1);
+        // Proves recalculation's own join still resolves the protected touchpoint through the surviving alias.
+        assertThat(jdbc().sql("""
+                        SELECT t.id FROM visitor_aliases a JOIN touchpoints t
+                          ON t.workspace_id = a.workspace_id AND t.project_id = a.project_id AND t.visitor_id = a.visitor_id
+                        WHERE a.external_identity_id = :identityId
+                        """)
+                        .param("identityId", protectedIdentity)
+                        .query(UUID.class).list())
+                .containsExactly(protectedTouchpoint);
     }
 
     @Test

@@ -95,18 +95,26 @@ public class TrackingVerificationService {
      * carries a verification token. A no-op (returns {@code false}) unless the token belongs to this
      * exact project and matches a currently-PENDING, unexpired attempt -- so a token guessed for, or
      * replayed from, a different project or a lapsed attempt can never succeed.
+     *
+     * <p>Expiry is judged against this server's own clock ({@code OffsetDateTime.now(clock)}), never
+     * against the event's client-supplied {@code occurredAt} -- {@code occurredAt} is ordinary event
+     * metadata that {@link EventIngestionService} only bounds to within the last 30 days, so trusting
+     * it here would let an attempt be captured once and replayed successfully well after it actually
+     * expired, simply by resubmitting with an in-window {@code occurredAt} and a fresh external event
+     * ID (dedup is per {@code external_event_id}, not per token or timestamp).
      */
-    boolean tryMarkSucceeded(UUID workspaceId, UUID projectId, String token, OffsetDateTime occurredAt, String externalEventId) {
+    boolean tryMarkSucceeded(UUID workspaceId, UUID projectId, String token, String externalEventId) {
         if (token == null || token.isBlank()) {
             return false;
         }
+        OffsetDateTime now = OffsetDateTime.now(clock);
         int updated = jdbc.sql("""
                         UPDATE tracking_verification_attempts
                         SET status = 'SUCCEEDED', succeeded_at = :succeededAt, received_external_event_id = :eventId
                         WHERE workspace_id = :workspaceId AND project_id = :projectId AND token = :token
                           AND status = 'PENDING' AND expires_at >= :succeededAt
                         """)
-                .param("succeededAt", occurredAt)
+                .param("succeededAt", now)
                 .param("workspaceId", workspaceId)
                 .param("projectId", projectId)
                 .param("token", token)

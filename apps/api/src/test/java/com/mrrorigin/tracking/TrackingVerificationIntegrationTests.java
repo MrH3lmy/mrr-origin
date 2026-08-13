@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -163,6 +164,30 @@ class TrackingVerificationIntegrationTests extends AbstractTrackingIntegrationTe
         String later = "2026-08-11T12:15:01Z";
         mvc.perform(ingest(key, "https://app.example",
                         verificationBatch("verify-expired", "verify-event-expired", "visitor-1", token, later)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.events[0].status").value("ACCEPTED"));
+
+        mvc.perform(get(verificationPath(workspaceId, projectId)).with(token(OWNER)))
+                .andExpect(jsonPath("$.status").value("EXPIRED"));
+    }
+
+    @Test
+    void aBackdatedOccurredAtCanNeverResurrectAnExpiredAttempt() throws Exception {
+        clock.set(Instant.parse(NOW));
+        UUID workspaceId = createWorkspace(OWNER);
+        UUID projectId = createProject(workspaceId);
+        String key = issueKey(workspaceId, projectId);
+        allowDomain(workspaceId, projectId, "app.example");
+        String token = start(workspaceId, projectId);
+
+        // The server's own clock has moved well past the attempt's expiry (12:15:00Z), but the event
+        // itself claims an occurredAt still inside the original PENDING window -- e.g. a captured
+        // request replayed later, or simple clock skew on the client. Expiry must be judged off the
+        // server's clock, never off this client-controlled field.
+        clock.set(Instant.parse(NOW).plus(TrackingVerificationService.TOKEN_TTL).plus(Duration.ofMinutes(5)));
+        String backdatedOccurredAt = "2026-08-11T12:05:00Z";
+        mvc.perform(ingest(key, "https://app.example",
+                        verificationBatch("verify-backdated", "verify-event-backdated", "visitor-1", token, backdatedOccurredAt)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.events[0].status").value("ACCEPTED"));
 

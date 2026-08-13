@@ -94,6 +94,7 @@ public class ProjectDataDeletionService {
             case EVENTS -> unconditional("tracking_event_envelopes", workspaceId, projectId, maxRows);
             case BATCHES -> deleteOrphanedBatches(workspaceId, projectId, maxRows);
             case FAILURE_DIAGNOSTICS -> unconditional("tracking_ingestion_failures", workspaceId, projectId, maxRows);
+            case VERIFICATION -> unconditional("tracking_verification_attempts", workspaceId, projectId, maxRows);
             case IDENTITY -> deleteIdentity(workspaceId, projectId, maxRows);
             case TOUCHPOINTS -> deleteTouchpoints(workspaceId, projectId, maxRows);
             case SESSIONS -> deleteSessions(workspaceId, projectId, maxRows);
@@ -138,7 +139,9 @@ public class ProjectDataDeletionService {
     private PhaseResult deleteIdentity(UUID workspaceId, UUID projectId, int maxRows) {
         IdentityLinkingService.IdentityDeletionBatch batch = identities.deleteIdentityDataBatch(workspaceId, projectId, maxRows);
         boolean exhausted = batch.aliasesDeleted() < maxRows && batch.identitiesDeleted() < maxRows;
-        long newlySkipped = exhausted ? identities.countProtectedIdentities(workspaceId, projectId) : 0;
+        long newlySkipped = exhausted
+                ? identities.countProtectedAliases(workspaceId, projectId) + identities.countProtectedIdentities(workspaceId, projectId)
+                : 0;
         return new PhaseResult(batch.totalDeleted(), exhausted, newlySkipped);
     }
 
