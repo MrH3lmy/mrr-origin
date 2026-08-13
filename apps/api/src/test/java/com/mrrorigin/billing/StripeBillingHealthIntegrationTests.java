@@ -65,6 +65,7 @@ class StripeBillingHealthIntegrationTests extends AbstractBillingLedgerIntegrati
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_health_happy", StripeConnectionMode.TEST);
         runBackfillToCompletion(connectionId);
+        insertSyncedCustomer(connectionId, workspaceId, "cus_health_happy");
 
         StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
 
