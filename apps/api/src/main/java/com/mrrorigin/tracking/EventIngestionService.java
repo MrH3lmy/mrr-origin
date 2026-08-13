@@ -33,12 +33,14 @@ public class EventIngestionService {
     private final ObjectMapper canonicalMapper;
     private final Clock clock;
     private final IdentityLinkingService identities;
+    private final TrackingVerificationService verification;
 
     public EventIngestionService(JdbcClient jdbc, ObjectMapper objectMapper, Clock clock,
-            IdentityLinkingService identities) {
+            IdentityLinkingService identities, TrackingVerificationService verification) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.identities = identities;
+        this.verification = verification;
         this.canonicalMapper = objectMapper.rebuild()
                 .enable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
                 .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
@@ -98,6 +100,12 @@ public class EventIngestionService {
                     ? null
                     : upsertSession(project, visitorId, event.sessionId(), event.occurredAt());
             insertEvent(project, batchId, visitorId, sessionId, event);
+            if (TrackingVerificationService.isVerificationPing(event.type(), event.payload())) {
+                verification.tryMarkSucceeded(
+                        project.workspaceId(), project.projectId(),
+                        TrackingVerificationService.verificationToken(event.payload()),
+                        event.eventId());
+            }
             results.add(new EventIngestionResponse.EventResult(
                     event.eventId(), EventIngestionResponse.Status.ACCEPTED));
         }
