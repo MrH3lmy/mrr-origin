@@ -119,7 +119,9 @@ class BillingLedgerConcurrencyAndIsolationIntegrationTests extends AbstractBilli
 
         assertThat(normalizationService.applyAndMarkProcessed(currentLease, () -> true))
                 .isEqualTo(StripeWebhookNormalizationService.ApplyOutcome.PROCESSED);
-        assertThat(normalizationService.markFailed(staleLease, "late failure from expired worker")).isFalse();
+        assertThat(normalizationService.markFailed(
+                        staleLease, "late failure from expired worker", StripeWebhookFailureKind.TRANSIENT))
+                .isFalse();
         assertThat(jdbc().sql("SELECT processing_state FROM stripe_webhook_events WHERE id = :id")
                         .param("id", staleLease.id())
                         .query(String.class)
