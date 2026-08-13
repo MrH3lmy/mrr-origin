@@ -85,6 +85,39 @@ public class IngestionKeyService {
         }
     }
 
+    /**
+     * Best-effort project attribution for an ingestion key that failed {@link #resolve}, using only
+     * the key's public, non-secret prefix (never the secret itself or its hash) -- so a diagnostic
+     * can be scoped to the right project for a wrong-secret or revoked key without ever comparing,
+     * storing, or logging the raw key. A prefix that matches no issued key at all (a guess, or noise)
+     * cannot be attributed to any tenant and yields empty.
+     */
+    @Transactional(readOnly = true)
+    public Optional<ResolvedProject> resolveProjectByPrefixForDiagnostics(String rawKey) {
+        if (rawKey == null) {
+            return Optional.empty();
+        }
+        int separator = rawKey.lastIndexOf('_');
+        if (separator <= 0 || separator == rawKey.length() - 1) {
+            return Optional.empty();
+        }
+        String prefix = rawKey.substring(0, separator);
+        try {
+            return Optional.of(jdbc.sql("""
+                    SELECT workspace_id, project_id
+                    FROM project_ingestion_keys
+                    WHERE key_prefix = :prefix
+                    """)
+                    .param("prefix", prefix)
+                    .query((rs, rowNum) -> new ResolvedProject(
+                            rs.getObject("workspace_id", UUID.class),
+                            rs.getObject("project_id", UUID.class)))
+                    .single());
+        } catch (EmptyResultDataAccessException ignored) {
+            return Optional.empty();
+        }
+    }
+
     private IssuedKey insert(UUID workspaceId, UUID projectId) {
         UUID id = UUID.randomUUID();
         String prefix = "mrr_" + randomHex(6);
