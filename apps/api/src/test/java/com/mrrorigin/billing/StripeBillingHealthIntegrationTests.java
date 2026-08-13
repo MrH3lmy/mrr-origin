@@ -96,36 +96,56 @@ class StripeBillingHealthIntegrationTests extends AbstractBillingLedgerIntegrati
     // ---- Stale checkpoint detection ---------------------------------------------------------------
 
     /**
-     * Regression for a prior bug: {@code stripe_connections.updated_at} is touched by verification
-     * (among other unrelated events) and must never be used, even as a fallback, to judge sync
-     * freshness -- a recent verification must not be able to mask billing data that has genuinely
-     * stopped advancing. Backdates the ledger row itself (the only legitimate signal) while leaving
-     * the connection's own {@code updated_at} recent, so a bug that fell back to the connection
-     * timestamp would incorrectly report HEALTHY here.
+     * Regression: staleness must reflect an actual processing backlog, never mere business-data
+     * quiet. A fully backfilled, non-empty account whose ledger simply hasn't changed in over a day
+     * (nothing happened on Stripe) has no pending or failed work, so it must stay HEALTHY -- it is
+     * quiet, not broken. {@link #lastSyncAt} still reports the old timestamp for visibility, but it
+     * must not by itself produce {@link StripeBillingHealthReason#SYNC_LAG_EXCEEDED}.
      */
     @Test
-    void staleWhenSyncActivityIsOlderThanTheThresholdEvenWithRecentConnectionVerification() {
+    void quietAccountWithOldLedgerActivityButNoBacklogStaysHealthy() {
         UUID workspaceId = createWorkspace();
-        UUID connectionId = insertActiveConnection(workspaceId, "acct_health_stale", StripeConnectionMode.TEST);
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_health_quiet", StripeConnectionMode.TEST);
         runBackfillToCompletion(connectionId);
-        insertSyncedCustomer(connectionId, workspaceId, "cus_health_stale");
-        backdateLedgerRowUpdatedAt("billing_customers", workspaceId, "cus_health_stale", Duration.ofHours(30));
-        touchConnectionUpdatedAt(connectionId);
+        insertSyncedCustomer(connectionId, workspaceId, "cus_health_quiet");
+        backdateLedgerRowUpdatedAt("billing_customers", workspaceId, "cus_health_quiet", Duration.ofHours(30));
+
+        StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
+
+        assertThat(report.status()).isEqualTo(StripeBillingHealthStatus.HEALTHY);
+        assertThat(report.reasons()).doesNotContain(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
+        assertThat(report.pendingWebhookEvents()).isZero();
+        // Informational only: the old ledger timestamp is still visible, it just doesn't drive status.
+        assertThat(report.syncLagSeconds()).isGreaterThan(Duration.ofHours(24).toSeconds());
+        assertThat(report.oldestPendingEventAgeSeconds()).isNull();
+    }
+
+    /**
+     * Regression: a genuine processing backlog -- a webhook event that has sat PENDING far longer
+     * than any normal processing delay -- must be caught even though the connection itself is
+     * perfectly healthy (ACTIVE/VERIFIED) and backfill is complete.
+     */
+    @Test
+    void staleWhenAPendingWebhookEventHasBeenWaitingLongerThanTheThreshold() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_health_backlog", StripeConnectionMode.TEST);
+        runBackfillToCompletion(connectionId);
+        insertStalePendingEvent(connectionId, workspaceId, "evt_health_backlog", Duration.ofHours(30));
 
         StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
 
         assertThat(report.status()).isEqualTo(StripeBillingHealthStatus.STALE);
         assertThat(report.reasons()).contains(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
-        assertThat(report.syncLagSeconds()).isGreaterThan(Duration.ofHours(24).toSeconds());
+        assertThat(report.pendingWebhookEvents()).isEqualTo(1);
+        assertThat(report.oldestPendingEventAgeSeconds()).isGreaterThan(Duration.ofHours(24).toSeconds());
     }
 
     @Test
-    void notYetStaleWhenLedgerActivityIsRecent() {
+    void notYetStaleWhenAPendingWebhookEventIsRecent() {
         UUID workspaceId = createWorkspace();
-        UUID connectionId = insertActiveConnection(workspaceId, "acct_health_recent", StripeConnectionMode.TEST);
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_health_backlog_recent", StripeConnectionMode.TEST);
         runBackfillToCompletion(connectionId);
-        insertSyncedCustomer(connectionId, workspaceId, "cus_health_recent");
-        backdateLedgerRowUpdatedAt("billing_customers", workspaceId, "cus_health_recent", Duration.ofHours(1));
+        insertStalePendingEvent(connectionId, workspaceId, "evt_health_backlog_recent", Duration.ofMinutes(5));
 
         StripeBillingHealthService.StripeBillingHealthReport report = healthService.health(workspaceId);
 
@@ -298,11 +318,12 @@ class StripeBillingHealthIntegrationTests extends AbstractBillingLedgerIntegrati
                 .update();
     }
 
-    /** Simulates an unrelated connection event (e.g. a routine verification) touching updated_at. */
-    private void touchConnectionUpdatedAt(UUID connectionId) {
-        jdbc().sql("UPDATE stripe_connections SET updated_at = :updatedAt WHERE id = :id")
-                .param("updatedAt", OffsetDateTime.now(ZoneOffset.UTC))
-                .param("id", connectionId)
-                .update();
+    /** Inserts a raw PENDING webhook event backdated by {@code age}, deliberately never drained. */
+    private void insertStalePendingEvent(UUID connectionId, UUID workspaceId, String eventId, Duration age) {
+        Instant receivedAt = Instant.now().minus(age);
+        String customer = BillingFixtures.customer("cus_" + eventId, "usd", receivedAt.getEpochSecond(), false, null);
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, eventId, "customer.created", receivedAt, receivedAt,
+                customer);
     }
 }

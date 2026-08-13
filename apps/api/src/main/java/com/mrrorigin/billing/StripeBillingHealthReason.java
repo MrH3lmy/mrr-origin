@@ -23,9 +23,17 @@ public enum StripeBillingHealthReason {
      * cannot see, since it only checks references between local records.
      */
     PROVIDER_RECONCILIATION_MISMATCH_PRESENT,
-    /** STALE: the most recent sync activity is older than the staleness threshold. */
+    /**
+     * STALE: the oldest currently-PENDING webhook event has been unprocessed longer than the
+     * staleness threshold -- a real processing backlog, not merely a quiet period with no new Stripe
+     * activity (a fully-caught-up, non-empty account with no pending work is never marked stale just
+     * because its ledger hasn't changed recently).
+     */
     SYNC_LAG_EXCEEDED,
-    /** Informational: the initial backfill has not reached DONE yet. Does not by itself degrade status. */
+    /**
+     * STALE: the initial backfill has not reached DONE yet, so the local ledger is not yet a complete
+     * mirror of Stripe's state regardless of how recently it last changed.
+     */
     BACKFILL_IN_PROGRESS,
     /** Informational: at least one webhook event could not be routed to a connection at receipt time. */
     ORPHANED_EVENTS_PRESENT,

@@ -42,15 +42,18 @@ import tools.jackson.databind.ObjectMapper;
  * backfill has reached {@code DONE}: before that, every not-yet-imported object would otherwise look
  * like a false "missing" gap.
  *
- * <p><b>Sync lag.</b> {@link #lastSyncAt} is the latest {@code updated_at} across every {@code
- * billing_*} ledger table for this workspace -- i.e. the last time any billing object actually
- * changed as a result of a successful backfill page or webhook normalization. It deliberately does
- * NOT fall back to {@code stripe_connections.updated_at}: that column is also touched by
- * verification checks, reconnects, and disconnects, none of which mean billing data has advanced, so
- * using it as a proxy could mask genuine staleness (a workspace whose webhook pipeline has been
- * silently broken for days could still look "just synced" purely because a routine verification
- * happened to run). The one carve-out is a connection whose initial backfill has completed and whose
- * ledger is (correctly) still empty -- nothing to have gone stale.
+ * <p><b>Sync lag.</b> {@code STALE} is driven by evidence of a processing backlog, never by how long
+ * ago business data last changed: a fully backfilled, non-empty account that simply has had no
+ * customer/subscription/invoice changes for a day is quiet, not broken, and must stay {@code
+ * HEALTHY}. The actual lag signal is {@link #oldestPendingReceivedAt} -- the age of the oldest
+ * currently-{@code PENDING} webhook event, i.e. real unprocessed work sitting in the queue -- plus
+ * whether the initial backfill has reached {@code DONE} yet. Neither of these ever falls back to
+ * {@code stripe_connections.updated_at}: that column is also touched by verification checks,
+ * reconnects, and disconnects, none of which mean billing data has advanced or that anything is
+ * actually pending, so using it as a proxy could mask a genuinely stuck pipeline behind a routine
+ * verification call. {@link #lastSyncAt} (the latest {@code updated_at} across every {@code
+ * billing_*} ledger table) is still computed and reported, but purely as informational context --
+ * it does not drive {@link StripeBillingHealthReason#SYNC_LAG_EXCEEDED}.
  */
 @Service
 public class StripeBillingHealthService {
@@ -146,11 +149,12 @@ public class StripeBillingHealthService {
         WebhookCounts webhookCounts = webhookCounts(workspaceId);
         List<ReconciliationMismatch> mismatches = mismatches(workspaceId);
         LedgerTotals totals = ledgerTotals(workspaceId);
+        OffsetDateTime lastSyncAt = lastSyncAt(workspaceId);
+        OffsetDateTime oldestPendingReceivedAt = oldestPendingReceivedAt(workspaceId);
 
         List<StripeBillingHealthReason> reasons = new ArrayList<>();
         String backfillPhase = null;
         boolean backfillComplete = false;
-        OffsetDateTime lastSyncAt = null;
         ProviderSpotCheck providerSpotCheck = ProviderSpotCheck.unavailable("no active, verified connection");
 
         if (connection == null) {
@@ -190,15 +194,11 @@ public class StripeBillingHealthService {
                 }
             }
 
-            lastSyncAt = lastSyncAt(workspaceId);
-            boolean emptyAndFullySynced = backfillComplete && totals.isEmpty();
-            boolean anyDegradingReason = reasons.contains(StripeBillingHealthReason.CONNECTION_NOT_ACTIVE)
-                    || reasons.contains(StripeBillingHealthReason.CONNECTION_UNVERIFIED)
-                    || reasons.contains(StripeBillingHealthReason.WEBHOOK_FAILURES_PRESENT)
-                    || reasons.contains(StripeBillingHealthReason.RECONCILIATION_MISMATCH_PRESENT)
-                    || reasons.contains(StripeBillingHealthReason.PROVIDER_RECONCILIATION_MISMATCH_PRESENT);
-            if (!anyDegradingReason && !emptyAndFullySynced
-                    && (lastSyncAt == null || Duration.between(lastSyncAt, now).compareTo(STALE_THRESHOLD) > 0)) {
+            // Processing-backlog age, not business-data inactivity, is what "stale" means here: a
+            // quiet-but-fully-caught-up account (nothing pending, backfill complete) is HEALTHY no
+            // matter how long ago its last ledger mutation was -- see the class Javadoc.
+            if (oldestPendingReceivedAt != null
+                    && Duration.between(oldestPendingReceivedAt, now).compareTo(STALE_THRESHOLD) > 0) {
                 reasons.add(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
             }
             if (!backfillComplete) {
@@ -208,6 +208,8 @@ public class StripeBillingHealthService {
 
         StripeBillingHealthStatus status = overallStatus(reasons);
         Long syncLagSeconds = lastSyncAt == null ? null : Duration.between(lastSyncAt, now).toSeconds();
+        Long oldestPendingEventAgeSeconds =
+                oldestPendingReceivedAt == null ? null : Duration.between(oldestPendingReceivedAt, now).toSeconds();
 
         return new StripeBillingHealthReport(
                 workspaceId,
@@ -221,6 +223,7 @@ public class StripeBillingHealthService {
                 backfillComplete,
                 lastSyncAt,
                 syncLagSeconds,
+                oldestPendingEventAgeSeconds,
                 webhookCounts.pending(),
                 webhookCounts.orphaned(),
                 webhookCounts.processed(),
@@ -363,9 +366,25 @@ public class StripeBillingHealthService {
     }
 
     /**
+     * The oldest currently-{@code PENDING} webhook event's {@code received_at} for this workspace, or
+     * {@code null} if none are pending -- the actual processing-backlog signal {@link #health} uses to
+     * decide staleness. See the class Javadoc for why the latest ledger mutation ({@link
+     * #lastSyncAt}) is informational only and does not drive that decision.
+     */
+    private OffsetDateTime oldestPendingReceivedAt(UUID workspaceId) {
+        List<OffsetDateTime> rows = jdbc.sql(
+                        "SELECT MIN(received_at) FROM stripe_webhook_events WHERE workspace_id = :workspaceId AND processing_state = 'PENDING'")
+                .param("workspaceId", workspaceId)
+                .query(OffsetDateTime.class)
+                .list();
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /**
      * The latest {@code updated_at} across every {@code billing_*} ledger table for this workspace --
-     * see the class Javadoc for why {@code stripe_connections.updated_at} is deliberately not used as
-     * a fallback.
+     * informational only (see the class Javadoc): a workspace with no pending backlog and a completed
+     * backfill is never marked stale purely because business data has not changed recently, so this
+     * does not by itself drive {@link StripeBillingHealthReason#SYNC_LAG_EXCEEDED}.
      */
     private OffsetDateTime lastSyncAt(UUID workspaceId) {
         StringBuilder sql = new StringBuilder("SELECT MAX(updated_at) FROM (");
@@ -412,7 +431,8 @@ public class StripeBillingHealthService {
         if (degraded) {
             return StripeBillingHealthStatus.DEGRADED;
         }
-        boolean stale = reasons.contains(StripeBillingHealthReason.SYNC_LAG_EXCEEDED);
+        boolean stale = reasons.contains(StripeBillingHealthReason.SYNC_LAG_EXCEEDED)
+                || reasons.contains(StripeBillingHealthReason.BACKFILL_IN_PROGRESS);
         return stale ? StripeBillingHealthStatus.STALE : StripeBillingHealthStatus.HEALTHY;
     }
 
@@ -422,13 +442,7 @@ public class StripeBillingHealthService {
             long pending, long orphaned, long processed, long failedTransient, long failedUnsupported, long failedLegacy) {}
 
     public record LedgerTotals(
-            long customers, long prices, long subscriptions, long invoices, long payments, long refunds, long discounts) {
-
-        boolean isEmpty() {
-            return customers == 0 && prices == 0 && subscriptions == 0 && invoices == 0
-                    && payments == 0 && refunds == 0 && discounts == 0;
-        }
-    }
+            long customers, long prices, long subscriptions, long invoices, long payments, long refunds, long discounts) {}
 
     public record ReconciliationMismatch(String kind, int count, boolean truncated, List<String> sampleStripeIds) {}
 
@@ -469,6 +483,7 @@ public class StripeBillingHealthService {
             boolean backfillComplete,
             OffsetDateTime lastSyncAt,
             Long syncLagSeconds,
+            Long oldestPendingEventAgeSeconds,
             long pendingWebhookEvents,
             long orphanedWebhookEvents,
             long processedWebhookEvents,
