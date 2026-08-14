@@ -3,11 +3,13 @@ package com.mrrorigin.reporting;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -15,10 +17,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -262,13 +266,54 @@ class UnattributedRevenueInboxIntegrationTests {
 
         // Once claimed from one project, it stops showing up as "unclaimed" everywhere else: its
         // repaired project sees the STRONG-or-NO_ELIGIBLE_TOUCHPOINT truth, and every other project's
-        // NOT EXISTS(active link) branch no longer matches it.
+        // "never had any link history" branch no longer matches it (it now has real history).
         link("cus_unclaimed");
 
         mockMvc.perform(get("/api/workspaces/{workspaceId}/projects/{projectId}/unattributed-revenue", workspace, otherProject)
                         .with(token(OWNER)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries.length()").value(0));
+    }
+
+    @Test
+    void aCustomerDisplacedByARepairStaysInItsOwnProjectAndNeverLeaksIntoAnotherProjectsInbox() throws Exception {
+        // The real repair flow (CustomerLinkRepairService#repair, via its HTTP endpoint): cus_old is
+        // linked and recalculated in `project`, then its identity is reassigned to cus_new, superseding
+        // cus_old's link and reverting it to NO_ACTIVE_LINK. cus_old has durable history in `project`
+        // and must stay visible only there -- never in another project's inbox as if it were unclaimed.
+        UUID identity = UUID.randomUUID();
+        db.sql("INSERT INTO external_identities (id, workspace_id, project_id, external_user_id) VALUES (:i, :w, :p, 'user_1')")
+                .param("i", identity).param("w", workspace).param("p", project).update();
+        insertBillingCustomer("cus_old");
+        insertBillingCustomer("cus_new");
+        movement("cus_old", "2026-04-01T00:00:00Z");
+        movement("cus_new", "2026-04-05T00:00:00Z");
+
+        mockMvc.perform(repair(OWNER, "user_1", "cus_old")).andExpect(status().isOk());
+        mockMvc.perform(repair(OWNER, "user_1", "cus_new")).andExpect(status().isOk());
+
+        UUID otherProject = UUID.randomUUID();
+        db.sql("INSERT INTO projects (id, workspace_id, name, domain, public_key) VALUES (:p, :w, 'p2', 'two.example', :k)")
+                .param("p", otherProject).param("w", workspace).param("k", "pk-" + otherProject).update();
+
+        mockMvc.perform(list(OWNER, null, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_old"))
+                .andExpect(jsonPath("$.entries[0].reason").value("NO_ACTIVE_LINK"));
+
+        mockMvc.perform(get("/api/workspaces/{workspaceId}/projects/{projectId}/unattributed-revenue", workspace, otherProject)
+                        .with(token(OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(0));
+    }
+
+    private MockHttpServletRequestBuilder repair(String actor, String externalUserId, String stripeCustomerId)
+            throws Exception {
+        return post("/api/workspaces/{workspaceId}/projects/{projectId}/unattributed-revenue/repairs", workspace, project)
+                .with(token(actor))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(new ObjectMapper()
+                        .writeValueAsString(Map.of("externalUserId", externalUserId, "stripeCustomerId", stripeCustomerId)));
     }
 
     private void movement(String stripeCustomerId, String effectiveAt) {

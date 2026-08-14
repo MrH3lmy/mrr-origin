@@ -23,14 +23,18 @@ import com.mrrorigin.revenue.RevenueCalculationService;
  * <p>The candidate scope starts from the same set {@link
  * com.mrrorigin.attribution.AttributionApplicationService#coverage} and the #19 batch recalculation
  * job use (currently linked in this project, or previously recalculated in this project), plus one
- * addition specific to this read model: a Stripe customer with New MRR that has never been linked
- * from *any* project in the workspace. {@code billing_customers}/{@code customer_mrr_movements} carry
- * no {@code project_id} -- a customer's project is only known once something links it -- so an
- * entirely fresh, never-linked customer is surfaced from every project in the workspace until a
- * repair claims it into one. Omitting this case would make the single most common "why is this
- * unattributed" answer (nobody has linked it yet) invisible from the inbox entirely, defeating
- * PRODUCT.md job 4. This addition only widens what this listing shows; it does not change #19's
- * batch recalculation scope or {@code coverage}'s numbers.
+ * addition specific to this read model: a Stripe customer with New MRR that has *never once* had a
+ * {@code stripe_customer_links} row -- active or superseded -- in this workspace. {@code
+ * billing_customers}/{@code customer_mrr_movements} carry no {@code project_id} -- a customer's
+ * project is only known once something links it -- so a genuinely fresh, never-linked customer is
+ * surfaced from every project in the workspace until a repair claims it into one. This is
+ * deliberately narrower than "no *active* link": a customer displaced by a repair (its link was
+ * superseded) keeps its durable history in the project that originally linked it, stays discoverable
+ * only there via the attribution-result branch above, and must never leak into every other project's
+ * inbox as if unclaimed. Omitting the never-linked case entirely would make the single most common
+ * "why is this unattributed" answer (nobody has linked it yet) invisible from the inbox, defeating
+ * PRODUCT.md job 4. This addition only widens what this listing shows; it does not change #19's batch
+ * recalculation scope or {@code coverage}'s numbers.
  *
  * <p>No new attribution evidence is invented here: the reason codes surfaced
  * ({@code NO_ACTIVE_LINK}, {@code NO_ELIGIBLE_TOUCHPOINT}, {@code NOT_RECALCULATED}) are exactly the
@@ -71,11 +75,17 @@ public class UnattributedRevenueInboxService {
                           WHERE r.workspace_id = :w AND r.project_id = :p
                           UNION
                           -- Billing customers (workspace-scoped; there is no project_id on
-                          -- billing_customers/customer_mrr_movements) with New MRR that have never been
-                          -- linked to *any* project in this workspace. Their eventual project is unknown
-                          -- until a repair claims them, so they surface from every project in the
-                          -- workspace until then -- otherwise the single most important unattributed case
-                          -- (a fresh Stripe customer nobody has linked yet) would never be visible or
+                          -- billing_customers/customer_mrr_movements) with New MRR that have *never*
+                          -- been linked -- no stripe_customer_links row at all, active or superseded --
+                          -- from any project in this workspace. Deliberately NOT "no *active* link":
+                          -- a customer displaced by a repair (its link was superseded, reverting it to
+                          -- NO_ACTIVE_LINK) has real, durable history in the project that originally
+                          -- linked it -- it remains discoverable there via the attribution-result
+                          -- branch above -- and must not leak into every other project's inbox as if it
+                          -- were unclaimed. Only a customer with zero link history anywhere has no
+                          -- knowable project yet, so only that customer surfaces workspace-wide until a
+                          -- repair claims it -- otherwise the single most important unattributed case (a
+                          -- fresh Stripe customer nobody has ever linked) would never be visible or
                           -- repairable from any inbox at all.
                           SELECT m.stripe_customer_id AS customer_id
                           FROM customer_mrr_movements m
@@ -83,7 +93,6 @@ public class UnattributedRevenueInboxService {
                             AND NOT EXISTS (
                                 SELECT 1 FROM stripe_customer_links l
                                 WHERE l.workspace_id = :w AND l.stripe_customer_id = m.stripe_customer_id
-                                  AND l.superseded_at IS NULL
                             )
                         ),
                         acquisitions AS (
