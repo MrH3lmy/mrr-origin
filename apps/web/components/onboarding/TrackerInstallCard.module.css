@@ -1,0 +1,37 @@
+.domainInput {
+  flex: 1 1 200px;
+  padding: 8px 10px;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-radius-control);
+  font-size: 0.8125rem;
+}
+
+.domainInput:focus-visible {
+  outline: 2px solid var(--ds-brand);
+  outline-offset: 1px;
+}
+
+.domainRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--ds-surface-subtle);
+  border-radius: var(--ds-radius-control);
+  font-size: 0.8125rem;
+}
+
+.snippetSection {
+  min-width: 0;
+}
+
+.snippet {
+  margin: 0;
+  padding: 14px;
+  overflow-x: auto;
+  background: var(--ds-text);
+  color: #e2e8f0;
+  border-radius: var(--ds-radius-panel);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
