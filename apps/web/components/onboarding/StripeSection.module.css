@@ -1,0 +1,65 @@
+.progressTrack {
+  height: 8px;
+  overflow: hidden;
+  background: var(--ds-surface-subtle);
+  border: 1px solid var(--ds-border);
+  border-radius: 999px;
+}
+
+.progressFill {
+  height: 100%;
+  background: var(--ds-brand);
+  transition: width 200ms ease;
+}
+
+.reasonList {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+}
+
+.reasonItem {
+  padding: 8px 10px;
+  background: var(--ds-surface-subtle);
+  border-radius: var(--ds-radius-control);
+}
+
+.metricGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  font-size: 0.8125rem;
+}
+
+.metricLabel {
+  color: var(--ds-text-muted);
+}
+
+.metricValue {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.modeToggle {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.modeOption {
+  padding: 6px 12px;
+  border: 1px solid var(--ds-border);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.modeOptionActive {
+  color: white;
+  background: var(--ds-brand);
+  border-color: var(--ds-brand);
+}

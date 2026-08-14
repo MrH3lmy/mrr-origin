@@ -1,0 +1,77 @@
+.app-shell {
+  --ds-bg: #f7f9fc;
+  --ds-surface: #ffffff;
+  --ds-surface-subtle: #f1f5f9;
+  --ds-text: #0f172a;
+  --ds-text-muted: #64748b;
+  --ds-border: #e2e8f0;
+  --ds-brand: #2563eb;
+  --ds-brand-hover: #1d4ed8;
+  --ds-positive: #15803d;
+  --ds-positive-bg: #f0fdf4;
+  --ds-warning: #b45309;
+  --ds-warning-bg: #fffbeb;
+  --ds-danger: #b91c1c;
+  --ds-danger-bg: #fef2f2;
+  --ds-info: #0369a1;
+  --ds-info-bg: #f0f9ff;
+  --ds-radius-control: 7px;
+  --ds-radius-panel: 10px;
+  --ds-shadow-menu: 0 8px 24px rgba(15, 23, 42, 0.12);
+
+  min-height: 100dvh;
+  color: var(--ds-text);
+  background: var(--ds-bg);
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  font-feature-settings: "tnum" 1;
+}
+
+.app-shell * {
+  box-sizing: border-box;
+}
+
+.app-shell :focus-visible {
+  outline: 2px solid var(--ds-brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.app-shell a {
+  color: inherit;
+}
+
+.app-shell button {
+  font: inherit;
+}
+
+.app-shell .skipLink {
+  position: absolute;
+  top: -48px;
+  left: 12px;
+  z-index: 100;
+  padding: 10px 16px;
+  color: white;
+  background: var(--ds-text);
+  border-radius: var(--ds-radius-control);
+  transition: top 150ms ease;
+}
+
+.app-shell .skipLink:focus {
+  top: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell,
+  .app-shell * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

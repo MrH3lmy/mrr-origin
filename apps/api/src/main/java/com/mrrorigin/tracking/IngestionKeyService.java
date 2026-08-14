@@ -64,6 +64,27 @@ public class IngestionKeyService {
                 .update() == 1;
     }
 
+    /** The project's current active (non-revoked) key, if one exists, without its secret. */
+    @Transactional(readOnly = true)
+    public Optional<ActiveKeySummary> getActive(UUID workspaceId, UUID projectId) {
+        try {
+            return Optional.of(jdbc.sql("""
+                    SELECT id, key_prefix, created_at
+                    FROM project_ingestion_keys
+                    WHERE workspace_id = :workspaceId AND project_id = :projectId AND revoked_at IS NULL
+                    """)
+                    .param("workspaceId", workspaceId)
+                    .param("projectId", projectId)
+                    .query((rs, rowNum) -> new ActiveKeySummary(
+                            rs.getObject("id", UUID.class),
+                            rs.getString("key_prefix"),
+                            rs.getObject("created_at", OffsetDateTime.class)))
+                    .single());
+        } catch (EmptyResultDataAccessException ignored) {
+            return Optional.empty();
+        }
+    }
+
     @Transactional(readOnly = true)
     public Optional<ResolvedProject> resolve(String rawKey) {
         if (rawKey == null || rawKey.isBlank()) {
@@ -165,4 +186,6 @@ public class IngestionKeyService {
     public record IssuedKey(UUID id, String secret, String prefix) {}
 
     public record ResolvedProject(UUID workspaceId, UUID projectId) {}
+
+    public record ActiveKeySummary(UUID id, String prefix, OffsetDateTime createdAt) {}
 }
