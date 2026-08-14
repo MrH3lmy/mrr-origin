@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { setSessionCookie } from "@/lib/auth/session";
+import { isSafeRedirectPath } from "@/lib/safe-redirect";
 
 /** Stores a bearer access token as an httpOnly session cookie. See `app/auth/sign-in/page.tsx`. */
 export async function POST(request: NextRequest) {
@@ -16,7 +17,8 @@ export async function POST(request: NextRequest) {
   await setSessionCookie(token.trim());
   const redirectTo = form.get("redirectTo");
   const destination =
-    typeof redirectTo === "string" && redirectTo.startsWith("/")
+    typeof redirectTo === "string" &&
+    isSafeRedirectPath(redirectTo, request.url)
       ? redirectTo
       : "/app";
   return NextResponse.redirect(new URL(destination, request.url), {

@@ -31,21 +31,33 @@ interface TrackerInstallCardProps {
   activeKey: ActiveIngestionKey;
   onActiveKeyChange: (key: ActiveIngestionKey) => void;
   initialDomains: AllowedDomain[];
+  /** The current PENDING verification attempt's token, if any -- see VerificationCard. */
+  verificationToken?: string;
 }
 
-function buildSnippet(keyValue: string): string {
+/**
+ * `publicKey` is the tracker's stable storage/identity key (`project.publicKey` -- never rotates).
+ * `ingestionKeyValue` is the separate, rotatable write credential used only for the `X-Ingestion-Key`
+ * header. These must stay distinct: using the rotatable ingestion secret as `publicKey` would move
+ * every visitor to a new local-storage namespace (and look like a new visitor) on every key rotation.
+ */
+function buildSnippet(
+  publicKey: string,
+  ingestionKeyValue: string,
+  verificationToken?: string,
+): string {
   return `import { createTracker } from "@mrr-origin/tracker";
 
-const tracker = createTracker({ publicKey: "${keyValue}" });
+const tracker = createTracker({ publicKey: "${publicKey}" });
 tracker.page();
-
+${verificationToken ? `tracker.track("mrr_origin_verification_ping", { verificationToken: "${verificationToken}" }); // one-time install check\n` : ""}
 // Send queued events using your ingestion key.
 async function flush() {
   const events = tracker.drain();
   if (events.length === 0) return;
   await fetch("<YOUR_MRRORIGIN_API_ORIGIN>/api/public/v1/events", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Ingestion-Key": "${keyValue}" },
+    headers: { "Content-Type": "application/json", "X-Ingestion-Key": "${ingestionKeyValue}" },
     body: JSON.stringify({ version: 1, batchId: crypto.randomUUID(), events }),
   });
 }
@@ -59,6 +71,7 @@ export function TrackerInstallCard({
   activeKey: key,
   onActiveKeyChange,
   initialDomains,
+  verificationToken,
 }: TrackerInstallCardProps) {
   const [issuedSecret, setIssuedSecret] = useState<string | null>(null);
   const [issuing, setIssuing] = useState(false);
@@ -143,8 +156,13 @@ export function TrackerInstallCard({
     }
   }
 
-  const snippetKey =
+  const ingestionKeyPlaceholder =
     issuedSecret ?? "<your ingestion key — generate one below>";
+  const snippet = buildSnippet(
+    project.publicKey,
+    ingestionKeyPlaceholder,
+    verificationToken,
+  );
 
   return (
     <Panel
@@ -263,11 +281,24 @@ export function TrackerInstallCard({
           >
             Installation snippet
           </p>
+          {verificationToken ? (
+            <p
+              style={{
+                margin: "0 0 8px",
+                fontSize: "0.75rem",
+                color: "var(--ds-text-muted)",
+              }}
+            >
+              This snippet includes a one-time verification line for your active
+              check below. Deploy it and open your site to complete
+              verification.
+            </p>
+          ) : null}
           <pre className={styles.snippet}>
-            <code>{buildSnippet(snippetKey)}</code>
+            <code>{snippet}</code>
           </pre>
           <div style={{ marginTop: 8 }}>
-            <CopyButton value={buildSnippet(snippetKey)} label="Copy snippet" />
+            <CopyButton value={snippet} label="Copy snippet" />
           </div>
         </div>
 

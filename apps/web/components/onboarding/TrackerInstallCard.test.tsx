@@ -142,6 +142,122 @@ describe("TrackerInstallCard", () => {
     ).toBeInTheDocument();
   });
 
+  it("uses the project's stable public key for tracker identity, never the rotatable ingestion secret", async () => {
+    const user = userEvent.setup();
+    issueOrRotateIngestionKey.mockResolvedValue({
+      id: "key-1",
+      secret: "mrr_abc123_secretvalue",
+      prefix: "mrr_abc123",
+      rotated: false,
+    });
+    getActiveIngestionKey.mockResolvedValue(activeKey);
+
+    render(
+      <TrackerInstallCard
+        workspaceId="ws-1"
+        projectId="proj-1"
+        project={project}
+        activeKey={noKey}
+        onActiveKeyChange={vi.fn()}
+        initialDomains={[]}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /generate installation key/i }),
+    );
+    await screen.findByText(/copy this key now/i);
+
+    const snippet =
+      screen.getByText((_, element) => element?.tagName === "CODE")
+        .textContent ?? "";
+    expect(snippet).toContain(
+      `createTracker({ publicKey: "${project.publicKey}" })`,
+    );
+    expect(snippet).toContain('"X-Ingestion-Key": "mrr_abc123_secretvalue"');
+    // The rotatable secret must never be used as the tracker's storage-identity key.
+    expect(snippet).not.toContain(`publicKey: "mrr_abc123_secretvalue"`);
+  });
+
+  it("keeps the tracker public key stable across key rotation", () => {
+    const { rerender } = render(
+      <TrackerInstallCard
+        workspaceId="ws-1"
+        projectId="proj-1"
+        project={project}
+        activeKey={activeKey}
+        onActiveKeyChange={vi.fn()}
+        initialDomains={[]}
+      />,
+    );
+    const before =
+      screen.getByText((_, element) => element?.tagName === "CODE")
+        .textContent ?? "";
+
+    const rotatedKey: ActiveIngestionKey = {
+      present: true,
+      id: "key-2",
+      prefix: "mrr_def456",
+      createdAt: "2026-08-14T01:00:00Z",
+    };
+    rerender(
+      <TrackerInstallCard
+        workspaceId="ws-1"
+        projectId="proj-1"
+        project={project}
+        activeKey={rotatedKey}
+        onActiveKeyChange={vi.fn()}
+        initialDomains={[]}
+      />,
+    );
+    const after =
+      screen.getByText((_, element) => element?.tagName === "CODE")
+        .textContent ?? "";
+
+    const publicKeyLine = (text: string) =>
+      text.split("\n").find((line) => line.includes("publicKey:"));
+    expect(publicKeyLine(before)).toBe(publicKeyLine(after));
+    expect(publicKeyLine(before)).toContain(project.publicKey);
+  });
+
+  it("includes the one-time verification line in the snippet while a check is pending", () => {
+    render(
+      <TrackerInstallCard
+        workspaceId="ws-1"
+        projectId="proj-1"
+        project={project}
+        activeKey={activeKey}
+        onActiveKeyChange={vi.fn()}
+        initialDomains={[]}
+        verificationToken="verify-token-xyz"
+      />,
+    );
+
+    const snippet =
+      screen.getByText((_, element) => element?.tagName === "CODE")
+        .textContent ?? "";
+    expect(snippet).toContain("mrr_origin_verification_ping");
+    expect(snippet).toContain("verify-token-xyz");
+  });
+
+  it("omits the verification line from the snippet when no check is pending", () => {
+    render(
+      <TrackerInstallCard
+        workspaceId="ws-1"
+        projectId="proj-1"
+        project={project}
+        activeKey={activeKey}
+        onActiveKeyChange={vi.fn()}
+        initialDomains={[]}
+      />,
+    );
+
+    const snippet =
+      screen.getByText((_, element) => element?.tagName === "CODE")
+        .textContent ?? "";
+    expect(snippet).not.toContain("mrr_origin_verification_ping");
+  });
+
   it("requires an explicit confirm step before rotating an existing key", async () => {
     const user = userEvent.setup();
     render(

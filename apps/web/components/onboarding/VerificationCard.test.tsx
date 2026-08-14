@@ -95,7 +95,7 @@ describe("VerificationCard", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders NO_TRAFFIC with waiting guidance", () => {
+  it("prompts to start verification before any attempt exists", () => {
     render(
       <VerificationCard
         {...baseProps}
@@ -104,10 +104,27 @@ describe("VerificationCard", () => {
       />,
     );
 
+    expect(
+      screen.getByText(/confirm your install end to end/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /start verification/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders NO_TRAFFIC guidance while a challenge is pending", () => {
+    render(
+      <VerificationCard
+        {...baseProps}
+        diagnostics={diagnostics("NO_TRAFFIC")}
+        verification={pendingAttempt}
+      />,
+    );
+
     expect(screen.getByText(/no traffic detected yet/i)).toBeInTheDocument();
     expect(screen.getByText("NO_TRAFFIC")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /start verification/i }),
+      screen.getByRole("button", { name: /check again/i }),
     ).toBeInTheDocument();
   });
 
@@ -153,7 +170,25 @@ describe("VerificationCard", () => {
     expect(screen.getByText(/couldn't be processed/i)).toBeInTheDocument();
   });
 
-  it("renders RECEIVING as a clear success confirmation", () => {
+  it("does NOT claim success from generic RECEIVING traffic while the challenge is still PENDING", () => {
+    // Regression: ordinary page-view traffic must never be presented as proof the token challenge
+    // succeeded -- see ProjectStatusView's equivalent gating regression.
+    render(
+      <VerificationCard
+        {...baseProps}
+        diagnostics={diagnostics("RECEIVING")}
+        verification={pendingAttempt}
+      />,
+    );
+
+    expect(screen.getByText(/verification event hasn't/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/you can continue to stripe/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("PENDING")).toBeInTheDocument();
+  });
+
+  it("renders SUCCEEDED as a clear success confirmation, independent of diagnostics.state", () => {
     render(
       <VerificationCard
         {...baseProps}
@@ -166,11 +201,16 @@ describe("VerificationCard", () => {
       />,
     );
 
-    expect(screen.getByText(/tracker detected/i)).toBeInTheDocument();
+    expect(screen.getByText(/tracker verified/i)).toBeInTheDocument();
     expect(screen.getByText(/continue to stripe/i)).toBeInTheDocument();
+    expect(screen.getByText("SUCCEEDED")).toBeInTheDocument();
+    // Once verified there is nothing left to retry.
+    expect(
+      screen.queryByRole("button", { name: /check again/i }),
+    ).not.toBeInTheDocument();
   });
 
-  it("shows an expired-attempt recovery action when the attempt lapsed", () => {
+  it("shows an expired-attempt recovery action when the attempt lapsed, and never claims success", () => {
     render(
       <VerificationCard
         {...baseProps}
@@ -183,6 +223,7 @@ describe("VerificationCard", () => {
     expect(
       screen.getByRole("button", { name: /start a new check/i }),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/tracker verified/i)).not.toBeInTheDocument();
   });
 
   it("starts verification and reports the new attempt/diagnostics to the parent", async () => {

@@ -266,7 +266,9 @@ export function StripeSection({
                 ? " — complete"
                 : health.backfillPhase
                   ? ` — ${health.backfillPhase.toLowerCase()}`
-                  : ""}
+                  : health.connectionPresent
+                    ? " — not started yet"
+                    : ""}
             </p>
             <div
               className={styles.progressTrack}
@@ -291,7 +293,7 @@ export function StripeSection({
                 loading={resuming}
                 style={{ marginTop: 10 }}
               >
-                Resume sync
+                {health.backfillPhase ? "Resume sync" : "Start initial sync"}
               </Button>
             ) : null}
           </div>

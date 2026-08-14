@@ -46,8 +46,13 @@ export function VerificationCard({
   const [error, setError] = useState<string | null>(null);
   const pollCount = useRef(0);
 
-  const isReceiving = diagnostics.state === "RECEIVING";
-  const isExpired = verification?.status === "EXPIRED" && !isReceiving;
+  const isVerified = verification?.status === "SUCCEEDED";
+  const isExpired = verification?.status === "EXPIRED" && !isVerified;
+  // Ordinary traffic (e.g. page views) can make diagnostics.state RECEIVING without the specific
+  // verification-ping challenge ever having arrived -- that would otherwise let a founder progress
+  // past this step without proving their key/origin/payload actually work end to end.
+  const isPendingWhileOtherTrafficArrives =
+    verification?.status === "PENDING" && diagnostics.state === "RECEIVING";
 
   async function refresh() {
     setChecking(true);
@@ -101,8 +106,7 @@ export function VerificationCard({
   }
 
   useEffect(() => {
-    if (isReceiving || !verification || verification.status !== "PENDING")
-      return;
+    if (!verification || verification.status !== "PENDING") return;
     const interval = window.setInterval(() => {
       if (pollCount.current >= MAX_AUTO_POLLS) {
         window.clearInterval(interval);
@@ -113,15 +117,32 @@ export function VerificationCard({
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh is stable enough for polling cadence
-  }, [verification?.status, isReceiving]);
+  }, [verification?.status]);
 
-  const copy = DIAGNOSTIC_STATE_COPY[diagnostics.state];
+  const diagnosticCopy = DIAGNOSTIC_STATE_COPY[diagnostics.state];
+  const display = isVerified
+    ? {
+        tone: "positive" as const,
+        label: "Verified",
+        headline: "Tracker verified. Events are arriving.",
+        detail:
+          "Your installed tracker sent the verification event successfully. You can continue to Stripe.",
+      }
+    : isPendingWhileOtherTrafficArrives
+      ? {
+          tone: "warning" as const,
+          label: "Awaiting verification event",
+          headline: "Traffic is arriving, but the verification event hasn't.",
+          detail:
+            "Make sure you deployed the installation snippet above — it now includes a one-time verification line — then open your site and check again.",
+        }
+      : diagnosticCopy;
 
   return (
     <Panel
       title="Verify tracking"
       subtitle="Confirm events from your site are reaching MRROrigin."
-      actions={<StatusBadge tone={copy.tone}>{copy.label}</StatusBadge>}
+      actions={<StatusBadge tone={display.tone}>{display.label}</StatusBadge>}
     >
       <div style={{ display: "grid", gap: 16 }}>
         {!hasActiveKey ? (
@@ -134,7 +155,7 @@ export function VerificationCard({
           <Alert
             tone="warning"
             title="Verification check expired"
-            detail="Live checks expire after 15 minutes. Start a new one after refreshing your site."
+            detail="Live checks expire after 15 minutes. Start a new one, redeploy the updated snippet above, then open your site."
           >
             <Button
               variant="primary"
@@ -145,27 +166,41 @@ export function VerificationCard({
               Start a new check
             </Button>
           </Alert>
+        ) : !verification ? (
+          <Alert
+            tone="neutral"
+            title="Start verification to confirm your install end to end"
+            detail="This adds a one-time check to the installation snippet above. Deploy it, open your site, then check again."
+          >
+            <Button
+              variant="primary"
+              size="small"
+              onClick={handleStart}
+              loading={starting}
+            >
+              Start verification
+            </Button>
+          </Alert>
+        ) : isVerified ? (
+          <Alert
+            tone={display.tone}
+            title={display.headline}
+            detail={display.detail}
+          />
         ) : (
-          <Alert tone={copy.tone} title={copy.headline} detail={copy.detail}>
-            {!verification ? (
-              <Button
-                variant="primary"
-                size="small"
-                onClick={handleStart}
-                loading={starting}
-              >
-                Start verification
-              </Button>
-            ) : (
-              <Button
-                variant="secondary"
-                size="small"
-                onClick={refresh}
-                loading={checking}
-              >
-                Check again
-              </Button>
-            )}
+          <Alert
+            tone={display.tone}
+            title={display.headline}
+            detail={display.detail}
+          >
+            <Button
+              variant="secondary"
+              size="small"
+              onClick={refresh}
+              loading={checking}
+            >
+              Check again
+            </Button>
           </Alert>
         )}
 
@@ -182,6 +217,14 @@ export function VerificationCard({
             <dt style={{ color: "var(--ds-text-muted)" }}>Reason code</dt>
             <dd style={{ margin: 0, fontFamily: "ui-monospace, monospace" }}>
               {diagnostics.state}
+            </dd>
+          </div>
+          <div>
+            <dt style={{ color: "var(--ds-text-muted)" }}>
+              Verification status
+            </dt>
+            <dd style={{ margin: 0, fontFamily: "ui-monospace, monospace" }}>
+              {verification?.status ?? "NOT_STARTED"}
             </dd>
           </div>
           <div>

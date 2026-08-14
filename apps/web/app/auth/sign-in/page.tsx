@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/session";
+import { isSafeRedirectPath } from "@/lib/safe-redirect";
 
 import styles from "./sign-in.module.css";
 
@@ -19,6 +20,13 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   }
 
   const { error, redirectTo } = await searchParams;
+  // Defense in depth only -- /auth/session is the authoritative check, since this page has no
+  // request origin of its own to validate against. A fixed local base is enough to reject
+  // protocol-relative/backslash values before they're even echoed into the hidden field.
+  const safeRedirectTo =
+    redirectTo && isSafeRedirectPath(redirectTo, "http://localhost")
+      ? redirectTo
+      : undefined;
 
   return (
     <main className={styles.page}>
@@ -64,8 +72,8 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
               spellCheck={false}
             />
           </div>
-          {redirectTo ? (
-            <input type="hidden" name="redirectTo" value={redirectTo} />
+          {safeRedirectTo ? (
+            <input type="hidden" name="redirectTo" value={safeRedirectTo} />
           ) : null}
           <button type="submit" className={styles.submit}>
             Continue

@@ -58,7 +58,10 @@ export function ProjectStatusView({
   const [verification, setVerification] = useState(initialVerification);
   const [health, setHealth] = useState(initialHealth);
 
-  const trackerHealthy = diagnostics.state === "RECEIVING";
+  // Gated on the real token challenge (#8's TrackingVerificationService), not on generic traffic:
+  // diagnostics.state === "RECEIVING" alone would let ordinary page views satisfy this step without
+  // ever proving the installed key/origin/payload actually work end to end.
+  const trackerHealthy = verification?.status === "SUCCEEDED";
   const stripeConnected =
     health.connectionStatus === "ACTIVE" &&
     health.verificationStatus === "VERIFIED";
@@ -114,6 +117,9 @@ export function ProjectStatusView({
         activeKey={activeKey}
         onActiveKeyChange={setActiveKey}
         initialDomains={initialDomains}
+        verificationToken={
+          verification?.status === "PENDING" ? verification.token : undefined
+        }
       />
 
       <VerificationCard

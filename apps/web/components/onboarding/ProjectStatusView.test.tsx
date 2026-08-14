@@ -109,11 +109,28 @@ function health(
   };
 }
 
-const verification: VerificationAttempt | null = null;
+const pendingAttempt: VerificationAttempt = {
+  id: "attempt-1",
+  token: "token-1",
+  status: "PENDING",
+  createdAt: "2026-08-14T00:00:00Z",
+  expiresAt: "2026-08-14T00:15:00Z",
+  succeededAt: null,
+};
+
+const healthyStripe: Partial<StripeBillingHealthReport> = {
+  status: "HEALTHY",
+  reasons: [],
+  connectionPresent: true,
+  connectionStatus: "ACTIVE",
+  verificationStatus: "VERIFIED",
+  backfillComplete: true,
+};
 
 function renderView(overrides: {
   activeKey?: ActiveIngestionKey;
   diagnosticsState?: ProjectDiagnosticsReport["state"];
+  verification?: VerificationAttempt | null;
   healthOverrides?: Partial<StripeBillingHealthReport>;
 }) {
   render(
@@ -126,7 +143,7 @@ function renderView(overrides: {
       initialDiagnostics={diagnostics(
         overrides.diagnosticsState ?? "NO_TRAFFIC",
       )}
-      initialVerification={verification}
+      initialVerification={overrides.verification ?? null}
       initialHealth={health(overrides.healthOverrides)}
     />,
   );
@@ -151,8 +168,53 @@ describe("ProjectStatusView onboarding progression", () => {
     expect(steps[2]).toHaveAttribute("aria-current", "step");
   });
 
-  it("advances to 'Connect Stripe' once the tracker is receiving events", () => {
-    renderView({ activeKey, diagnosticsState: "RECEIVING" });
+  it("does NOT advance past 'Verify tracking' on generic RECEIVING traffic with no verification attempt", () => {
+    // Regression: ordinary page-view traffic must never satisfy the real #8 token challenge.
+    renderView({
+      activeKey,
+      diagnosticsState: "RECEIVING",
+      verification: null,
+    });
+
+    const steps = screen.getAllByRole("listitem");
+    expect(steps[2]).toHaveTextContent("Verify tracking");
+    expect(steps[2]).toHaveAttribute("aria-current", "step");
+  });
+
+  it("does NOT advance past 'Verify tracking' while the challenge is still PENDING, even with RECEIVING traffic", () => {
+    renderView({
+      activeKey,
+      diagnosticsState: "RECEIVING",
+      verification: pendingAttempt,
+    });
+
+    const steps = screen.getAllByRole("listitem");
+    expect(steps[2]).toHaveTextContent("Verify tracking");
+    expect(steps[2]).toHaveAttribute("aria-current", "step");
+  });
+
+  it("does NOT advance past 'Verify tracking' when the attempt expired", () => {
+    renderView({
+      activeKey,
+      diagnosticsState: "NO_TRAFFIC",
+      verification: { ...pendingAttempt, status: "EXPIRED" },
+    });
+
+    const steps = screen.getAllByRole("listitem");
+    expect(steps[2]).toHaveTextContent("Verify tracking");
+    expect(steps[2]).toHaveAttribute("aria-current", "step");
+  });
+
+  it("advances to 'Connect Stripe' once the verification challenge SUCCEEDED", () => {
+    renderView({
+      activeKey,
+      diagnosticsState: "RECEIVING",
+      verification: {
+        ...pendingAttempt,
+        status: "SUCCEEDED",
+        succeededAt: "2026-08-14T00:05:00Z",
+      },
+    });
 
     const steps = screen.getAllByRole("listitem");
     expect(steps[3]).toHaveTextContent("Connect Stripe");
@@ -163,6 +225,7 @@ describe("ProjectStatusView onboarding progression", () => {
     renderView({
       activeKey,
       diagnosticsState: "RECEIVING",
+      verification: { ...pendingAttempt, status: "SUCCEEDED" },
       healthOverrides: {
         status: "STALE",
         reasons: ["BACKFILL_IN_PROGRESS"],
@@ -183,14 +246,8 @@ describe("ProjectStatusView onboarding progression", () => {
     renderView({
       activeKey,
       diagnosticsState: "RECEIVING",
-      healthOverrides: {
-        status: "HEALTHY",
-        reasons: [],
-        connectionPresent: true,
-        connectionStatus: "ACTIVE",
-        verificationStatus: "VERIFIED",
-        backfillComplete: true,
-      },
+      verification: { ...pendingAttempt, status: "SUCCEEDED" },
+      healthOverrides: healthyStripe,
     });
 
     expect(
@@ -203,10 +260,11 @@ describe("ProjectStatusView onboarding progression", () => {
     steps.forEach((step) => expect(step).not.toHaveAttribute("aria-current"));
   });
 
-  it("does not show ready when Stripe is connected but degraded, even with a healthy tracker", () => {
+  it("does not show ready when Stripe is connected but degraded, even with a verified tracker", () => {
     renderView({
       activeKey,
       diagnosticsState: "RECEIVING",
+      verification: { ...pendingAttempt, status: "SUCCEEDED" },
       healthOverrides: {
         status: "DEGRADED",
         reasons: ["WEBHOOK_FAILURES_PRESENT"],
