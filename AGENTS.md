@@ -6,6 +6,8 @@ These instructions apply to the entire repository.
 
 Before editing, read `PRODUCT.md`, `ARCHITECTURE.md`, `ROADMAP.md`, and `CONTRIBUTING.md`. GitHub issues are the executable backlog and override assumptions that are not written in those documents.
 
+Before editing `apps/web` UI/UX, also read `DESIGN_SYSTEM.md`. It governs visual and interaction consistency; `PRODUCT.md`, architecture/ADRs, and the active issue remain authoritative for behavior and scope.
+
 This is the canonical required-reading list for the repository; other docs (e.g. `CLAUDE.md`) should reference it rather than repeat it.
 
 ## Coordination
@@ -32,6 +34,7 @@ This is the canonical required-reading list for the repository; other docs (e.g.
 - Never edit a merged Flyway migration.
 - Never log credentials, webhook bodies containing sensitive data, raw emails, or payment details.
 - Run the smallest relevant checks while working and the complete package check before handoff.
+- For UI changes, verify the `DESIGN_SYSTEM.md` review checklist, including real backend-state mapping, responsive behavior, loading/empty/error states, keyboard/focus behavior, and accessible data presentation.
 
 ## Commands
 
