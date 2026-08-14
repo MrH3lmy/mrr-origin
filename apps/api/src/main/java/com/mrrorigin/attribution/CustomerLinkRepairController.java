@@ -108,6 +108,8 @@ public class CustomerLinkRepairController {
 
     public record AuditEntryResponse(
             UUID id,
+            String stripeCustomerId,
+            String displacedCustomerId,
             String externalUserId,
             String actionType,
             UUID newLinkId,
@@ -119,6 +121,8 @@ public class CustomerLinkRepairController {
         static AuditEntryResponse from(CustomerLinkRepairAuditService.AuditEntry entry) {
             return new AuditEntryResponse(
                     entry.id(),
+                    entry.stripeCustomerId(),
+                    entry.displacedCustomerId(),
                     entry.externalUserId(),
                     entry.actionType(),
                     entry.newLinkId(),

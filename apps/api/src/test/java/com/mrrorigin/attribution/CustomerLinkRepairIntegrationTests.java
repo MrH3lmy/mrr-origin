@@ -95,14 +95,27 @@ class CustomerLinkRepairIntegrationTests {
         identify("user_1");
         insertBillingCustomer("cus_1");
         movement("cus_1", "2026-04-01T00:00:00Z");
+        touchpoint("user_1", "2026-03-15T00:00:00Z");
 
         mockMvc.perform(repair(OWNER, "user_1", "cus_1")).andExpect(status().isOk());
+        OffsetDateTime calculatedAfterFirstRepair = resultCalculatedAt("cus_1");
+        UUID firstTouchAfterFirstRepair = resultFirstTouchpoint("cus_1");
+
+        // A real re-run of recalculate() would necessarily produce a strictly later calculated_at
+        // after this sleep, so an unchanged timestamp below is decisive proof it did not re-run.
+        Thread.sleep(50);
+
         mockMvc.perform(repair(OWNER, "user_1", "cus_1"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.actionType").value("UNCHANGED"));
+                .andExpect(jsonPath("$.actionType").value("UNCHANGED"))
+                .andExpect(jsonPath("$.targetCustomerAttribution[0].confidence").value("STRONG"));
 
         assertActiveLinkCount(1);
         assertAuditActionCounts("cus_1", Map.of("CREATED", 1));
+        // The unchanged repeat must not re-run recalculation: calculated_at (and evidence) stay
+        // byte-for-byte identical, not merely equal-by-coincidence of a fast re-run.
+        assertThat(resultCalculatedAt("cus_1")).isEqualTo(calculatedAfterFirstRepair);
+        assertThat(resultFirstTouchpoint("cus_1")).isEqualTo(firstTouchAfterFirstRepair);
     }
 
     @Test
@@ -235,6 +248,30 @@ class CustomerLinkRepairIntegrationTests {
                 .andExpect(jsonPath("$[0].externalUserId").value("user_2"))
                 .andExpect(jsonPath("$[1].actionType").value("CREATED"))
                 .andExpect(jsonPath("$[1].externalUserId").value("user_1"));
+    }
+
+    @Test
+    void theDisplacedCustomersAuditHistoryExplainsWhyItLostItsLink() throws Exception {
+        identify("user_1");
+        insertBillingCustomer("cus_old");
+        insertBillingCustomer("cus_new");
+        movement("cus_old", "2026-04-01T00:00:00Z");
+        movement("cus_new", "2026-04-05T00:00:00Z");
+
+        mockMvc.perform(repair(OWNER, "user_1", "cus_old")).andExpect(status().isOk());
+        mockMvc.perform(repair(OWNER, "user_1", "cus_new")).andExpect(status().isOk());
+
+        // cus_old was never itself the *target* of the second repair, but it was displaced by it --
+        // its own audit history must still be able to explain why its link disappeared.
+        mockMvc.perform(auditHistory(OWNER, "cus_old"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].actionType").value("CORRECTED"))
+                .andExpect(jsonPath("$[0].stripeCustomerId").value("cus_new"))
+                .andExpect(jsonPath("$[0].displacedCustomerId").value("cus_old"))
+                .andExpect(jsonPath("$[1].actionType").value("CREATED"))
+                .andExpect(jsonPath("$[1].stripeCustomerId").value("cus_old"))
+                .andExpect(jsonPath("$[1].displacedCustomerId").doesNotExist());
     }
 
     @Test

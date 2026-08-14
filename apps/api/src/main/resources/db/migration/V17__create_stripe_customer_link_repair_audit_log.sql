@@ -17,11 +17,20 @@
 -- and independent: a pure creation (neither side previously linked) leaves both null and
 -- `action_type = 'CREATED'`; any correction sets `action_type = 'CORRECTED'` and at least one of the
 -- two previous-link columns.
+--
+-- `displaced_customer_id` is set precisely when `previous_identity_link_id` is set and named a
+-- *different* Stripe customer than `stripe_customer_id`: that other customer just lost its only
+-- active link as a side effect of this repair (it reverts to NO_ACTIVE_LINK) even though the row is
+-- keyed under this repair's target customer. Recording it explicitly lets a caller ask "what changed
+-- for customer X" by matching either `stripe_customer_id` or `displaced_customer_id`, without forcing
+-- a join back through `stripe_customer_links.superseded_by_id` chains just to explain a disappeared
+-- link on the customer that lost it.
 CREATE TABLE stripe_customer_link_repair_audit_log (
     id UUID PRIMARY KEY,
     workspace_id UUID NOT NULL,
     project_id UUID NOT NULL,
     stripe_customer_id VARCHAR(255) NOT NULL,
+    displaced_customer_id VARCHAR(255),
     external_user_id VARCHAR(160) NOT NULL,
     action_type VARCHAR(16) NOT NULL,
     new_link_id UUID NOT NULL,
@@ -50,3 +59,5 @@ CREATE TABLE stripe_customer_link_repair_audit_log (
 
 CREATE INDEX idx_repair_audit_customer
     ON stripe_customer_link_repair_audit_log (workspace_id, project_id, stripe_customer_id, created_at, id);
+CREATE INDEX idx_repair_audit_displaced_customer
+    ON stripe_customer_link_repair_audit_log (workspace_id, project_id, displaced_customer_id, created_at, id);

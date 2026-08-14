@@ -124,15 +124,31 @@ class UnattributedRevenueInboxIntegrationTests {
     @Test
     void isolatesListingByWorkspaceAndProject() throws Exception {
         // customer_mrr_movements has no project_id (billing customers are workspace-scoped), so a
-        // customer's *project* association only exists via its attribution result / link -- two
-        // distinct Stripe customers are used here to isolate each project's own candidate scope.
+        // customer's *project* association only exists once something actually links it -- an
+        // actively-linked customer (not merely one with a bare attribution result) is required here
+        // to prove isolation, since an unlinked customer is deliberately visible workspace-wide
+        // (see aNeverLinkedCustomerIsVisibleFromEveryProjectInTheWorkspaceUntilClaimed).
         movement("cus_in_scope", "2026-04-01T00:00:00Z");
+        link("cus_in_scope");
         attribution.recalculate(workspace, project, "cus_in_scope");
 
         UUID otherProject = UUID.randomUUID();
         db.sql("INSERT INTO projects (id, workspace_id, name, domain, public_key) VALUES (:p, :w, 'p2', 'two.example', :k)")
                 .param("p", otherProject).param("w", workspace).param("k", "pk-" + otherProject).update();
         movement("cus_in_other_project", "2026-04-01T00:00:00Z");
+        insertBillingCustomer("cus_in_other_project");
+        UUID otherIdentity = UUID.randomUUID();
+        db.sql("INSERT INTO external_identities (id, workspace_id, project_id, external_user_id) VALUES (:i, :w, :p, 'user-in-other-project')")
+                .param("i", otherIdentity).param("w", workspace).param("p", otherProject).update();
+        db.sql(
+                        """
+                        INSERT INTO stripe_customer_links
+                            (id, workspace_id, project_id, external_identity_id, stripe_customer_id,
+                             evidence_source, evidence_reference, linked_by_subject_id)
+                        VALUES (:id, :w, :p, :i, 'cus_in_other_project', 'EXPLICIT_API', 'evidence', 'owner')
+                        """)
+                .param("id", UUID.randomUUID()).param("w", workspace).param("p", otherProject).param("i", otherIdentity)
+                .update();
         attribution.recalculate(workspace, otherProject, "cus_in_other_project");
 
         mockMvc.perform(get(
@@ -159,15 +175,20 @@ class UnattributedRevenueInboxIntegrationTests {
     }
 
     @Test
-    void surfacesADeterministicSuggestionOnlyForNoActiveLinkEntries() throws Exception {
+    void aSupersededCorrectedAwayHistoricalLinkIsNeverSurfacedAsASuggestion() throws Exception {
+        // cus_with_history was once explicitly linked to identity "user_freed"; a later customer-side
+        // correction reassigned it to "user_taken". "user_freed" is now unclaimed and is the sole
+        // historical name for cus_with_history -- but that history was explicitly corrected away, so
+        // it must never come back as a suggestion (the fix for the bug flagged in review: superseded
+        // evidence is a correction record, not still-valid evidence).
         UUID identity = UUID.randomUUID();
-        db.sql("INSERT INTO external_identities (id, workspace_id, project_id, external_user_id) VALUES (:i, :w, :p, 'user_free')")
+        db.sql("INSERT INTO external_identities (id, workspace_id, project_id, external_user_id) VALUES (:i, :w, :p, 'user_freed')")
                 .param("i", identity).param("w", workspace).param("p", project).update();
         UUID otherActiveIdentity = UUID.randomUUID();
         db.sql("INSERT INTO external_identities (id, workspace_id, project_id, external_user_id) VALUES (:i, :w, :p, 'user_taken')")
                 .param("i", otherActiveIdentity).param("w", workspace).param("p", project).update();
 
-        insertBillingCustomer("cus_with_suggestion");
+        insertBillingCustomer("cus_with_history");
         insertBillingCustomer("cus_taken_elsewhere");
         UUID activeElsewhere = UUID.randomUUID();
         db.sql(
@@ -184,20 +205,20 @@ class UnattributedRevenueInboxIntegrationTests {
                         INSERT INTO stripe_customer_links
                             (id, workspace_id, project_id, external_identity_id, stripe_customer_id,
                              evidence_source, evidence_reference, linked_by_subject_id, superseded_at, superseded_by_id)
-                        VALUES (:id, :w, :p, :i, 'cus_with_suggestion', 'EXPLICIT_API', 'seed', 'seed', now(), :replacement)
+                        VALUES (:id, :w, :p, :i, 'cus_with_history', 'EXPLICIT_API', 'seed', 'seed', now(), :replacement)
                         """)
                 .param("id", UUID.randomUUID()).param("w", workspace).param("p", project).param("i", identity)
                 .param("replacement", activeElsewhere)
                 .update();
 
-        movement("cus_with_suggestion", "2026-04-01T00:00:00Z");
-        attribution.recalculate(workspace, project, "cus_with_suggestion");
+        movement("cus_with_history", "2026-04-01T00:00:00Z");
+        attribution.recalculate(workspace, project, "cus_with_history");
 
         mockMvc.perform(list(OWNER, null, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries[0].reason").value("NO_ACTIVE_LINK"))
-                .andExpect(jsonPath("$.entries[0].suggestion.externalUserId").value("user_free"))
-                .andExpect(jsonPath("$.entries[0].suggestionUnavailableReason").doesNotExist());
+                .andExpect(jsonPath("$.entries[0].suggestion").doesNotExist())
+                .andExpect(jsonPath("$.entries[0].suggestionUnavailableReason").value("NO_DETERMINISTIC_REPAIR_AVAILABLE"));
     }
 
     @Test
@@ -209,6 +230,45 @@ class UnattributedRevenueInboxIntegrationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries[0].suggestion").doesNotExist())
                 .andExpect(jsonPath("$.entries[0].suggestionUnavailableReason").value("NO_DETERMINISTIC_REPAIR_AVAILABLE"));
+    }
+
+    @Test
+    void aNeverLinkedCustomerIsVisibleAsNoActiveLinkWithoutAnyPriorRecalculation() throws Exception {
+        // No link, no attribution result -- ever. This is the core "why is this unattributed" case
+        // (nobody has linked it yet), and must be discoverable without a manual recalculate() first.
+        movement("cus_never_linked", "2026-04-01T00:00:00Z");
+
+        mockMvc.perform(list(OWNER, null, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_never_linked"))
+                .andExpect(jsonPath("$.entries[0].reason").value("NO_ACTIVE_LINK"));
+    }
+
+    @Test
+    void aNeverLinkedCustomerIsVisibleFromEveryProjectInTheWorkspaceUntilClaimed() throws Exception {
+        UUID otherProject = UUID.randomUUID();
+        db.sql("INSERT INTO projects (id, workspace_id, name, domain, public_key) VALUES (:p, :w, 'p2', 'two.example', :k)")
+                .param("p", otherProject).param("w", workspace).param("k", "pk-" + otherProject).update();
+        movement("cus_unclaimed", "2026-04-01T00:00:00Z");
+
+        mockMvc.perform(list(OWNER, null, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_unclaimed"));
+        mockMvc.perform(get("/api/workspaces/{workspaceId}/projects/{projectId}/unattributed-revenue", workspace, otherProject)
+                        .with(token(OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_unclaimed"));
+
+        // Once claimed from one project, it stops showing up as "unclaimed" everywhere else: its
+        // repaired project sees the STRONG-or-NO_ELIGIBLE_TOUCHPOINT truth, and every other project's
+        // NOT EXISTS(active link) branch no longer matches it.
+        link("cus_unclaimed");
+
+        mockMvc.perform(get("/api/workspaces/{workspaceId}/projects/{projectId}/unattributed-revenue", workspace, otherProject)
+                        .with(token(OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(0));
     }
 
     private void movement(String stripeCustomerId, String effectiveAt) {

@@ -17,11 +17,12 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * #20's deterministic-only suggestion rule: surface a prior explicit ({@code EXPLICIT_API})
- * identity-to-customer link only when exactly one distinct historical candidate is currently
- * unclaimed. No touchpoint timing, email, or other similarity signal is ever consulted -- see
- * {@link DeterministicRepairSuggestionService}'s class doc for why this is the only signal
- * available under ADR-0005 without inventing new evidence.
+ * #20's deterministic-only suggestion rule: only a currently-active {@code EXPLICIT_API} link
+ * qualifies as evidence. Superseded rows are explicitly excluded -- supersession is itself a
+ * correction record, so a superseded row can never be trusted as still-valid evidence, even when it
+ * is the only/unique historical candidate. See {@link DeterministicRepairSuggestionService}'s class
+ * doc for why this means the method is expected to always return empty in V1 (no evidence tier that
+ * writes an *active* row for an otherwise-unattributed customer exists yet).
  */
 @SpringBootTest
 @Testcontainers
@@ -64,10 +65,28 @@ class DeterministicRepairSuggestionServiceIntegrationTests {
     }
 
     @Test
-    void aUniqueUnclaimedHistoricalIdentityIsSuggested() {
+    void aCurrentlyActiveExplicitLinkIsSuggested() {
+        // Not a state the inbox itself reaches for a NO_ACTIVE_LINK customer (an active link means
+        // it isn't unattributed for that reason) -- this proves the query correctly picks up genuine,
+        // current evidence when it exists, independent of how the inbox gates the call.
+        UUID identity = identify("user_active");
+        insertBillingCustomer("cus_1");
+        UUID link = UUID.randomUUID();
+        insertActiveLink(link, identity, "cus_1");
+
+        var suggestion = suggestions.suggest(workspace, project, "cus_1");
+        assertThat(suggestion).isPresent();
+        assertThat(suggestion.get().externalIdentityId()).isEqualTo(identity);
+        assertThat(suggestion.get().externalUserId()).isEqualTo("user_active");
+        assertThat(suggestion.get().evidenceLinkId()).isEqualTo(link);
+    }
+
+    @Test
+    void aUniqueSupersededHistoricalLinkIsNeverSuggested() {
         // cus_1 was once explicitly linked to identity I; a later customer-side correction reassigned
         // cus_1 to I2, which was itself later reassigned away to cus_2 -- freeing I2 without ever
-        // reclaiming I. I remains the sole free historical candidate for cus_1.
+        // reclaiming I. Even though I is the sole *unclaimed* historical name for cus_1, its link was
+        // explicitly superseded (corrected away) and must never be recommended again.
         UUID identityI = identify("user_i");
         UUID identityI2 = identify("user_i2");
         insertBillingCustomer("cus_1");
@@ -80,15 +99,11 @@ class DeterministicRepairSuggestionServiceIntegrationTests {
         UUID linkA = UUID.randomUUID();
         insertSupersededLink(linkA, identityI, "cus_1", linkB);
 
-        var suggestion = suggestions.suggest(workspace, project, "cus_1");
-        assertThat(suggestion).isPresent();
-        assertThat(suggestion.get().externalIdentityId()).isEqualTo(identityI);
-        assertThat(suggestion.get().externalUserId()).isEqualTo("user_i");
-        assertThat(suggestion.get().evidenceLinkId()).isEqualTo(linkA);
+        assertThat(suggestions.suggest(workspace, project, "cus_1")).isEmpty();
     }
 
     @Test
-    void twoFreeHistoricalCandidatesAreAmbiguousAndProduceNoSuggestion() {
+    void multipleSupersededHistoricalCandidatesAreAlsoNeverSuggested() {
         UUID identityI = identify("user_i");
         UUID identityI3 = identify("user_i3");
         UUID identityI4 = identify("user_i4");
@@ -101,7 +116,11 @@ class DeterministicRepairSuggestionServiceIntegrationTests {
         UUID linkA = UUID.randomUUID();
         insertSupersededLink(linkA, identityI, "cus_1", linkB);
 
-        assertThat(suggestions.suggest(workspace, project, "cus_1")).isEmpty();
+        // cus_1 actually has an active link (to I4) here, so this also proves superseded rows for
+        // the same customer never leak into the result alongside (or instead of) the active one.
+        var suggestion = suggestions.suggest(workspace, project, "cus_1");
+        assertThat(suggestion).isPresent();
+        assertThat(suggestion.get().externalIdentityId()).isEqualTo(identityI4);
     }
 
     @Test

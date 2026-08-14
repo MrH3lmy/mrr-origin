@@ -18,12 +18,21 @@ import com.mrrorigin.workspace.WorkspaceContext;
  * recalculation limited to the customer(s) whose derived attribution can have changed as a direct
  * result -- never a project- or workspace-wide sweep.
  *
- * <p>At most two customers are ever recalculated: the repair's target Stripe customer, and, only
- * when the target identity was reassigned away from a different Stripe customer, that customer
- * (its active link was just superseded, so it reverts to {@code NO_ACTIVE_LINK}). A customer whose
- * <em>identity</em> side was superseded (the target Stripe customer previously pointed at a
- * different identity) needs no separate recalculation of its own: it is the same target customer,
- * already covered by the first recalculation.
+ * <p><b>{@code UNCHANGED} is a true no-op.</b> When the requested pair is already the active link,
+ * {@code identityLinking.repair} writes no row. This method mirrors that: no audit entry, and no
+ * call to {@link AttributionApplicationService#recalculate}, which would otherwise rewrite {@code
+ * calculated_at} (and, if a model-version change were ever mid-flight, other derived fields) on rows
+ * that never changed. The already-current explanations are read back via {@link
+ * AttributionApplicationService#explanations} instead, so the response shape stays consistent
+ * whether or not anything actually moved.
+ *
+ * <p>For a real {@code CREATED}/{@code CORRECTED} repair, at most two customers are ever
+ * recalculated: the repair's target Stripe customer, and, only when the target identity was
+ * reassigned away from a different Stripe customer, that customer (its active link was just
+ * superseded, so it reverts to {@code NO_ACTIVE_LINK}). A customer whose <em>identity</em> side was
+ * superseded (the target Stripe customer previously pointed at a different identity) needs no
+ * separate recalculation of its own: it is the same target customer, already covered by the first
+ * recalculation.
  *
  * <p>Lives in {@code attribution} rather than {@code identity} because it depends on {@link
  * AttributionApplicationService}, and {@code identity}'s declared module dependencies
@@ -52,29 +61,39 @@ public class CustomerLinkRepairService {
     public RepairResult repair(UUID workspaceId, UUID projectId, String externalUserId, String stripeCustomerId) {
         RepairOutcome outcome = identityLinking.repair(workspaceId, projectId, externalUserId, stripeCustomerId);
 
-        if (!"UNCHANGED".equals(outcome.actionType())) {
-            audit.record(
-                    workspaceId,
-                    projectId,
-                    stripeCustomerId,
-                    externalUserId,
-                    outcome.actionType(),
-                    outcome.link().id(),
-                    idOf(outcome.previousIdentityLink()),
-                    idOf(outcome.previousCustomerLink()),
-                    workspaceContext.subjectId());
+        if ("UNCHANGED".equals(outcome.actionType())) {
+            // True no-op: no link row was written, so nothing is audited and no derived attribution
+            // is recalculated. Returning the already-current explanations (rather than recalculating)
+            // keeps a repeated identical repair from rewriting calculated_at / evidence on rows that
+            // did not actually change.
+            List<CustomerAttributionExplanation> current =
+                    attribution.explanations(workspaceId, projectId, stripeCustomerId, AttributionV1Engine.MODEL_VERSION);
+            return new RepairResult(outcome, current, null, List.of());
         }
 
-        List<CustomerAttributionExplanation> targetResult =
-                attribution.recalculate(workspaceId, projectId, stripeCustomerId);
-
         String displacedCustomerId = null;
-        List<CustomerAttributionExplanation> displacedResult = List.of();
         LinkOutcome previousIdentityLink = outcome.previousIdentityLink();
         if (previousIdentityLink != null && !previousIdentityLink.stripeCustomerId().equals(stripeCustomerId)) {
             displacedCustomerId = previousIdentityLink.stripeCustomerId();
-            displacedResult = attribution.recalculate(workspaceId, projectId, displacedCustomerId);
         }
+
+        audit.record(
+                workspaceId,
+                projectId,
+                stripeCustomerId,
+                displacedCustomerId,
+                externalUserId,
+                outcome.actionType(),
+                outcome.link().id(),
+                idOf(previousIdentityLink),
+                idOf(outcome.previousCustomerLink()),
+                workspaceContext.subjectId());
+
+        List<CustomerAttributionExplanation> targetResult =
+                attribution.recalculate(workspaceId, projectId, stripeCustomerId);
+        List<CustomerAttributionExplanation> displacedResult = displacedCustomerId == null
+                ? List.of()
+                : attribution.recalculate(workspaceId, projectId, displacedCustomerId);
 
         return new RepairResult(outcome, targetResult, displacedCustomerId, displacedResult);
     }

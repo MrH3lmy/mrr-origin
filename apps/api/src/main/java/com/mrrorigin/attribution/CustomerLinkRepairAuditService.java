@@ -30,6 +30,7 @@ public class CustomerLinkRepairAuditService {
             UUID workspaceId,
             UUID projectId,
             String stripeCustomerId,
+            String displacedCustomerId,
             String externalUserId,
             String actionType,
             UUID newLinkId,
@@ -39,16 +40,17 @@ public class CustomerLinkRepairAuditService {
         db.sql(
                         """
                         INSERT INTO stripe_customer_link_repair_audit_log
-                            (id, workspace_id, project_id, stripe_customer_id, external_user_id, action_type,
-                             new_link_id, previous_identity_link_id, previous_customer_link_id, actor_subject_id,
-                             created_at)
-                        VALUES (:id, :w, :p, :c, :externalUserId, :actionType, :newLinkId, :previousIdentityLinkId,
-                                :previousCustomerLinkId, :actor, :at)
+                            (id, workspace_id, project_id, stripe_customer_id, displaced_customer_id,
+                             external_user_id, action_type, new_link_id, previous_identity_link_id,
+                             previous_customer_link_id, actor_subject_id, created_at)
+                        VALUES (:id, :w, :p, :c, :displaced, :externalUserId, :actionType, :newLinkId,
+                                :previousIdentityLinkId, :previousCustomerLinkId, :actor, :at)
                         """)
                 .param("id", UUID.randomUUID())
                 .param("w", workspaceId)
                 .param("p", projectId)
                 .param("c", stripeCustomerId)
+                .param("displaced", displacedCustomerId)
                 .param("externalUserId", externalUserId)
                 .param("actionType", actionType)
                 .param("newLinkId", newLinkId)
@@ -59,7 +61,13 @@ public class CustomerLinkRepairAuditService {
                 .update();
     }
 
-    /** Audit history for one Stripe customer, most recent first, bounded and stably ordered. */
+    /**
+     * Audit history touching one Stripe customer, most recent first, bounded and stably ordered.
+     * Matches rows where this customer was the repair's target ({@code stripe_customer_id}) *or*
+     * where it was displaced by the repair (its own link was superseded as a side effect, per
+     * {@code displaced_customer_id}) -- so a customer that lost its link explaining why is just as
+     * discoverable as the customer that gained one.
+     */
     public List<AuditEntry> history(UUID workspaceId, UUID projectId, String stripeCustomerId, int limit) {
         if (workspaceId == null || projectId == null || stripeCustomerId == null || stripeCustomerId.isBlank()) {
             throw new IllegalArgumentException("workspace, project and Stripe customer are required");
@@ -69,10 +77,12 @@ public class CustomerLinkRepairAuditService {
         }
         return db.sql(
                         """
-                        SELECT id, external_user_id, action_type, new_link_id, previous_identity_link_id,
-                               previous_customer_link_id, actor_subject_id, created_at
+                        SELECT id, stripe_customer_id, displaced_customer_id, external_user_id, action_type,
+                               new_link_id, previous_identity_link_id, previous_customer_link_id,
+                               actor_subject_id, created_at
                         FROM stripe_customer_link_repair_audit_log
-                        WHERE workspace_id = :w AND project_id = :p AND stripe_customer_id = :c
+                        WHERE workspace_id = :w AND project_id = :p
+                          AND (stripe_customer_id = :c OR displaced_customer_id = :c)
                         ORDER BY created_at DESC, id DESC
                         LIMIT :limit
                         """)
@@ -82,6 +92,8 @@ public class CustomerLinkRepairAuditService {
                 .param("limit", limit)
                 .query((rs, rowNum) -> new AuditEntry(
                         rs.getObject("id", UUID.class),
+                        rs.getString("stripe_customer_id"),
+                        rs.getString("displaced_customer_id"),
                         rs.getString("external_user_id"),
                         rs.getString("action_type"),
                         rs.getObject("new_link_id", UUID.class),
@@ -94,6 +106,8 @@ public class CustomerLinkRepairAuditService {
 
     public record AuditEntry(
             UUID id,
+            String stripeCustomerId,
+            String displacedCustomerId,
             String externalUserId,
             String actionType,
             UUID newLinkId,

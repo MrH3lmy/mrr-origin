@@ -17,15 +17,26 @@ import com.mrrorigin.revenue.RevenueCalculationService;
 /**
  * Read-only, workspace/project-scoped listing of unattributed New MRR customers (#20), matching
  * ARCHITECTURE.md's "Unattributed revenue inbox" reporting outcome: "Stripe customer -> New MRR ->
- * reason -> deterministic repair action". Built entirely from {@code customer_mrr_movements}
- * (revenue) and {@code customer_attribution_results} (attribution), using the exact same
- * candidate/acquisition scope {@link com.mrrorigin.attribution.AttributionApplicationService#coverage}
- * and the #19 batch recalculation job already use, so the inbox, coverage numbers, and recalculation
- * scope can never silently disagree about which customers are "in scope" for this project.
+ * reason -> deterministic repair action". Built from {@code customer_mrr_movements} (revenue),
+ * {@code customer_attribution_results} (attribution), and {@code stripe_customer_links} (identity).
+ *
+ * <p>The candidate scope starts from the same set {@link
+ * com.mrrorigin.attribution.AttributionApplicationService#coverage} and the #19 batch recalculation
+ * job use (currently linked in this project, or previously recalculated in this project), plus one
+ * addition specific to this read model: a Stripe customer with New MRR that has never been linked
+ * from *any* project in the workspace. {@code billing_customers}/{@code customer_mrr_movements} carry
+ * no {@code project_id} -- a customer's project is only known once something links it -- so an
+ * entirely fresh, never-linked customer is surfaced from every project in the workspace until a
+ * repair claims it into one. Omitting this case would make the single most common "why is this
+ * unattributed" answer (nobody has linked it yet) invisible from the inbox entirely, defeating
+ * PRODUCT.md job 4. This addition only widens what this listing shows; it does not change #19's
+ * batch recalculation scope or {@code coverage}'s numbers.
  *
  * <p>No new attribution evidence is invented here: the reason codes surfaced
  * ({@code NO_ACTIVE_LINK}, {@code NO_ELIGIBLE_TOUCHPOINT}, {@code NOT_RECALCULATED}) are exactly the
- * stored/derived reasons ADR-0005 and the coverage read model already define.
+ * stored/derived reasons ADR-0005 and the coverage read model already define. For the never-linked
+ * case there is no stored result row to read a reason from, but "no active link" is directly and
+ * safely knowable from {@code stripe_customer_links} without running the engine.
  */
 @Service
 public class UnattributedRevenueInboxService {
@@ -58,6 +69,22 @@ public class UnattributedRevenueInboxService {
                           FROM customer_attribution_results r
                           JOIN customer_mrr_movements m ON m.workspace_id = r.workspace_id AND m.id = r.movement_id
                           WHERE r.workspace_id = :w AND r.project_id = :p
+                          UNION
+                          -- Billing customers (workspace-scoped; there is no project_id on
+                          -- billing_customers/customer_mrr_movements) with New MRR that have never been
+                          -- linked to *any* project in this workspace. Their eventual project is unknown
+                          -- until a repair claims them, so they surface from every project in the
+                          -- workspace until then -- otherwise the single most important unattributed case
+                          -- (a fresh Stripe customer nobody has linked yet) would never be visible or
+                          -- repairable from any inbox at all.
+                          SELECT m.stripe_customer_id AS customer_id
+                          FROM customer_mrr_movements m
+                          WHERE m.workspace_id = :w AND m.calculation_version = :cv AND m.movement_type = 'NEW'
+                            AND NOT EXISTS (
+                                SELECT 1 FROM stripe_customer_links l
+                                WHERE l.workspace_id = :w AND l.stripe_customer_id = m.stripe_customer_id
+                                  AND l.superseded_at IS NULL
+                            )
                         ),
                         acquisitions AS (
                           SELECT DISTINCT ON (m.stripe_customer_id)
@@ -69,7 +96,12 @@ public class UnattributedRevenueInboxService {
                           ORDER BY m.stripe_customer_id, m.effective_at, m.id
                         )
                         SELECT a.customer_id, a.movement_id, a.effective_at, a.currency, a.amount_minor,
-                               r.confidence, r.unattributed_reason
+                               r.confidence, r.unattributed_reason,
+                               EXISTS (
+                                   SELECT 1 FROM stripe_customer_links l
+                                   WHERE l.workspace_id = :w AND l.stripe_customer_id = a.customer_id
+                                     AND l.superseded_at IS NULL
+                               ) AS has_active_link
                         FROM acquisitions a
                         LEFT JOIN customer_attribution_results r
                           ON r.workspace_id = :w AND r.project_id = :p AND r.movement_id = a.movement_id
@@ -93,7 +125,8 @@ public class UnattributedRevenueInboxService {
                         rs.getObject("effective_at", OffsetDateTime.class),
                         rs.getString("currency"),
                         rs.getLong("amount_minor"),
-                        rs.getString("unattributed_reason")))
+                        rs.getString("unattributed_reason"),
+                        rs.getBoolean("has_active_link")))
                 .list();
 
         boolean hasMore = rows.size() > pageSize;
@@ -108,7 +141,18 @@ public class UnattributedRevenueInboxService {
     }
 
     private Entry toEntry(UUID workspaceId, UUID projectId, Row row) {
-        String reason = row.unattributedReason() == null ? "NOT_RECALCULATED" : row.unattributedReason();
+        // No stored result for the current model version. If a link currently exists (or once
+        // produced a result, e.g. under a prior model version), the gap is purely operational --
+        // recalculation hasn't run yet. Otherwise this customer has no active link at all, which is
+        // knowable directly from stripe_customer_links without needing a stored result to say so.
+        String reason;
+        if (row.unattributedReason() != null) {
+            reason = row.unattributedReason();
+        } else if (row.hasActiveLink()) {
+            reason = "NOT_RECALCULATED";
+        } else {
+            reason = "NO_ACTIVE_LINK";
+        }
         Suggestion suggestion = "NO_ACTIVE_LINK".equals(reason)
                 ? suggestions
                         .suggest(workspaceId, projectId, row.customerId())
@@ -143,7 +187,8 @@ public class UnattributedRevenueInboxService {
             OffsetDateTime effectiveAt,
             String currency,
             long amountMinor,
-            String unattributedReason) {}
+            String unattributedReason,
+            boolean hasActiveLink) {}
 
     /** Opaque, stable keyset cursor over {@code (effective_at, movement_id)} -- never a raw offset. */
     private record Cursor(OffsetDateTime effectiveAt, UUID movementId) {
