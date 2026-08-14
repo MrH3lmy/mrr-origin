@@ -2,6 +2,7 @@ package com.mrrorigin.tracking;
 
 import java.net.IDN;
 import java.net.URI;
+import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 
@@ -39,6 +40,33 @@ public class AllowedDomainService {
             throw new IllegalArgumentException("Project does not belong to workspace");
         }
         return new AllowedDomain(id, workspaceId, projectId, domain);
+    }
+
+    @Transactional(readOnly = true)
+    public List<AllowedDomain> list(UUID workspaceId, UUID projectId) {
+        return jdbc.sql("""
+                        SELECT id, domain FROM project_allowed_domains
+                        WHERE workspace_id = :workspaceId AND project_id = :projectId
+                        ORDER BY created_at ASC
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("projectId", projectId)
+                .query((rs, rowNum) -> new AllowedDomain(
+                        rs.getObject("id", UUID.class), workspaceId, projectId, rs.getString("domain")))
+                .list();
+    }
+
+    @Transactional
+    public boolean remove(UUID workspaceId, UUID projectId, UUID domainId) {
+        return jdbc.sql("""
+                        DELETE FROM project_allowed_domains
+                        WHERE id = :domainId AND workspace_id = :workspaceId AND project_id = :projectId
+                        """)
+                .param("domainId", domainId)
+                .param("workspaceId", workspaceId)
+                .param("projectId", projectId)
+                .update()
+                == 1;
     }
 
     @Transactional(readOnly = true)
