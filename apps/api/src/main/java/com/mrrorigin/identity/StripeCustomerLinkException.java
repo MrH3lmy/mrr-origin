@@ -2,7 +2,13 @@ package com.mrrorigin.identity;
 
 import org.springframework.http.HttpStatus;
 
-final class StripeCustomerLinkException extends RuntimeException {
+/**
+ * Public because #20's {@code attribution.CustomerLinkRepairController} also needs to translate
+ * this into an HTTP response -- {@link com.mrrorigin.identity.StripeCustomerLinkingService#repair}
+ * throws the same exception type {@link com.mrrorigin.identity.StripeCustomerLinkingService#link}
+ * does, for the same request-shape errors (unknown identity, unknown Stripe customer, unauthorized).
+ */
+public final class StripeCustomerLinkException extends RuntimeException {
     private final HttpStatus status;
     private final String code;
 
@@ -12,11 +18,11 @@ final class StripeCustomerLinkException extends RuntimeException {
         this.code = code;
     }
 
-    HttpStatus status() {
+    public HttpStatus status() {
         return status;
     }
 
-    String code() {
+    public String code() {
         return code;
     }
 }

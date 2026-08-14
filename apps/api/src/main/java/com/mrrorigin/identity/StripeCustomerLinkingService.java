@@ -106,6 +106,63 @@ public class StripeCustomerLinkingService {
         return findActiveLinkByIdentity(externalIdentityId);
     }
 
+    /**
+     * Explicit, workspace-manager-authorized create-or-correct entry point for #20's repair
+     * workflow. Unlike {@link #link}, which rejects any conflicting active link outright and never
+     * mutates existing rows, this method implements V8's reserved {@code superseded_at}/{@code
+     * superseded_by_id} contract: a conflicting active link on either side (the identity already
+     * points elsewhere, or the Stripe customer is already claimed by a different identity) is
+     * durably superseded by the newly inserted active link in the same transaction, so the prior
+     * link remains inspectable rather than being deleted or silently overwritten, per ADR-0002.
+     *
+     * <p>Still explicit-only: the caller supplies both sides by ID, exactly like {@link #link}. No
+     * candidate is guessed, scored, or ranked here.
+     *
+     * <p>Serializes on a workspace-scoped advisory lock (rather than per-identity/per-customer) so
+     * the multi-row supersede-then-insert sequence below can never interleave with a concurrent
+     * repair in the same workspace. Repairs are infrequent, manual, authorized actions, so
+     * workspace-wide serialization is a deliberate simplicity trade-off, not a throughput path.
+     */
+    @Transactional
+    public RepairOutcome repair(UUID workspaceId, UUID projectId, String externalUserId, String stripeCustomerId) {
+        workspaceContext.requireManager(workspaceId);
+        ensureProjectOwnedByWorkspace(workspaceId, projectId);
+        lockWorkspace(workspaceId);
+
+        UUID externalIdentityId = resolveExternalIdentity(workspaceId, projectId, externalUserId)
+                .orElseThrow(() -> new StripeCustomerLinkException(
+                        HttpStatus.NOT_FOUND,
+                        "external_user_not_tracked",
+                        "No tracked external user with this ID exists for this project"));
+        ensureBillingCustomerExists(workspaceId, stripeCustomerId);
+
+        Optional<LinkOutcome> identityActive = findActiveLinkByIdentity(externalIdentityId);
+        if (identityActive.isPresent() && identityActive.get().stripeCustomerId().equals(stripeCustomerId)) {
+            return new RepairOutcome(identityActive.get(), "UNCHANGED", null, null);
+        }
+
+        Optional<LinkOutcome> customerActive = findActiveLinkByCustomer(workspaceId, stripeCustomerId);
+        if (customerActive.isPresent() && !customerActive.get().projectId().equals(projectId)) {
+            throw new StripeCustomerLinkException(
+                    HttpStatus.CONFLICT,
+                    "stripe_customer_linked_in_different_project",
+                    "This Stripe customer is actively linked from a different project and cannot be "
+                            + "corrected from this project");
+        }
+
+        UUID newLinkId = UUID.randomUUID();
+        identityActive.ifPresent(existing -> supersede(existing.id(), newLinkId));
+        customerActive
+                .filter(existing -> identityActive.isEmpty() || !existing.id().equals(identityActive.get().id()))
+                .ifPresent(existing -> supersede(existing.id(), newLinkId));
+
+        insertLinkWithId(newLinkId, workspaceId, projectId, externalIdentityId, stripeCustomerId);
+        LinkOutcome created = findActiveLinkByIdentity(externalIdentityId)
+                .orElseThrow(() -> new IllegalStateException("Inserted Stripe customer link was not readable"));
+        String actionType = identityActive.isPresent() || customerActive.isPresent() ? "CORRECTED" : "CREATED";
+        return new RepairOutcome(created, actionType, identityActive.orElse(null), customerActive.orElse(null));
+    }
+
     private void ensureProjectOwnedByWorkspace(UUID workspaceId, UUID projectId) {
         boolean owned = jdbc.sql("SELECT EXISTS (SELECT 1 FROM projects WHERE id = :projectId AND workspace_id = :workspaceId)")
                 .param("projectId", projectId)
@@ -187,7 +244,6 @@ public class StripeCustomerLinkingService {
 
     private boolean tryInsertLink(
             UUID workspaceId, UUID projectId, UUID externalIdentityId, String stripeCustomerId) {
-        String actor = workspaceContext.subjectId();
         return jdbc.sql(
                         """
                         INSERT INTO stripe_customer_links
@@ -205,10 +261,64 @@ public class StripeCustomerLinkingService {
                 .param("stripeCustomerId", stripeCustomerId)
                 .param("evidenceSource", EVIDENCE_SOURCE_EXPLICIT_API)
                 .param("evidenceReference", EVIDENCE_REFERENCE_EXPLICIT_API)
-                .param("linkedBy", actor)
+                .param("linkedBy", workspaceContext.subjectId())
                 .query(UUID.class)
                 .optional()
                 .isPresent();
+    }
+
+    /** Serializes {@link #repair}'s multi-row supersede-then-insert sequence within one workspace. */
+    private void lockWorkspace(UUID workspaceId) {
+        jdbc.sql("SELECT pg_advisory_xact_lock(hashtext(:workspaceId))")
+                .param("workspaceId", workspaceId.toString())
+                .query((rs, rowNum) -> 0)
+                .single();
+    }
+
+    /**
+     * Marks {@code oldLinkId} superseded by {@code newLinkId} in one statement, satisfying
+     * V8's {@code chk_stripe_customer_links_supersession_pair} check (both columns must become
+     * non-null together) even though {@code newLinkId} is not yet a row -- {@code
+     * fk_stripe_customer_links_superseded_by} is {@code DEFERRABLE INITIALLY DEFERRED}, so it is only
+     * validated at commit, by which point {@link #insertLinkWithId} has inserted it. Guarded by
+     * {@link #repair}'s workspace advisory lock, so the affected row is always still active here.
+     */
+    private void supersede(UUID oldLinkId, UUID newLinkId) {
+        int updated = jdbc.sql(
+                        """
+                        UPDATE stripe_customer_links
+                        SET superseded_at = CURRENT_TIMESTAMP, superseded_by_id = :newLinkId
+                        WHERE id = :oldLinkId AND superseded_at IS NULL
+                        """)
+                .param("newLinkId", newLinkId)
+                .param("oldLinkId", oldLinkId)
+                .update();
+        if (updated != 1) {
+            throw new IllegalStateException("Expected to supersede exactly one active link");
+        }
+    }
+
+    private void insertLinkWithId(
+            UUID id, UUID workspaceId, UUID projectId, UUID externalIdentityId, String stripeCustomerId) {
+        jdbc.sql(
+                        """
+                        INSERT INTO stripe_customer_links
+                            (id, workspace_id, project_id, external_identity_id, stripe_customer_id,
+                             evidence_source, evidence_reference, linked_by_subject_id)
+                        VALUES (:id, :workspaceId, :projectId, :externalIdentityId, :stripeCustomerId,
+                                :evidenceSource, :evidenceReference, :linkedBy)
+                        """)
+                .param("id", id)
+                .param("workspaceId", workspaceId)
+                .param("projectId", projectId)
+                .param("externalIdentityId", externalIdentityId)
+                .param("stripeCustomerId", stripeCustomerId)
+                .param("evidenceSource", EVIDENCE_SOURCE_EXPLICIT_API)
+                .param(
+                        "evidenceReference",
+                        "explicit server-side repair call by an authenticated workspace manager")
+                .param("linkedBy", workspaceContext.subjectId())
+                .update();
     }
 
     public record LinkOutcome(
@@ -233,4 +343,15 @@ public class StripeCustomerLinkingService {
                 rs.getString("linked_by_subject_id"),
                 rs.getObject("created_at", OffsetDateTime.class));
     }
+
+    /**
+     * Result of {@link #repair}. {@code actionType} is {@code UNCHANGED} when the requested pair was
+     * already the active link (pure idempotent replay -- no row was written), {@code CREATED} when
+     * neither side had an active link, or {@code CORRECTED} when at least one prior active link was
+     * superseded. {@code previousIdentityLink}/{@code previousCustomerLink} are the specific rows
+     * that were superseded (or null if that side had no conflict), letting a caller identify exactly
+     * which other Stripe customer, if any, needs its derived attribution recalculated.
+     */
+    public record RepairOutcome(
+            LinkOutcome link, String actionType, LinkOutcome previousIdentityLink, LinkOutcome previousCustomerLink) {}
 }
