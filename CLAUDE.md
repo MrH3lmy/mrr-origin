@@ -13,6 +13,20 @@ Follow `AGENTS.md` for repository-wide engineering rules and required reading. B
 
 When a requested implementation conflicts with the product exclusions or architecture rules, stop and raise the conflict on the issue. Do not quietly widen the scope.
 
+## UI work
+
+For any significant `apps/web` UI/UX task:
+
+- Read `DESIGN_SYSTEM.md` in addition to the repository-required context and issue.
+- Use the project-enabled `ui-ux-pro-max@ui-ux-pro-max-skill` plugin to challenge visual hierarchy, dashboard/layout pattern, information density, chart choice, responsiveness, accessibility, and common UI anti-patterns before implementation.
+- Treat UI UX Pro Max as design guidance only. It must not invent product behavior, metrics, backend states, dependencies, or scope; `PRODUCT.md`, architecture/ADRs, the issue, and real API contracts remain authoritative.
+- Prefer extending reusable project primitives over one-off page styling.
+- Do not assume Tailwind, shadcn/ui, a chart library, or another UI dependency exists. Inspect `apps/web/package.json`; justify any new dependency in the PR.
+- Implement and test real loading, empty, success, degraded/stale, failure, retry, keyboard/focus, and responsive states required by the screen.
+- In the PR description, note the UI UX Pro Max review performed and any new reusable design-system decision.
+
+If the plugin is unavailable in the current Claude environment, continue using `DESIGN_SYSTEM.md` and state that limitation in the PR rather than substituting a random design system.
+
 ## Communication style
 
 Optimize replies and PR/commit text for output-token efficiency:
