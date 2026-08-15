@@ -20,10 +20,23 @@ interface OverviewClientProps {
   from: string;
   to: string;
   overview: RevenueOverview;
-  coverage: AttributionCoverage;
-  stripeHealth: StripeBillingHealthReport;
-  diagnostics: ProjectDiagnosticsReport;
+  /** Null when this signal couldn't be loaded -- rendered as its own degraded/failed state, never blocking the rest of the page. */
+  coverage: AttributionCoverage | null;
+  stripeHealth: StripeBillingHealthReport | null;
+  diagnostics: ProjectDiagnosticsReport | null;
 }
+
+interface Selection {
+  movementType: MrrMovementType | null;
+  source: string | null;
+  currency: string | null;
+}
+
+const EMPTY_SELECTION: Selection = {
+  movementType: null,
+  source: null,
+  currency: null,
+};
 
 export function OverviewClient({
   workspaceId,
@@ -35,22 +48,28 @@ export function OverviewClient({
   stripeHealth,
   diagnostics,
 }: OverviewClientProps) {
-  const [movementType, setMovementType] = useState<MrrMovementType | null>(
-    null,
-  );
-  const [source, setSource] = useState<string | null>(null);
+  const [selection, setSelection] = useState<Selection>(EMPTY_SELECTION);
 
   return (
     <div style={{ display: "grid", gap: 24 }}>
       <RevenueSummary
         overview={overview}
-        selectedMovementType={movementType}
-        selectedSource={source}
-        onSelectMovementType={(type) =>
-          setMovementType((current) => (current === type ? null : type))
+        selectedMovementType={selection.movementType}
+        selectedSource={selection.source}
+        selectedCurrency={selection.currency}
+        onSelectMovementType={(type, currency) =>
+          setSelection((current) =>
+            current.movementType === type && current.currency === currency
+              ? EMPTY_SELECTION
+              : { movementType: type, source: null, currency },
+          )
         }
-        onSelectSource={(nextSource) =>
-          setSource((current) => (current === nextSource ? null : nextSource))
+        onSelectSource={(nextSource, currency) =>
+          setSelection((current) =>
+            current.source === nextSource && current.currency === currency
+              ? EMPTY_SELECTION
+              : { movementType: null, source: nextSource, currency },
+          )
         }
       />
 
@@ -67,12 +86,10 @@ export function OverviewClient({
         projectId={projectId}
         from={from}
         to={to}
-        movementType={movementType}
-        source={source}
-        onClearFilters={() => {
-          setMovementType(null);
-          setSource(null);
-        }}
+        movementType={selection.movementType}
+        source={selection.source}
+        currency={selection.currency}
+        onClearFilters={() => setSelection(EMPTY_SELECTION)}
       />
     </div>
   );

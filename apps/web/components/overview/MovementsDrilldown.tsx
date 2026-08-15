@@ -27,6 +27,7 @@ interface MovementsDrilldownProps {
   to: string;
   movementType: MrrMovementType | null;
   source: string | null;
+  currency: string | null;
   onClearFilters: () => void;
 }
 
@@ -37,6 +38,7 @@ export function MovementsDrilldown({
   to,
   movementType,
   source,
+  currency,
   onClearFilters,
 }: MovementsDrilldownProps) {
   const [entries, setEntries] = useState<MrrMovementEntry[]>([]);
@@ -48,7 +50,7 @@ export function MovementsDrilldown({
   // Render-phase reset when the filter/period params change -- React's recommended alternative to
   // an effect that only mirrors props (same pattern AppShell uses for its pathname-keyed drawer
   // reset), so the pending fetch below only ever calls setState from its async continuation.
-  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${movementType ?? ""}|${source ?? ""}`;
+  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${movementType ?? ""}|${source ?? ""}|${currency ?? ""}`;
   const [loadedKey, setLoadedKey] = useState(filterKey);
   if (filterKey !== loadedKey) {
     setLoadedKey(filterKey);
@@ -62,6 +64,7 @@ export function MovementsDrilldown({
     listMrrMovements(client, workspaceId, projectId, from, to, {
       movementType: movementType ?? undefined,
       source: source ?? undefined,
+      currency: currency ?? undefined,
     })
       .then((page) => {
         if (cancelled) return;
@@ -82,7 +85,7 @@ export function MovementsDrilldown({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, projectId, from, to, movementType, source]);
+  }, [workspaceId, projectId, from, to, movementType, source, currency]);
 
   async function loadMore() {
     if (!nextCursor) return;
@@ -98,6 +101,7 @@ export function MovementsDrilldown({
         {
           movementType: movementType ?? undefined,
           source: source ?? undefined,
+          currency: currency ?? undefined,
           cursor: nextCursor,
         },
       );
@@ -114,7 +118,7 @@ export function MovementsDrilldown({
     }
   }
 
-  const hasFilters = Boolean(movementType || source);
+  const hasFilters = Boolean(movementType || source || currency);
 
   return (
     <Panel
@@ -132,6 +136,9 @@ export function MovementsDrilldown({
             <span className={styles.filterChip}>
               {source === "UNATTRIBUTED" ? "Unattributed" : source}
             </span>
+          ) : null}
+          {currency ? (
+            <span className={styles.filterChip}>{currency}</span>
           ) : null}
           <Button variant="ghost" size="small" onClick={onClearFilters}>
             Clear filters

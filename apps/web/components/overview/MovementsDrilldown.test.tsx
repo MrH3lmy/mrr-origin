@@ -42,6 +42,7 @@ const baseProps = {
   to: "2026-05-01T00:00:00Z",
   movementType: null,
   source: null,
+  currency: null,
   onClearFilters: vi.fn(),
 };
 
@@ -145,5 +146,25 @@ describe("MovementsDrilldown", () => {
 
     await user.click(screen.getByRole("button", { name: /clear filters/i }));
     expect(onClearFilters).toHaveBeenCalled();
+  });
+
+  it("passes the selected currency to the API call and shows it as a filter chip", async () => {
+    listMrrMovements.mockResolvedValue({ entries: [entry], nextCursor: null });
+
+    render(
+      <MovementsDrilldown {...baseProps} movementType="NEW" currency="USD" />,
+    );
+
+    await screen.findByText("cus_1");
+
+    expect(listMrrMovements).toHaveBeenCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      expect.objectContaining({ movementType: "NEW", currency: "USD" }),
+    );
+    expect(screen.getByText("USD")).toBeInTheDocument();
   });
 });

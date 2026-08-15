@@ -20,7 +20,7 @@ import com.mrrorigin.revenue.RevenueCalculationService;
  * movement carries its confidence, source/campaign/landing-page evidence, or unattributed reason,
  * so a founder can trace a summarized claim back to the customer and evidence that produced it.
  *
- * <p>Uses the same project-scoping candidate set and keyset-pagination approach as {@link
+ * <p>Uses the same {@link #OWNER_CTE} project resolution and keyset-pagination approach as {@link
  * UnattributedRevenueInboxService}, generalized to all movement types (not only New MRR).
  */
 @Service
@@ -29,6 +29,40 @@ public class RevenueMovementsService {
     static final int MAX_LIMIT = 100;
     private static final Set<String> MOVEMENT_TYPES =
             Set.of("NEW", "EXPANSION", "CONTRACTION", "CHURN", "REACTIVATION");
+
+    /**
+     * Resolves exactly one "owning project" per Stripe customer, so the same movement can never be
+     * counted toward two projects' reporting at once.
+     *
+     * <p>{@code customer_mrr_movements} carries no {@code project_id} of its own -- a customer's
+     * project is only knowable through {@code stripe_customer_links} or {@code
+     * customer_attribution_results}. {@link com.mrrorigin.attribution.AttributionApplicationService#recalculate}
+     * re-stamps a customer's <em>entire</em> movement history under whichever project recalculates
+     * it, so a customer who was linked to project A, then freed and relinked to project B, can end
+     * up with {@code customer_attribution_results} rows for the same movement under both A and B
+     * once B recalculates. Preferring the customer's currently active link, and otherwise the most
+     * recently calculated result (by {@code calculated_at}), always resolves to the customer's
+     * current project rather than double-counting into a stale former one.
+     */
+    static final String OWNER_CTE =
+            """
+            owner AS (
+              SELECT COALESCE(active.customer_id, latest.customer_id) AS customer_id,
+                     COALESCE(active.project_id, latest.project_id) AS owning_project_id
+              FROM (
+                SELECT stripe_customer_id AS customer_id, project_id
+                FROM stripe_customer_links
+                WHERE workspace_id = :w AND superseded_at IS NULL
+              ) active
+              FULL OUTER JOIN (
+                SELECT DISTINCT ON (m.stripe_customer_id) m.stripe_customer_id AS customer_id, r.project_id
+                FROM customer_attribution_results r
+                JOIN customer_mrr_movements m ON m.workspace_id = r.workspace_id AND m.id = r.movement_id
+                WHERE r.workspace_id = :w
+                ORDER BY m.stripe_customer_id, r.calculated_at DESC, r.id DESC
+              ) latest ON latest.customer_id = active.customer_id
+            )
+            """;
 
     private final JdbcClient db;
 
@@ -43,6 +77,7 @@ public class RevenueMovementsService {
             OffsetDateTime to,
             String movementType,
             String source,
+            String currency,
             String cursor,
             Integer limit) {
         if (workspaceId == null || projectId == null || from == null || to == null) {
@@ -58,29 +93,21 @@ public class RevenueMovementsService {
         Optional<Cursor> decoded = Cursor.decode(cursor);
 
         var rows = db.sql(
-                        """
-                        WITH candidates AS (
-                          SELECT stripe_customer_id AS customer_id
-                          FROM stripe_customer_links
-                          WHERE workspace_id = :w AND project_id = :p AND superseded_at IS NULL
-                          UNION
-                          SELECT m.stripe_customer_id AS customer_id
-                          FROM customer_attribution_results r
-                          JOIN customer_mrr_movements m ON m.workspace_id = r.workspace_id AND m.id = r.movement_id
-                          WHERE r.workspace_id = :w AND r.project_id = :p
-                        )
+                        "WITH " + OWNER_CTE
+                                + """
                         SELECT m.id, m.stripe_customer_id, m.currency, m.amount_minor, m.movement_type, m.effective_at,
                           r.confidence, r.unattributed_reason,
                           r.first_source, r.first_campaign, r.first_landing_page,
                           r.last_source, r.last_campaign, r.last_landing_page
                         FROM customer_mrr_movements m
-                        JOIN candidates c ON c.customer_id = m.stripe_customer_id
+                        JOIN owner o ON o.customer_id = m.stripe_customer_id AND o.owning_project_id = :p
                         LEFT JOIN customer_attribution_results r
                           ON r.workspace_id = m.workspace_id AND r.project_id = :p AND r.movement_id = m.id
                              AND r.model_version = :mv
                         WHERE m.workspace_id = :w AND m.calculation_version = :cv
                           AND m.effective_at >= :from AND m.effective_at < :to
                           AND (:hasType = FALSE OR m.movement_type = :type)
+                          AND (:hasCurrency = FALSE OR m.currency = :currency)
                           AND (:hasSource = FALSE
                                OR (:source = 'UNATTRIBUTED' AND (r.confidence IS DISTINCT FROM 'STRONG'))
                                OR (r.confidence = 'STRONG' AND r.first_source = :source))
@@ -96,6 +123,8 @@ public class RevenueMovementsService {
                 .param("to", to)
                 .param("hasType", movementType != null)
                 .param("type", movementType == null ? "" : movementType)
+                .param("hasCurrency", currency != null)
+                .param("currency", currency == null ? "" : currency)
                 .param("hasSource", source != null)
                 .param("source", source == null ? "" : source)
                 .param("hasCursor", decoded.isPresent())

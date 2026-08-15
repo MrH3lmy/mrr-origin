@@ -37,6 +37,7 @@ const baseOverview: RevenueOverview = {
 const baseProps = {
   selectedMovementType: null,
   selectedSource: null,
+  selectedCurrency: null,
   onSelectMovementType: vi.fn(),
   onSelectSource: vi.fn(),
 };
@@ -78,7 +79,47 @@ describe("RevenueSummary", () => {
 
     await user.click(screen.getByRole("button", { name: /new mrr/i }));
 
-    expect(onSelectMovementType).toHaveBeenCalledWith("NEW");
+    expect(onSelectMovementType).toHaveBeenCalledWith("NEW", "USD");
+  });
+
+  it("scopes the source-row selection to its own currency bucket, so a multi-currency click reconciles", async () => {
+    const user = userEvent.setup();
+    const multiCurrency: RevenueOverview = {
+      ...baseOverview,
+      movementTotals: [
+        ...baseOverview.movementTotals,
+        {
+          currency: "EUR",
+          movementType: "NEW",
+          totalMinor: 40000,
+          movementCount: 1,
+        },
+      ],
+      sourceHighlights: [
+        ...baseOverview.sourceHighlights,
+        {
+          source: "google",
+          currency: "EUR",
+          totalMinor: 40000,
+          customerCount: 1,
+        },
+      ],
+    };
+    const onSelectSource = vi.fn();
+    render(
+      <RevenueSummary
+        overview={multiCurrency}
+        {...baseProps}
+        onSelectSource={onSelectSource}
+      />,
+    );
+
+    // Buckets render in sorted currency order (EUR, then USD), so index 0 is the EUR google row.
+    const googleButtons = screen.getAllByRole("button", { name: /google/i });
+    expect(googleButtons).toHaveLength(2);
+
+    await user.click(googleButtons[0]);
+    expect(onSelectSource).toHaveBeenCalledWith("google", "EUR");
   });
 
   it("disables movement rows with zero amount so they cannot be selected as a drill-down filter", () => {

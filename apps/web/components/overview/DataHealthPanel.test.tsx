@@ -146,4 +146,39 @@ describe("DataHealthPanel", () => {
     // not a failure, per DESIGN_SYSTEM.md.
     expect(screen.getByText("50%").className).not.toMatch(/danger/i);
   });
+
+  it("renders an honest unavailable row for a signal that failed to load, without crashing the panel", () => {
+    render(
+      <DataHealthPanel
+        workspaceId="ws-1"
+        projectId="proj-1"
+        coverage={null}
+        stripeHealth={healthyStripe}
+        diagnostics={receivingDiagnostics}
+      />,
+    );
+
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+    expect(
+      screen.getByText("Couldn't load attribution coverage. Try refreshing."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Unavailable").length).toBeGreaterThan(0);
+    // The signals that DID load still render their real state.
+    expect(screen.getByText("Healthy")).toBeInTheDocument();
+  });
+
+  it("still renders when every signal failed to load", () => {
+    render(
+      <DataHealthPanel
+        workspaceId="ws-1"
+        projectId="proj-1"
+        coverage={null}
+        stripeHealth={null}
+        diagnostics={null}
+      />,
+    );
+
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+    expect(screen.getAllByText("Unavailable").length).toBe(3);
+  });
 });

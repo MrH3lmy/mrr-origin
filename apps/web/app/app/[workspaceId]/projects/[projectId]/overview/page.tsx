@@ -45,11 +45,25 @@ export default async function ProjectOverviewPage({
     throw error;
   }
 
-  const [overview, coverage, stripeHealth, diagnostics] = await Promise.all([
-    getRevenueOverview(client, workspaceId, projectId, from, to),
-    getAttributionCoverage(client, workspaceId, projectId),
-    getStripeHealth(client, workspaceId),
-    getDiagnostics(client, workspaceId, projectId),
+  // The revenue overview is this page's primary content -- if it fails to load, the page has
+  // nothing meaningful to show and lets the error boundary handle it, same as the rest of the app.
+  const overview = await getRevenueOverview(
+    client,
+    workspaceId,
+    projectId,
+    from,
+    to,
+  );
+
+  // Coverage, Stripe health, and tracking diagnostics are supporting data-health signals, not the
+  // primary content: a transient failure in any one of them must not take down the whole page (or
+  // hide revenue data that loaded fine) -- DESIGN_SYSTEM.md requires a real degraded/failure state
+  // here, not a blank error screen. Each is fetched independently and passed through as null on
+  // failure; DataHealthPanel renders an honest "couldn't load" row per signal instead of crashing.
+  const [coverage, stripeHealth, diagnostics] = await Promise.all([
+    getAttributionCoverage(client, workspaceId, projectId).catch(() => null),
+    getStripeHealth(client, workspaceId).catch(() => null),
+    getDiagnostics(client, workspaceId, projectId).catch(() => null),
   ]);
 
   return (

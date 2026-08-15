@@ -26,6 +26,8 @@ export function getRevenueOverview(
 export interface ListMovementsOptions {
   movementType?: MrrMovementType;
   source?: string;
+  /** Restricts to one currency -- required for a drill-down to reconcile with a currency-specific summary row. */
+  currency?: string;
   cursor?: string;
   limit?: number;
 }
@@ -41,6 +43,7 @@ export function listMrrMovements(
   const params = new URLSearchParams({ from, to });
   if (options.movementType) params.set("movementType", options.movementType);
   if (options.source) params.set("source", options.source);
+  if (options.currency) params.set("currency", options.currency);
   if (options.cursor) params.set("cursor", options.cursor);
   if (options.limit) params.set("limit", String(options.limit));
   return client.get<MrrMovementsPage>(

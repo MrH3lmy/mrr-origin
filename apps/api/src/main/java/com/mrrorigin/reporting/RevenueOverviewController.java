@@ -60,11 +60,12 @@ public class RevenueOverviewController {
             @RequestParam OffsetDateTime to,
             @RequestParam(required = false) String movementType,
             @RequestParam(required = false) String source,
+            @RequestParam(required = false) String currency,
             @RequestParam(required = false) String cursor,
             @RequestParam(required = false) @Min(1) @Max(RevenueMovementsService.MAX_LIMIT) Integer limit) {
         workspaceContext.requireMembership(workspaceId);
         return MovementsPageResponse.from(movementsService.list(
-                workspaceId, projectId, from, to, movementType, source, cursor, limit));
+                workspaceId, projectId, from, to, movementType, source, currency, cursor, limit));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

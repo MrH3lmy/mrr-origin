@@ -2,11 +2,13 @@ package com.mrrorigin.reporting;
 
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -25,6 +28,8 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import com.mrrorigin.attribution.AttributionApplicationService;
+
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * #22's founder-overview read models: period-scoped MRR movement totals, current MRR, source
@@ -132,24 +137,100 @@ class RevenueOverviewIntegrationTests {
         touchpoint("cus_attributed", "2026-03-15T00:00:00Z", "google");
         attribution.recalculate(workspace, project, "cus_attributed");
 
-        mockMvc.perform(movements(OWNER, FROM, TO, null, null))
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries.length()").value(1))
                 .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_attributed"))
                 .andExpect(jsonPath("$.entries[0].confidence").value("STRONG"))
                 .andExpect(jsonPath("$.entries[0].firstTouch.source").value("google"));
 
-        mockMvc.perform(movements(OWNER, FROM, TO, "CHURN", null))
+        mockMvc.perform(movements(OWNER, FROM, TO, "CHURN", null, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries.length()").value(0));
 
-        mockMvc.perform(movements(OWNER, FROM, TO, null, "google"))
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries.length()").value(1));
 
-        mockMvc.perform(movements(OWNER, FROM, TO, null, "UNATTRIBUTED"))
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "UNATTRIBUTED", null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries.length()").value(0));
+    }
+
+    @Test
+    void movementsDrillDownCanBeFilteredByCurrencySoAMultiCurrencyClickReconciles() throws Exception {
+        // Regression: clicking a currency-specific summary row (e.g. USD Churn) must not pull in
+        // matching movements from a different currency bucket -- the drill-down would then no longer
+        // reconcile to the summarized number the founder clicked.
+        movement("cus_usd", "USD", 1000, "2026-04-05T00:00:00Z");
+        link("cus_usd");
+        attribution.recalculate(workspace, project, "cus_usd");
+
+        movement("cus_eur", "EUR", 800, "2026-04-06T00:00:00Z");
+        link("cus_eur");
+        attribution.recalculate(workspace, project, "cus_eur");
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, "USD"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_usd"));
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, "EUR"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_eur"));
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(2));
+    }
+
+    @Test
+    void aCustomerRelinkedToADifferentProjectStopsCountingTowardTheFormerProjectsRevenue() throws Exception {
+        // Regression: AttributionApplicationService#recalculate re-stamps a customer's *entire*
+        // movement history under whichever project currently recalculates it. Without resolving a
+        // single "owning project" per customer, a customer who moves from project A to project B
+        // would double-count into both projects' overview once B recalculates -- exactly what
+        // project isolation is supposed to prevent.
+        UUID projectB = UUID.randomUUID();
+        db.sql("INSERT INTO projects (id, workspace_id, name, domain, public_key) VALUES (:p, :w, 'pB', 'b.example', :k)")
+                .param("p", projectB).param("w", workspace).param("k", "pk-" + projectB).update();
+
+        insertBillingCustomer("cus_mover");
+        insertBillingCustomer("cus_displacer");
+        insertIdentity("identity-a", project, "user_a");
+        insertIdentity("identity-b", projectB, "user_b");
+
+        // cus_mover starts out linked and recalculated in project A.
+        mockMvc.perform(repair(OWNER, project, "user_a", "cus_mover")).andExpect(status().isOk());
+        movement("cus_mover", "USD", 1000, "2026-04-02T00:00:00Z");
+        movement("cus_mover", "USD", 500, "2026-04-10T00:00:00Z", "EXPANSION");
+        attribution.recalculate(workspace, project, "cus_mover");
+
+        mockMvc.perform(overview(OWNER, FROM, TO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.movementTotals.length()").value(2));
+
+        // cus_mover is freed from project A (its identity is reassigned to a different customer)...
+        mockMvc.perform(repair(OWNER, project, "user_a", "cus_displacer")).andExpect(status().isOk());
+        // ...then relinked fresh under project B. CustomerLinkRepairService#repair recalculates the
+        // target customer as part of the repair, so this re-stamps cus_mover's full movement history
+        // (both movements above) under project B.
+        mockMvc.perform(repair(OWNER, projectB, "user_b", "cus_mover")).andExpect(status().isOk());
+
+        mockMvc.perform(overview(OWNER, FROM, TO))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.movementTotals.length()").value(0));
+
+        mockMvc.perform(get(
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/reporting/overview",
+                                workspace,
+                                projectB)
+                        .queryParam("from", FROM)
+                        .queryParam("to", TO)
+                        .with(token(OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.movementTotals.length()").value(2));
     }
 
     @Test
@@ -184,20 +265,7 @@ class RevenueOverviewIntegrationTests {
     }
 
     private void movement(String stripeCustomerId, String currency, long amountMinor, String effectiveAt) {
-        db.sql(
-                        """
-                        INSERT INTO customer_mrr_movements
-                            (id, workspace_id, stripe_customer_id, currency, amount_minor, movement_type,
-                             effective_at, calculation_version, source_billing_references)
-                        VALUES (:id, :w, :c, :cur, :amt, 'NEW', :at, 'mrr-v1', ARRAY['billing:test'])
-                        """)
-                .param("id", UUID.randomUUID())
-                .param("w", workspace)
-                .param("c", stripeCustomerId)
-                .param("cur", currency)
-                .param("amt", amountMinor)
-                .param("at", OffsetDateTime.parse(effectiveAt))
-                .update();
+        movement(stripeCustomerId, currency, amountMinor, effectiveAt, "NEW");
         db.sql(
                         """
                         INSERT INTO customer_mrr_snapshots
@@ -212,6 +280,52 @@ class RevenueOverviewIntegrationTests {
                 .param("amt", amountMinor)
                 .param("at", OffsetDateTime.parse(effectiveAt))
                 .update();
+    }
+
+    private void movement(String stripeCustomerId, String currency, long amountMinor, String effectiveAt, String movementType) {
+        db.sql(
+                        """
+                        INSERT INTO customer_mrr_movements
+                            (id, workspace_id, stripe_customer_id, currency, amount_minor, movement_type,
+                             effective_at, calculation_version, source_billing_references)
+                        VALUES (:id, :w, :c, :cur, :amt, :type, :at, 'mrr-v1', ARRAY['billing:test'])
+                        """)
+                .param("id", UUID.randomUUID())
+                .param("w", workspace)
+                .param("c", stripeCustomerId)
+                .param("cur", currency)
+                .param("amt", amountMinor)
+                .param("type", movementType)
+                .param("at", OffsetDateTime.parse(effectiveAt))
+                .update();
+    }
+
+    private void insertBillingCustomer(String stripeCustomerId) {
+        db.sql(
+                        """
+                        INSERT INTO billing_customers
+                            (id, workspace_id, stripe_customer_id, provider_created_at, source, source_version, source_sequence)
+                        VALUES (:id, :w, :c, now(), 'BACKFILL', 1, :c)
+                        """)
+                .param("id", UUID.randomUUID()).param("w", workspace).param("c", stripeCustomerId).update();
+    }
+
+    private void insertIdentity(String key, UUID projectId, String externalUserId) {
+        db.sql("INSERT INTO external_identities (id, workspace_id, project_id, external_user_id) VALUES (:i, :w, :p, :u)")
+                .param("i", UUID.nameUUIDFromBytes(key.getBytes()))
+                .param("w", workspace)
+                .param("p", projectId)
+                .param("u", externalUserId)
+                .update();
+    }
+
+    private MockHttpServletRequestBuilder repair(
+            String actor, UUID projectId, String externalUserId, String stripeCustomerId) throws Exception {
+        return post("/api/workspaces/{workspaceId}/projects/{projectId}/unattributed-revenue/repairs", workspace, projectId)
+                .with(token(actor))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(new ObjectMapper()
+                        .writeValueAsString(Map.of("externalUserId", externalUserId, "stripeCustomerId", stripeCustomerId)));
     }
 
     private void link(String stripeCustomerId) {
@@ -270,13 +384,14 @@ class RevenueOverviewIntegrationTests {
     }
 
     private MockHttpServletRequestBuilder movements(
-            String actor, String from, String to, String movementType, String source) {
+            String actor, String from, String to, String movementType, String source, String currency) {
         var request = get("/api/workspaces/{workspaceId}/projects/{projectId}/reporting/movements", workspace, project)
                 .queryParam("from", from)
                 .queryParam("to", to)
                 .with(token(actor));
         if (movementType != null) request = request.queryParam("movementType", movementType);
         if (source != null) request = request.queryParam("source", source);
+        if (currency != null) request = request.queryParam("currency", currency);
         return request;
     }
 

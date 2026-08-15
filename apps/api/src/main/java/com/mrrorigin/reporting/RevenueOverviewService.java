@@ -17,11 +17,18 @@ import com.mrrorigin.revenue.RevenueCalculationService;
  * and {@code customer_attribution_results} (attribution, {@value AttributionV1Engine#MODEL_VERSION})
  * -- this service introduces no new MRR or attribution calculation rules.
  *
- * <p>Project scope uses the same "currently linked to this project, or has attribution history in
- * this project" candidate set that {@link com.mrrorigin.attribution.AttributionApplicationService#coverage}
- * and {@link UnattributedRevenueInboxService} already use, since {@code customer_mrr_movements} and
- * {@code billing_customers} carry no {@code project_id} of their own -- a Stripe customer's project
- * is only knowable once something links it.
+ * <p>Project scope resolves one "owning project" per Stripe customer via {@link #OWNER_CTE}: the
+ * customer's currently active {@code stripe_customer_links} project when one exists, otherwise the
+ * project of that customer's most recently calculated {@code customer_attribution_results} row.
+ * {@code customer_mrr_movements}/{@code customer_mrr_snapshots}/{@code billing_customers} carry no
+ * {@code project_id} of their own -- a Stripe customer's project is only knowable once something
+ * links it -- and {@link com.mrrorigin.attribution.AttributionApplicationService#recalculate}
+ * re-stamps a customer's <em>entire</em> movement history under whichever project last recalculated
+ * it, so a customer who moves from project A to project B can end up with {@code
+ * customer_attribution_results} rows for the same movement under both projects. Resolving a single
+ * owner per customer (most-recent {@code calculated_at} wins, active link wins over any calculated
+ * row) keeps a movement from counting toward two projects' revenue at once. See {@link
+ * RevenueMovementsService} for the identical resolution used by the drill-down.
  *
  * <p>Amounts are grouped by currency and never summed across currencies: reporting-currency
  * conversion is an explicitly deferred architecture decision (see ARCHITECTURE.md).
@@ -33,19 +40,8 @@ import com.mrrorigin.revenue.RevenueCalculationService;
 @Service
 public class RevenueOverviewService {
 
-    private static final String CANDIDATES_CTE =
-            """
-            candidates AS (
-              SELECT stripe_customer_id AS customer_id
-              FROM stripe_customer_links
-              WHERE workspace_id = :w AND project_id = :p AND superseded_at IS NULL
-              UNION
-              SELECT m.stripe_customer_id AS customer_id
-              FROM customer_attribution_results r
-              JOIN customer_mrr_movements m ON m.workspace_id = r.workspace_id AND m.id = r.movement_id
-              WHERE r.workspace_id = :w AND r.project_id = :p
-            )
-            """;
+    /** See {@link RevenueMovementsService#OWNER_CTE} for the identical fragment and its rationale. */
+    static final String OWNER_CTE = RevenueMovementsService.OWNER_CTE;
 
     private final JdbcClient db;
 
@@ -69,11 +65,11 @@ public class RevenueOverviewService {
 
     private List<MovementTotal> movementTotals(UUID w, UUID p, OffsetDateTime from, OffsetDateTime to) {
         return db.sql(
-                        "WITH " + CANDIDATES_CTE
+                        "WITH " + OWNER_CTE
                                 + """
                         SELECT m.currency, m.movement_type, SUM(m.amount_minor) AS total_minor, COUNT(*) AS movement_count
                         FROM customer_mrr_movements m
-                        JOIN candidates c ON c.customer_id = m.stripe_customer_id
+                        JOIN owner o ON o.customer_id = m.stripe_customer_id AND o.owning_project_id = :p
                         WHERE m.workspace_id = :w AND m.calculation_version = :cv
                           AND m.effective_at >= :from AND m.effective_at < :to
                         GROUP BY m.currency, m.movement_type
@@ -92,13 +88,13 @@ public class RevenueOverviewService {
 
     private List<CurrentMrr> currentMrr(UUID w, UUID p, OffsetDateTime asOf) {
         return db.sql(
-                        "WITH " + CANDIDATES_CTE
+                        "WITH " + OWNER_CTE
                                 + """
                         , latest AS (
                           SELECT DISTINCT ON (s.stripe_customer_id, s.currency)
                                  s.stripe_customer_id, s.currency, s.amount_minor
                           FROM customer_mrr_snapshots s
-                          JOIN candidates c ON c.customer_id = s.stripe_customer_id
+                          JOIN owner o ON o.customer_id = s.stripe_customer_id AND o.owning_project_id = :p
                           WHERE s.workspace_id = :w AND s.calculation_version = :cv
                             AND s.supported = TRUE AND s.effective_at <= :asOf
                           ORDER BY s.stripe_customer_id, s.currency, s.effective_at DESC
@@ -120,13 +116,13 @@ public class RevenueOverviewService {
 
     private List<SourceHighlight> sourceHighlights(UUID w, UUID p, OffsetDateTime from, OffsetDateTime to) {
         return db.sql(
-                        "WITH " + CANDIDATES_CTE
+                        "WITH " + OWNER_CTE
                                 + """
                         SELECT
                           CASE WHEN r.confidence = 'STRONG' THEN r.first_source ELSE NULL END AS source,
                           m.currency, SUM(m.amount_minor) AS total_minor, COUNT(*) AS customer_count
                         FROM customer_mrr_movements m
-                        JOIN candidates c ON c.customer_id = m.stripe_customer_id
+                        JOIN owner o ON o.customer_id = m.stripe_customer_id AND o.owning_project_id = :p
                         LEFT JOIN customer_attribution_results r
                           ON r.workspace_id = m.workspace_id AND r.project_id = :p AND r.movement_id = m.id
                              AND r.model_version = :mv

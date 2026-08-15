@@ -60,14 +60,16 @@ interface RevenueSummaryProps {
   overview: RevenueOverview;
   selectedMovementType: MrrMovementType | null;
   selectedSource: string | null | undefined;
-  onSelectMovementType: (type: MrrMovementType) => void;
-  onSelectSource: (source: string | null) => void;
+  selectedCurrency: string | null;
+  onSelectMovementType: (type: MrrMovementType, currency: string) => void;
+  onSelectSource: (source: string | null, currency: string) => void;
 }
 
 export function RevenueSummary({
   overview,
   selectedMovementType,
   selectedSource,
+  selectedCurrency,
   onSelectMovementType,
   onSelectSource,
 }: RevenueSummaryProps) {
@@ -151,7 +153,9 @@ export function RevenueSummary({
                 const amount = total?.totalMinor ?? 0;
                 const widthPercent =
                   maxAbs === 0 ? 0 : Math.round((amount / maxAbs) * 100);
-                const isSelected = selectedMovementType === type;
+                const isSelected =
+                  selectedMovementType === type &&
+                  selectedCurrency === bucket.currency;
                 return (
                   <li key={type}>
                     <button
@@ -159,7 +163,9 @@ export function RevenueSummary({
                       className={`${styles.meterRow} ${amount === 0 ? styles.meterRowDisabled : ""}`}
                       aria-pressed={isSelected}
                       disabled={amount === 0}
-                      onClick={() => onSelectMovementType(type)}
+                      onClick={() =>
+                        onSelectMovementType(type, bucket.currency)
+                      }
                     >
                       <span className={styles.meterLabel}>
                         {MOVEMENT_TYPE_LABEL[type]}
@@ -203,7 +209,8 @@ export function RevenueSummary({
                 <ul className={styles.meterList}>
                   {bucket.sourceHighlights.map((highlight) => {
                     const isSelected =
-                      selectedSource === (highlight.source ?? "UNATTRIBUTED");
+                      selectedSource === (highlight.source ?? "UNATTRIBUTED") &&
+                      selectedCurrency === bucket.currency;
                     const maxSource = Math.max(
                       1,
                       ...bucket.sourceHighlights.map((h) => h.totalMinor),
@@ -218,7 +225,10 @@ export function RevenueSummary({
                           className={styles.meterRow}
                           aria-pressed={isSelected}
                           onClick={() =>
-                            onSelectSource(highlight.source ?? "UNATTRIBUTED")
+                            onSelectSource(
+                              highlight.source ?? "UNATTRIBUTED",
+                              bucket.currency,
+                            )
                           }
                         >
                           <span className={styles.meterLabel}>
