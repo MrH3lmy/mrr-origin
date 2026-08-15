@@ -139,6 +139,83 @@ export interface ReconciliationMismatch {
   sampleStripeIds: string[];
 }
 
+// -- Attribution coverage (#22, backed by #19's coverage read model) --
+
+export interface AttributionCoverage {
+  modelVersion: string;
+  eligibleNewCustomers: number;
+  attributedNewCustomers: number;
+  coverageRatio: number;
+  exclusionReasonCounts: Record<string, number>;
+}
+
+// -- Revenue overview + movement drill-down (#22) --
+
+export type MrrMovementType =
+  | "NEW"
+  | "EXPANSION"
+  | "CONTRACTION"
+  | "CHURN"
+  | "REACTIVATION";
+
+export interface MrrMovementTotal {
+  currency: string;
+  movementType: MrrMovementType;
+  totalMinor: number;
+  movementCount: number;
+}
+
+export interface CurrentMrrTotal {
+  currency: string;
+  totalMinor: number;
+  customerCount: number;
+}
+
+export interface SourceHighlight {
+  /** Null when the New MRR in this bucket is not strongly attributed. */
+  source: string | null;
+  currency: string;
+  totalMinor: number;
+  customerCount: number;
+}
+
+export interface RevenueOverview {
+  workspaceId: string;
+  projectId: string;
+  from: string;
+  to: string;
+  calculationVersion: string;
+  modelVersion: string;
+  movementTotals: MrrMovementTotal[];
+  currentMrr: CurrentMrrTotal[];
+  sourceHighlights: SourceHighlight[];
+}
+
+export interface MovementTouch {
+  source: string | null;
+  campaign: string | null;
+  landingPage: string | null;
+}
+
+export interface MrrMovementEntry {
+  movementId: string;
+  stripeCustomerId: string;
+  currency: string;
+  amountMinor: number;
+  movementType: MrrMovementType;
+  effectiveAt: string;
+  /** Null when attribution has not been recalculated for this movement yet. */
+  confidence: "STRONG" | "UNATTRIBUTED" | null;
+  unattributedReason: string | null;
+  firstTouch: MovementTouch | null;
+  lastTouch: MovementTouch | null;
+}
+
+export interface MrrMovementsPage {
+  entries: MrrMovementEntry[];
+  nextCursor: string | null;
+}
+
 export interface StripeBillingHealthReport {
   workspaceId: string;
   status: StripeBillingHealthStatus;

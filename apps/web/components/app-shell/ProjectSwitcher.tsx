@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 import type { Project } from "@/lib/api/types";
 
@@ -12,12 +12,28 @@ interface ProjectSwitcherProps {
   currentProjectId?: string;
 }
 
+/**
+ * The trailing path after `/projects/{id}` (e.g. `/overview`), so switching projects from a
+ * sub-page (like Overview) lands on the same sub-page for the newly selected project instead of
+ * always resetting to the Data health root.
+ */
+export function currentSubPath(
+  pathname: string,
+  workspaceId: string,
+  projectId?: string,
+): string {
+  if (!projectId) return "";
+  const prefix = `/app/${workspaceId}/projects/${projectId}`;
+  return pathname.startsWith(prefix) ? pathname.slice(prefix.length) : "";
+}
+
 export function ProjectSwitcher({
   workspaceId,
   projects,
   currentProjectId,
 }: ProjectSwitcherProps) {
   const router = useRouter();
+  const pathname = usePathname();
 
   return (
     <div>
@@ -34,7 +50,14 @@ export function ProjectSwitcher({
             router.push(`/app/${workspaceId}/projects/new`);
             return;
           }
-          router.push(`/app/${workspaceId}/projects/${event.target.value}`);
+          const subPath = currentSubPath(
+            pathname,
+            workspaceId,
+            currentProjectId,
+          );
+          router.push(
+            `/app/${workspaceId}/projects/${event.target.value}${subPath}`,
+          );
         }}
       >
         {projects.length === 0 ? (

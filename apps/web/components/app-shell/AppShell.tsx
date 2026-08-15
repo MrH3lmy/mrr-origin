@@ -17,13 +17,7 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-const COMING_SOON_ITEMS = [
-  "Overview",
-  "Sources",
-  "Retention",
-  "Customers",
-  "Settings",
-];
+const COMING_SOON_ITEMS = ["Sources", "Retention", "Customers", "Settings"];
 
 // "workspaces" and "new" are excluded from their capture groups: /app/workspaces/new and
 // /app/{workspaceId}/projects/new are reserved creation routes, not scoped to a real workspace or
@@ -113,6 +107,12 @@ export function AppShell({ initialWorkspaces, children }: AppShellProps) {
   const isDataHealthActive =
     Boolean(dataHealthHref) && pathname === dataHealthHref;
 
+  const overviewHref =
+    currentWorkspaceId && currentProjectId
+      ? `/app/${currentWorkspaceId}/projects/${currentProjectId}/overview`
+      : undefined;
+  const isOverviewActive = Boolean(overviewHref) && pathname === overviewHref;
+
   const sidebar = (
     <nav
       id="primary-navigation"
@@ -162,6 +162,19 @@ export function AppShell({ initialWorkspaces, children }: AppShellProps) {
       <div>
         <p className={styles.navGroupLabel}>MRROrigin</p>
         <ul className={styles.navGroup}>
+          <li>
+            {overviewHref ? (
+              <Link
+                href={overviewHref}
+                className={`${styles.navLink} ${isOverviewActive ? styles.navLinkActive : ""}`}
+                aria-current={isOverviewActive ? "page" : undefined}
+              >
+                Overview
+              </Link>
+            ) : (
+              <span className={styles.navLinkDisabled}>Overview</span>
+            )}
+          </li>
           <li>
             {dataHealthHref ? (
               <Link

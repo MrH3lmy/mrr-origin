@@ -1,6 +1,7 @@
 import type { StatusTone } from "@/components/ui/StatusBadge";
 import type {
   DiagnosticState,
+  MrrMovementType,
   StripeBillingHealthReason,
   StripeBillingHealthStatus,
 } from "@/lib/api/types";
@@ -98,4 +99,21 @@ export const STRIPE_HEALTH_REASON_COPY: Record<
     "At least one webhook event couldn't be matched to a connection.",
   PROVIDER_CHECK_UNAVAILABLE:
     "The live comparison against Stripe couldn't run this time.",
+};
+
+/** Verbatim humanized reason copy from DESIGN_SYSTEM.md's "Data health and unattributed repair". */
+export const ATTRIBUTION_EXCLUSION_REASON_COPY: Record<string, string> = {
+  NO_ACTIVE_LINK: "No application user is linked to this Stripe customer.",
+  NO_ELIGIBLE_TOUCHPOINT:
+    "The user is linked, but no eligible acquisition touchpoint exists in the attribution window.",
+  NOT_RECALCULATED:
+    "Attribution has not been recalculated for the current model yet.",
+};
+
+export const MOVEMENT_TYPE_LABEL: Record<MrrMovementType, string> = {
+  NEW: "New MRR",
+  EXPANSION: "Expansion MRR",
+  CONTRACTION: "Contraction MRR",
+  CHURN: "Churned MRR",
+  REACTIVATION: "Reactivation MRR",
 };
