@@ -77,6 +77,8 @@ public class RevenueMovementsService {
             OffsetDateTime to,
             String movementType,
             String source,
+            String campaign,
+            String landingPage,
             String currency,
             String cursor,
             Integer limit) {
@@ -88,6 +90,12 @@ public class RevenueMovementsService {
         }
         if (movementType != null && !MOVEMENT_TYPES.contains(movementType)) {
             throw new IllegalArgumentException("movementType must be one of " + MOVEMENT_TYPES);
+        }
+        if ((campaign != null || landingPage != null) && source == null) {
+            throw new IllegalArgumentException("source is required when filtering by campaign or landingPage");
+        }
+        if (landingPage != null && campaign == null) {
+            throw new IllegalArgumentException("campaign is required when filtering by landingPage");
         }
         int pageSize = normalizeLimit(limit);
         Optional<Cursor> decoded = Cursor.decode(cursor);
@@ -111,6 +119,12 @@ public class RevenueMovementsService {
                           AND (:hasSource = FALSE
                                OR (:source = 'UNATTRIBUTED' AND (r.confidence IS DISTINCT FROM 'STRONG'))
                                OR (r.confidence = 'STRONG' AND r.first_source = :source))
+                          AND (:hasCampaign = FALSE
+                               OR (:campaign = 'NONE' AND r.confidence = 'STRONG' AND r.first_campaign IS NULL)
+                               OR (r.confidence = 'STRONG' AND r.first_campaign = :campaign))
+                          AND (:hasLandingPage = FALSE
+                               OR (:landingPage = 'NONE' AND r.confidence = 'STRONG' AND r.first_landing_page IS NULL)
+                               OR (r.confidence = 'STRONG' AND r.first_landing_page = :landingPage))
                           AND (:hasCursor = FALSE OR (m.effective_at, m.id) > (:cursorAt, :cursorId))
                         ORDER BY m.effective_at, m.id
                         LIMIT :fetchLimit
@@ -127,6 +141,10 @@ public class RevenueMovementsService {
                 .param("currency", currency == null ? "" : currency)
                 .param("hasSource", source != null)
                 .param("source", source == null ? "" : source)
+                .param("hasCampaign", campaign != null)
+                .param("campaign", campaign == null ? "" : campaign)
+                .param("hasLandingPage", landingPage != null)
+                .param("landingPage", landingPage == null ? "" : landingPage)
                 .param("hasCursor", decoded.isPresent())
                 .param("cursorAt", decoded.map(Cursor::effectiveAt).orElse(OffsetDateTime.now()))
                 .param("cursorId", decoded.map(Cursor::movementId).orElse(new UUID(0, 0)))

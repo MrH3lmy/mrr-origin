@@ -158,6 +158,43 @@ class RevenueOverviewIntegrationTests {
     }
 
     @Test
+    void movementsDrillDownCanBeFilteredByCampaignAndLandingPageForTheSourcesComparisonDrilldown() throws Exception {
+        // #23: Source -> campaign -> landing page -> customers. A founder drilling from a comparison
+        // row must land on exactly the movements that produced it, so campaign/landingPage narrow the
+        // same evidence columns the comparison table itself groups by -- no separate calculation.
+        movement("cus_full_evidence", "USD", 1000, "2026-04-05T00:00:00Z");
+        link("cus_full_evidence");
+        touchpoint("cus_full_evidence", "2026-03-15T00:00:00Z", "google", "spring_sale", "https://example.test/landing-a");
+        attribution.recalculate(workspace, project, "cus_full_evidence");
+
+        movement("cus_no_campaign", "USD", 400, "2026-04-06T00:00:00Z");
+        link("cus_no_campaign");
+        touchpoint("cus_no_campaign", "2026-03-16T00:00:00Z", "google", null, "https://example.test/landing-b");
+        attribution.recalculate(workspace, project, "cus_no_campaign");
+
+        // Matches source + campaign + landing page exactly.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", "spring_sale", "https://example.test/landing-a", null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_full_evidence"));
+
+        // The "NONE" sentinel selects the "no campaign captured" bucket, mirroring the UNATTRIBUTED
+        // sentinel already used for source.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", "NONE", null, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_no_campaign"));
+
+        // campaign without source, or landingPage without campaign, are rejected rather than silently
+        // ignored -- an incomplete drill-down filter must never widen to more rows than the founder
+        // clicked into.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, "spring_sale", null, null))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", null, "https://example.test/landing-a", null))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
     void movementsDrillDownCanBeFilteredByCurrencySoAMultiCurrencyClickReconciles() throws Exception {
         // Regression: clicking a currency-specific summary row (e.g. USD Churn) must not pull in
         // matching movements from a different currency bucket -- the drill-down would then no longer
@@ -353,6 +390,10 @@ class RevenueOverviewIntegrationTests {
     }
 
     private void touchpoint(String stripeCustomerId, String at, String utmSource) {
+        touchpoint(stripeCustomerId, at, utmSource, null, "https://example.test/");
+    }
+
+    private void touchpoint(String stripeCustomerId, String at, String utmSource, String utmCampaign, String landingUrl) {
         UUID identity = db.sql(
                         "SELECT external_identity_id FROM stripe_customer_links WHERE workspace_id = :w AND stripe_customer_id = :c")
                 .param("w", workspace).param("c", stripeCustomerId).query(UUID.class).single();
@@ -369,10 +410,11 @@ class RevenueOverviewIntegrationTests {
                 .param("s", session).param("w", workspace).param("p", project).param("v", visitor).param("e", session.toString()).param("at", time)
                 .update();
         db.sql(
-                        "INSERT INTO touchpoints (id, workspace_id, project_id, visitor_id, session_id, occurred_at, landing_url, utm_source, created_at) "
-                                + "VALUES (:id, :w, :p, :v, :s, :at, 'https://example.test/', :src, :created)")
+                        "INSERT INTO touchpoints (id, workspace_id, project_id, visitor_id, session_id, occurred_at, landing_url, utm_source, utm_campaign, created_at) "
+                                + "VALUES (:id, :w, :p, :v, :s, :at, :landing, :src, :campaign, :created)")
                 .param("id", UUID.randomUUID()).param("w", workspace).param("p", project).param("v", visitor).param("s", session)
-                .param("at", time).param("src", utmSource).param("created", time.plusSeconds(1))
+                .param("at", time).param("landing", landingUrl).param("src", utmSource).param("campaign", utmCampaign)
+                .param("created", time.plusSeconds(1))
                 .update();
     }
 
@@ -385,12 +427,26 @@ class RevenueOverviewIntegrationTests {
 
     private MockHttpServletRequestBuilder movements(
             String actor, String from, String to, String movementType, String source, String currency) {
+        return movements(actor, from, to, movementType, source, null, null, currency);
+    }
+
+    private MockHttpServletRequestBuilder movements(
+            String actor,
+            String from,
+            String to,
+            String movementType,
+            String source,
+            String campaign,
+            String landingPage,
+            String currency) {
         var request = get("/api/workspaces/{workspaceId}/projects/{projectId}/reporting/movements", workspace, project)
                 .queryParam("from", from)
                 .queryParam("to", to)
                 .with(token(actor));
         if (movementType != null) request = request.queryParam("movementType", movementType);
         if (source != null) request = request.queryParam("source", source);
+        if (campaign != null) request = request.queryParam("campaign", campaign);
+        if (landingPage != null) request = request.queryParam("landingPage", landingPage);
         if (currency != null) request = request.queryParam("currency", currency);
         return request;
     }
