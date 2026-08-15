@@ -216,6 +216,43 @@ export interface MrrMovementsPage {
   nextCursor: string | null;
 }
 
+// -- Source/campaign/landing-page comparison (#23) --
+
+export type ComparisonDimension = "SOURCE" | "CAMPAIGN" | "LANDING_PAGE";
+
+/**
+ * One aggregated cell of the comparison table. `dimensionValue` is null when the row is the "no
+ * evidence at this level" bucket: at SOURCE that means Unattributed; at CAMPAIGN/LANDING_PAGE it
+ * means the parent touch was strongly attributed but this specific UTM field was not captured.
+ * `movementType` is "NEW" or "CHURN" -- #23 does not report expansion/contraction/reactivation.
+ */
+export interface ComparisonRow {
+  dimensionValue: string | null;
+  currency: string;
+  movementType: "NEW" | "CHURN";
+  totalMinor: number;
+  customerCount: number;
+}
+
+/** Names a product metric this comparison does not compute yet, and why -- never a measured zero. */
+export interface UnavailableMetric {
+  metric: string;
+  reason: string;
+}
+
+export interface SourceComparison {
+  workspaceId: string;
+  projectId: string;
+  from: string;
+  to: string;
+  dimension: ComparisonDimension;
+  /** Echoes the parent drill-down filter that was applied, if any. */
+  source: string | null;
+  campaign: string | null;
+  rows: ComparisonRow[];
+  unavailableMetrics: UnavailableMetric[];
+}
+
 export interface StripeBillingHealthReport {
   workspaceId: string;
   status: StripeBillingHealthStatus;

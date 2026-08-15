@@ -27,6 +27,10 @@ interface MovementsDrilldownProps {
   to: string;
   movementType: MrrMovementType | null;
   source: string | null;
+  /** Requires `source`. #23's source -> campaign -> landing page drill-down. */
+  campaign?: string | null;
+  /** Requires `campaign`. */
+  landingPage?: string | null;
   currency: string | null;
   onClearFilters: () => void;
 }
@@ -38,6 +42,8 @@ export function MovementsDrilldown({
   to,
   movementType,
   source,
+  campaign = null,
+  landingPage = null,
   currency,
   onClearFilters,
 }: MovementsDrilldownProps) {
@@ -50,7 +56,7 @@ export function MovementsDrilldown({
   // Render-phase reset when the filter/period params change -- React's recommended alternative to
   // an effect that only mirrors props (same pattern AppShell uses for its pathname-keyed drawer
   // reset), so the pending fetch below only ever calls setState from its async continuation.
-  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${movementType ?? ""}|${source ?? ""}|${currency ?? ""}`;
+  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${movementType ?? ""}|${source ?? ""}|${campaign ?? ""}|${landingPage ?? ""}|${currency ?? ""}`;
   const [loadedKey, setLoadedKey] = useState(filterKey);
   if (filterKey !== loadedKey) {
     setLoadedKey(filterKey);
@@ -64,6 +70,8 @@ export function MovementsDrilldown({
     listMrrMovements(client, workspaceId, projectId, from, to, {
       movementType: movementType ?? undefined,
       source: source ?? undefined,
+      campaign: campaign ?? undefined,
+      landingPage: landingPage ?? undefined,
       currency: currency ?? undefined,
     })
       .then((page) => {
@@ -85,7 +93,17 @@ export function MovementsDrilldown({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, projectId, from, to, movementType, source, currency]);
+  }, [
+    workspaceId,
+    projectId,
+    from,
+    to,
+    movementType,
+    source,
+    campaign,
+    landingPage,
+    currency,
+  ]);
 
   async function loadMore() {
     if (!nextCursor) return;
@@ -101,6 +119,8 @@ export function MovementsDrilldown({
         {
           movementType: movementType ?? undefined,
           source: source ?? undefined,
+          campaign: campaign ?? undefined,
+          landingPage: landingPage ?? undefined,
           currency: currency ?? undefined,
           cursor: nextCursor,
         },
@@ -118,7 +138,9 @@ export function MovementsDrilldown({
     }
   }
 
-  const hasFilters = Boolean(movementType || source || currency);
+  const hasFilters = Boolean(
+    movementType || source || campaign || landingPage || currency,
+  );
 
   return (
     <Panel
@@ -135,6 +157,16 @@ export function MovementsDrilldown({
           {source ? (
             <span className={styles.filterChip}>
               {source === "UNATTRIBUTED" ? "Unattributed" : source}
+            </span>
+          ) : null}
+          {campaign ? (
+            <span className={styles.filterChip}>
+              {campaign === "NONE" ? "No campaign" : campaign}
+            </span>
+          ) : null}
+          {landingPage ? (
+            <span className={styles.filterChip}>
+              {landingPage === "NONE" ? "No landing page" : landingPage}
             </span>
           ) : null}
           {currency ? (

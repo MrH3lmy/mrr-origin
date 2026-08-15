@@ -167,4 +167,34 @@ describe("MovementsDrilldown", () => {
     );
     expect(screen.getByText("USD")).toBeInTheDocument();
   });
+
+  it("passes campaign and landingPage filters through to the API and shows them as chips", async () => {
+    listMrrMovements.mockResolvedValue({ entries: [entry], nextCursor: null });
+
+    render(
+      <MovementsDrilldown
+        {...baseProps}
+        source="google"
+        campaign="NONE"
+        landingPage="https://example.test/a"
+      />,
+    );
+
+    await screen.findByText("cus_1");
+
+    expect(listMrrMovements).toHaveBeenCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      expect.objectContaining({
+        source: "google",
+        campaign: "NONE",
+        landingPage: "https://example.test/a",
+      }),
+    );
+    expect(screen.getByText("No campaign")).toBeInTheDocument();
+    expect(screen.getByText("https://example.test/a")).toBeInTheDocument();
+  });
 });

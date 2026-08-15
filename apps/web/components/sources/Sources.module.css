@@ -1,0 +1,109 @@
+.breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 16px;
+  font-size: 0.8125rem;
+}
+
+.breadcrumbLink {
+  padding: 2px 4px;
+  color: var(--ds-brand);
+  background: none;
+  border: 0;
+  border-radius: var(--ds-radius-control);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+
+.breadcrumbLink:hover,
+.breadcrumbLink:focus-visible {
+  text-decoration: underline;
+}
+
+.breadcrumbCurrent {
+  padding: 2px 4px;
+  color: var(--ds-text-muted);
+  font-weight: 600;
+}
+
+.breadcrumbSeparator {
+  color: var(--ds-text-muted);
+}
+
+.sortButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.sortButton:hover,
+.sortButton:focus-visible {
+  color: var(--ds-text);
+}
+
+.sortIndicator {
+  font-size: 0.625rem;
+}
+
+.dimensionButton {
+  padding: 2px 4px;
+  color: var(--ds-brand);
+  background: none;
+  border: 0;
+  border-radius: var(--ds-radius-control);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+
+.dimensionButton:hover,
+.dimensionButton:focus-visible {
+  text-decoration: underline;
+}
+
+.metricButton {
+  padding: 2px 4px;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: var(--ds-radius-control);
+  cursor: pointer;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.metricButton:hover,
+.metricButton:focus-visible {
+  background: var(--ds-surface-subtle);
+}
+
+.metricButton[aria-pressed="true"] {
+  box-shadow: inset 0 0 0 1px var(--ds-brand);
+}
+
+.unavailableCell {
+  color: var(--ds-text-muted);
+  font-size: 0.75rem;
+  white-space: normal;
+}
+
+.unavailableNote {
+  margin: 12px 0 0;
+  color: var(--ds-text-muted);
+  font-size: 0.75rem;
+}
