@@ -118,7 +118,39 @@ public class RevenueOverviewController {
                 campaignMissing,
                 rows,
                 retentionAgeDays,
-                retention);
+                retention,
+                unavailableMetrics(rows, retention));
+    }
+
+    private static List<UnavailableMetric> unavailableMetrics(
+            List<SourceComparisonService.ComparisonRow> rows,
+            List<RetentionCohortService.SummaryRow> retention) {
+        boolean noAcquisitionCohort = rows.stream().anyMatch(row -> retention.stream()
+                .noneMatch(summary -> sameRetentionKey(row, summary)));
+        boolean maturityPending = retention.stream().anyMatch(summary -> !summary.cell().available());
+        if (!noAcquisitionCohort && !maturityPending) {
+            return List.of();
+        }
+
+        List<String> reasons = new java.util.ArrayList<>();
+        if (maturityPending) {
+            reasons.add(RetentionCohortService.REASON_MATURITY_PENDING);
+        }
+        if (noAcquisitionCohort) {
+            reasons.add("NO_ACQUISITION_COHORT");
+        }
+        String reason = "Unavailable for one or more comparison rows: " + String.join(", ", reasons) + ".";
+        return List.of(
+                new UnavailableMetric("RETAINED_MRR", reason),
+                new UnavailableMetric("NRR", reason));
+    }
+
+    private static boolean sameRetentionKey(
+            SourceComparisonService.ComparisonRow row,
+            RetentionCohortService.SummaryRow summary) {
+        return java.util.Objects.equals(row.dimensionValue(), summary.dimensionValue())
+                && row.attributed() == summary.attributed()
+                && row.currency().equals(summary.currency());
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
@@ -168,7 +200,9 @@ public class RevenueOverviewController {
      * SourceComparisonService.ComparisonRow} uses, so a client joins the two lists by that tuple. A
      * dimension value with no corresponding {@code retention} row, or whose {@link
      * RetentionCohortService.AgeCell#available()} is false, has no authoritative Retained MRR/NRR yet
-     * and must render "Unavailable" -- never a fabricated zero.
+     * and must render "Unavailable" -- never a fabricated zero. {@code unavailableMetrics} preserves
+     * #23's response contract: it is empty when every comparison row has authoritative values and
+     * otherwise names Retained MRR and NRR with the applicable stable reason codes.
      */
     public record ComparisonResponse(
             UUID workspaceId,
@@ -181,5 +215,9 @@ public class RevenueOverviewController {
             boolean campaignMissing,
             List<SourceComparisonService.ComparisonRow> rows,
             int retentionAgeDays,
-            List<RetentionCohortService.SummaryRow> retention) {}
+            List<RetentionCohortService.SummaryRow> retention,
+            List<UnavailableMetric> unavailableMetrics) {}
+
+    /** Preserves #23's explicit unavailable-metric contract while #25 supplies row-level outcomes. */
+    public record UnavailableMetric(String metric, String reason) {}
 }
