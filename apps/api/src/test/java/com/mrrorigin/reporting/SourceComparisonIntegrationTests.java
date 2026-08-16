@@ -107,7 +107,32 @@ class SourceComparisonIntegrationTests {
                 .andExpect(jsonPath("$.retention[?(@.dimensionValue=='bing')].cell.retainedMrrMinor").value(500))
                 .andExpect(jsonPath("$.retention[?(@.dimensionValue=='bing')].cell.retentionPercentage").value(1.0))
                 .andExpect(jsonPath("$.retention[?(@.dimensionValue==null && @.attributed==false)].cell.retainedMrrMinor").value(300))
-                .andExpect(jsonPath("$.retention[?(@.dimensionValue==null && @.attributed==false)].cell.retentionPercentage").value(1.0));
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue==null && @.attributed==false)].cell.retentionPercentage").value(1.0))
+                .andExpect(jsonPath("$.unavailableMetrics.length()").value(0));
+    }
+
+    @Test
+    void preservesUnavailableMetricContractForImmatureComparisonRows() throws Exception {
+        acquireAndAttribute(
+                "cus_future", "USD", 1000, "2099-04-05T00:00:00Z", "google", "future_campaign", "/future");
+
+        mockMvc.perform(get(
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/reporting/comparison",
+                                workspace,
+                                project)
+                        .queryParam("from", "2099-04-01T00:00:00Z")
+                        .queryParam("to", "2099-05-01T00:00:00Z")
+                        .queryParam("dimension", "SOURCE")
+                        .queryParam("retentionAgeDays", "30")
+                        .with(token(OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.retention[0].cell.available").value(false))
+                .andExpect(jsonPath("$.retention[0].cell.unavailableReason").value("MATURITY_PENDING"))
+                .andExpect(jsonPath("$.unavailableMetrics.length()").value(2))
+                .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='RETAINED_MRR')].reason")
+                        .value("Unavailable for one or more comparison rows: MATURITY_PENDING."))
+                .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='NRR')].reason")
+                        .value("Unavailable for one or more comparison rows: MATURITY_PENDING."));
     }
 
     @Test
