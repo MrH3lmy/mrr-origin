@@ -342,6 +342,190 @@ export interface RetentionSummary {
   rows: RetentionSummaryRow[];
 }
 
+// -- Customer directory + evidence timeline (#24) --
+
+export interface CustomerCurrentMrr {
+  currency: string;
+  amountMinor: number;
+}
+
+/**
+ * `confidence`/`unattributedReason`/`firstSource` are null when the customer has no `NEW` movement
+ * yet, or attribution has not been (re)calculated for it under the current model version -- an
+ * operational gap, never a fabricated negative result.
+ */
+export interface CustomerDirectoryEntry {
+  stripeCustomerId: string;
+  deleted: boolean;
+  providerCreatedAt: string;
+  acquisitionEffectiveAt: string | null;
+  confidence: "STRONG" | "UNATTRIBUTED" | null;
+  unattributedReason: string | null;
+  firstSource: string | null;
+  currentMrr: CustomerCurrentMrr[];
+  subscriptionStatuses: string[];
+}
+
+export interface CustomerDirectoryPage {
+  entries: CustomerDirectoryEntry[];
+  nextCursor: string | null;
+}
+
+export type BillingSubscriptionStatus =
+  | "incomplete"
+  | "incomplete_expired"
+  | "trialing"
+  | "active"
+  | "past_due"
+  | "canceled"
+  | "unpaid"
+  | "paused";
+
+export interface CustomerSubscriptionSummary {
+  stripeSubscriptionId: string;
+  status: BillingSubscriptionStatus;
+  currency: string;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  cancelAt: string | null;
+  canceledAt: string | null;
+  trialStart: string | null;
+  trialEnd: string | null;
+}
+
+export interface CustomerTouchSummary {
+  touchpointId: string;
+  occurredAt: string | null;
+  source: string | null;
+  campaign: string | null;
+  landingPage: string | null;
+}
+
+export type CustomerAcquisitionStatus =
+  | "STRONG"
+  | "UNATTRIBUTED"
+  | "NOT_RECALCULATED"
+  | "NO_ACQUISITION_MOVEMENT";
+
+/**
+ * `movementId`/`effectiveAt` are null only for `NO_ACQUISITION_MOVEMENT` (the customer has never had
+ * a `NEW` movement). `firstTouch`/`lastTouch`/`customerLinkEvidenceId`/`calculatedAt` are null unless
+ * `status` is `STRONG` or `UNATTRIBUTED` (a stored result exists).
+ */
+export interface CustomerAcquisitionSummary {
+  movementId: string | null;
+  effectiveAt: string | null;
+  modelVersion: string;
+  status: CustomerAcquisitionStatus;
+  unattributedReason: string | null;
+  firstTouch: CustomerTouchSummary | null;
+  lastTouch: CustomerTouchSummary | null;
+  customerLinkEvidenceId: string | null;
+  sourceReferences: string[];
+  calculatedAt: string | null;
+}
+
+export interface CustomerActiveLink {
+  id: string;
+  externalUserId: string;
+  evidenceSource: string;
+  linkedBySubjectId: string;
+  createdAt: string;
+}
+
+/** `reason` is populated only when `canRepair` is false. */
+export interface CustomerRepairCapability {
+  canRepair: boolean;
+  reason: string | null;
+}
+
+export interface CustomerDetail {
+  stripeCustomerId: string;
+  deleted: boolean;
+  providerCreatedAt: string;
+  subscriptions: CustomerSubscriptionSummary[];
+  currentMrr: CustomerCurrentMrr[];
+  acquisition: CustomerAcquisitionSummary;
+  activeLink: CustomerActiveLink | null;
+  repairCapability: CustomerRepairCapability;
+}
+
+export type CustomerTimelineEventType =
+  | "IDENTITY_LINK_CREATED"
+  | "IDENTITY_LINK_SUPERSEDED"
+  | "TOUCHPOINT_FIRST"
+  | "TOUCHPOINT_LAST"
+  | "TOUCHPOINT_FIRST_AND_LAST"
+  | "SUBSCRIPTION_STATUS_CHANGED"
+  | "MRR_MOVEMENT"
+  | "ATTRIBUTION_CALCULATED"
+  | "REPAIR_AUDIT";
+
+/**
+ * One evidence-timeline row. `eventType`/`at`/`referenceId`/`explanation` are always populated. Every
+ * other field is populated only when relevant to that event type, and is otherwise null -- never a
+ * fabricated default.
+ */
+export interface CustomerTimelineEntry {
+  eventType: CustomerTimelineEventType;
+  at: string;
+  referenceId: string;
+  explanation: string;
+  currency: string | null;
+  amountMinor: number | null;
+  movementType: MrrMovementType | null;
+  source: string | null;
+  campaign: string | null;
+  landingPage: string | null;
+  previousStatus: string | null;
+  newStatus: string | null;
+  confidence: "STRONG" | "UNATTRIBUTED" | null;
+  unattributedReason: string | null;
+  modelVersion: string | null;
+  actionType: string | null;
+  externalUserId: string | null;
+}
+
+export interface CustomerTimeline {
+  detail: CustomerDetail;
+  entries: CustomerTimelineEntry[];
+  nextCursor: string | null;
+}
+
+// -- Manual repair (#20, first consumed by the #24 customer timeline UI) --
+
+export interface StripeCustomerLinkOutcome {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  externalUserId: string;
+  stripeCustomerId: string;
+  evidenceSource: string;
+  evidenceReference: string;
+  linkedBySubjectId: string;
+  createdAt: string;
+}
+
+export interface CustomerAttributionExplanationEntry {
+  movementId: string;
+  movementType: MrrMovementType;
+  movementAt: string;
+  modelVersion: string;
+  confidence: "STRONG" | "UNATTRIBUTED";
+  unattributedReason: string | null;
+  calculatedAt: string;
+}
+
+export interface RepairCustomerLinkResponse {
+  link: StripeCustomerLinkOutcome;
+  actionType: "CREATED" | "CORRECTED" | "UNCHANGED";
+  previousIdentityStripeCustomerId: string | null;
+  targetCustomerAttribution: CustomerAttributionExplanationEntry[];
+  displacedCustomerId: string | null;
+  displacedCustomerAttribution: CustomerAttributionExplanationEntry[];
+}
+
 export interface StripeBillingHealthReport {
   workspaceId: string;
   status: StripeBillingHealthStatus;

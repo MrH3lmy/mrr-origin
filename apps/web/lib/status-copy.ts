@@ -1,5 +1,7 @@
 import type { StatusTone } from "@/components/ui/StatusBadge";
 import type {
+  BillingSubscriptionStatus,
+  CustomerAcquisitionStatus,
   DiagnosticState,
   MrrMovementType,
   StripeBillingHealthReason,
@@ -116,4 +118,54 @@ export const MOVEMENT_TYPE_LABEL: Record<MrrMovementType, string> = {
   CONTRACTION: "Contraction MRR",
   CHURN: "Churned MRR",
   REACTIVATION: "Reactivation MRR",
+};
+
+/** #24: humanized reason copy for the customer timeline's acquisition summary. */
+export const ACQUISITION_STATUS_COPY: Record<CustomerAcquisitionStatus, StatusCopy> = {
+  STRONG: {
+    tone: "positive",
+    label: "Attributed",
+    headline: "This customer's acquisition source is strongly attributed.",
+    detail: "A tracked visitor was explicitly identified and linked to this Stripe customer.",
+  },
+  UNATTRIBUTED: {
+    tone: "neutral",
+    label: "Unattributed",
+    headline: "No acquisition source could be determined for this customer.",
+    detail: "See the reason below, and repair the link if one is available.",
+  },
+  NOT_RECALCULATED: {
+    tone: "info",
+    label: "Not yet calculated",
+    headline: "Attribution has not been recalculated for the current model yet.",
+    detail: "This is an operational gap, not a negative result.",
+  },
+  NO_ACQUISITION_MOVEMENT: {
+    tone: "neutral",
+    label: "No paid acquisition yet",
+    headline: "This customer has never had positive recurring revenue.",
+    detail: "There is no New MRR movement to attribute.",
+  },
+};
+
+export const SUBSCRIPTION_STATUS_LABEL: Record<BillingSubscriptionStatus, string> = {
+  incomplete: "Incomplete",
+  incomplete_expired: "Incomplete (expired)",
+  trialing: "Trialing",
+  active: "Active",
+  past_due: "Past due",
+  canceled: "Canceled",
+  unpaid: "Unpaid",
+  paused: "Paused",
+};
+
+export const SUBSCRIPTION_STATUS_TONE: Record<BillingSubscriptionStatus, StatusTone> = {
+  incomplete: "neutral",
+  incomplete_expired: "danger",
+  trialing: "info",
+  active: "positive",
+  past_due: "warning",
+  canceled: "neutral",
+  unpaid: "danger",
+  paused: "neutral",
 };
