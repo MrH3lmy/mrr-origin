@@ -94,9 +94,20 @@ class SourceComparisonIntegrationTests {
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue=='bing' && @.movementType=='NEW')].totalMinor").value(500))
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue==null && @.movementType=='NEW')].totalMinor").value(300))
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue==null && @.movementType=='NEW')].attributed").value(false))
-                .andExpect(jsonPath("$.unavailableMetrics.length()").value(2))
-                .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='RETAINED_MRR')]").exists())
-                .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='NRR')]").exists());
+                // #25: these April-2026 cohorts are long mature by the time this test runs, so the
+                // comparison's `retention` list carries real, reconciled Retained MRR / NRR -- not a
+                // permanent "Unavailable" placeholder. google churned back to zero within 30 days
+                // (retention 0%); bing and the unattributed customer kept their full starting MRR.
+                .andExpect(jsonPath("$.retentionAgeDays").value(30))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.available").value(true))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.retainedMrrMinor").value(0))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.churnMrrMinor").value(1000))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.retentionPercentage").value(0.0))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.nrr").value(0.0))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='bing')].cell.retainedMrrMinor").value(500))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='bing')].cell.retentionPercentage").value(1.0))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue==null && @.attributed==false)].cell.retainedMrrMinor").value(300))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue==null && @.attributed==false)].cell.retentionPercentage").value(1.0));
     }
 
     @Test

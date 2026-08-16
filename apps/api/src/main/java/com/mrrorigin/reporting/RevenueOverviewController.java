@@ -32,20 +32,24 @@ import com.mrrorigin.workspace.WorkspaceContext;
 public class RevenueOverviewController {
 
     private static final Set<String> DIMENSIONS = Set.of("SOURCE", "CAMPAIGN", "LANDING_PAGE");
+    private static final int DEFAULT_RETENTION_AGE_DAYS = 30;
 
     private final RevenueOverviewService overviewService;
     private final RevenueMovementsService movementsService;
     private final SourceComparisonService comparisonService;
+    private final RetentionCohortService retentionCohortService;
     private final WorkspaceContext workspaceContext;
 
     public RevenueOverviewController(
             RevenueOverviewService overviewService,
             RevenueMovementsService movementsService,
             SourceComparisonService comparisonService,
+            RetentionCohortService retentionCohortService,
             WorkspaceContext workspaceContext) {
         this.overviewService = overviewService;
         this.movementsService = movementsService;
         this.comparisonService = comparisonService;
+        this.retentionCohortService = retentionCohortService;
         this.workspaceContext = workspaceContext;
     }
 
@@ -91,7 +95,8 @@ public class RevenueOverviewController {
             @RequestParam String dimension,
             @RequestParam(required = false) String source,
             @RequestParam(required = false) String campaign,
-            @RequestParam(required = false, defaultValue = "false") boolean campaignMissing) {
+            @RequestParam(required = false, defaultValue = "false") boolean campaignMissing,
+            @RequestParam(required = false, defaultValue = "" + DEFAULT_RETENTION_AGE_DAYS) int retentionAgeDays) {
         workspaceContext.requireMembership(workspaceId);
         if (!DIMENSIONS.contains(dimension)) {
             throw new IllegalArgumentException("dimension must be one of " + DIMENSIONS);
@@ -99,6 +104,9 @@ public class RevenueOverviewController {
         SourceComparisonService.Dimension parsed = SourceComparisonService.Dimension.valueOf(dimension);
         List<SourceComparisonService.ComparisonRow> rows =
                 comparisonService.compare(workspaceId, projectId, from, to, parsed, source, campaign, campaignMissing);
+        RetentionCohortService.Dimension retentionDimension = RetentionCohortService.Dimension.valueOf(dimension);
+        List<RetentionCohortService.SummaryRow> retention = retentionCohortService.summary(
+                workspaceId, projectId, from, to, retentionDimension, source, campaign, campaignMissing, retentionAgeDays);
         return new ComparisonResponse(
                 workspaceId,
                 projectId,
@@ -109,7 +117,8 @@ public class RevenueOverviewController {
                 campaign,
                 campaignMissing,
                 rows,
-                SourceComparisonService.UNAVAILABLE_METRICS);
+                retentionAgeDays,
+                retention);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
@@ -152,9 +161,14 @@ public class RevenueOverviewController {
      * campaign}/{@code campaignMissing} echo the parent drill-down filters that were applied (null/
      * false unless the request scoped one). {@code campaignMissing} selects the "no campaign
      * captured" bucket explicitly, as a boolean rather than a sentinel value in {@code campaign}, so
-     * a real UTM campaign can never collide with the missing-value bucket. {@code unavailableMetrics}
-     * names product metrics this comparison does not compute yet (retained MRR, NRR) and why --
-     * present on every response so a client can never mistake their absence for a measured zero.
+     * a real UTM campaign can never collide with the missing-value bucket.
+     *
+     * <p>{@code retention} is #25's Retained MRR / NRR for {@code retentionAgeDays} (30/60/90,
+     * default 30), one row per {@code (dimensionValue, attributed, currency)} -- the same key {@link
+     * SourceComparisonService.ComparisonRow} uses, so a client joins the two lists by that tuple. A
+     * dimension value with no corresponding {@code retention} row, or whose {@link
+     * RetentionCohortService.AgeCell#available()} is false, has no authoritative Retained MRR/NRR yet
+     * and must render "Unavailable" -- never a fabricated zero.
      */
     public record ComparisonResponse(
             UUID workspaceId,
@@ -166,5 +180,6 @@ public class RevenueOverviewController {
             String campaign,
             boolean campaignMissing,
             List<SourceComparisonService.ComparisonRow> rows,
-            List<SourceComparisonService.UnavailableMetric> unavailableMetrics) {}
+            int retentionAgeDays,
+            List<RetentionCohortService.SummaryRow> retention) {}
 }
