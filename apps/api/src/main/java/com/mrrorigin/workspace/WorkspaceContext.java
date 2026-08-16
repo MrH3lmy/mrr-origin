@@ -57,4 +57,15 @@ public class WorkspaceContext {
         }
         return membership;
     }
+
+    /**
+     * Non-throwing capability check for surfaces that must show an explicit "you cannot do this"
+     * state rather than a 403 (e.g. {@code #24}'s repair-capability flag): true when the caller is a
+     * member with {@link WorkspaceRole#canManage()} authority. Still requires membership -- a
+     * non-member gets the usual 404 from {@link #requireMembership}, never leaking whether a
+     * workspace exists.
+     */
+    public boolean canManage(UUID workspaceId) {
+        return requireMembership(workspaceId).role().canManage();
+    }
 }
