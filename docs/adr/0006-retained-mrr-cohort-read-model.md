@@ -117,7 +117,7 @@ selected dimension value, at a caller-selected age (30/60/90, default 30). The
 combined row is available only when every contributing period is itself mature at
 that age (same all-or-nothing rule as a single cohort cell, applied across periods);
 otherwise it stays `UNAVAILABLE`, and #23's existing per-response `unavailableMetrics`
-reason list is extended to describe *why* (`MATURITY_PENDING` vs. no acquisition in
+reason list is extended to describe _why_ (`MATURITY_PENDING` vs. no acquisition in
 range at all) instead of the current permanent "not built yet" reason.
 
 ## Consequences

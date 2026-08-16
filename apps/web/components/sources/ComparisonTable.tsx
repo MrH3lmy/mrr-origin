@@ -11,6 +11,8 @@ import { getSourceComparison } from "@/lib/api/reporting";
 import type {
   ComparisonDimension,
   ComparisonRow,
+  RetentionAgeDays,
+  RetentionSummaryRow,
   SourceComparison,
 } from "@/lib/api/types";
 import { formatMoneyMinor } from "@/lib/format-currency";
@@ -167,8 +169,10 @@ export function ComparisonTable({
     key: "newMrr",
     direction: "desc",
   });
+  const [retentionAgeDays, setRetentionAgeDays] =
+    useState<RetentionAgeDays>(30);
 
-  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${dimension}|${source ?? ""}|${campaign ?? ""}|${campaignMissing}`;
+  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${dimension}|${source ?? ""}|${campaign ?? ""}|${campaignMissing}|${retentionAgeDays}`;
   const [loadedKey, setLoadedKey] = useState(filterKey);
   if (filterKey !== loadedKey) {
     setLoadedKey(filterKey);
@@ -183,6 +187,7 @@ export function ComparisonTable({
       source: source ?? undefined,
       campaign: campaign ?? undefined,
       campaignMissing: campaignMissing || undefined,
+      retentionAgeDays,
     })
       .then((result) => {
         if (cancelled) return;
@@ -211,6 +216,7 @@ export function ComparisonTable({
     source,
     campaign,
     campaignMissing,
+    retentionAgeDays,
   ]);
 
   if (loading) {
@@ -234,9 +240,13 @@ export function ComparisonTable({
     new Set(comparison.rows.map((r) => r.currency)),
   ).sort();
 
-  function reasonFor(metric: string): string | undefined {
-    return comparison?.unavailableMetrics.find((m) => m.metric === metric)
-      ?.reason;
+  function retentionFor(row: PivotedRow): RetentionSummaryRow | undefined {
+    return comparison?.retention.find(
+      (r) =>
+        r.dimensionValue === row.dimensionValue &&
+        r.attributed === row.attributed &&
+        r.currency === row.currency,
+    );
   }
 
   function toggleSort(key: SortKey) {
@@ -281,8 +291,29 @@ export function ComparisonTable({
     );
   }
 
+  const anyUnavailable = comparison.retention.some((r) => !r.cell.available);
+
   return (
     <>
+      <div
+        className={styles.retentionAgeControl}
+        role="group"
+        aria-label="Retained MRR / NRR cohort age"
+      >
+        <span className={styles.retentionAgeLabel}>Cohort age:</span>
+        {([30, 60, 90] as const).map((age) => (
+          <button
+            key={age}
+            type="button"
+            className={styles.retentionAgeButton}
+            aria-pressed={retentionAgeDays === age}
+            onClick={() => setRetentionAgeDays(age)}
+          >
+            {age}d
+          </button>
+        ))}
+      </div>
+
       {currencies.map((currency) => {
         const rows = sortRows(
           pivot(comparison.rows.filter((r) => r.currency === currency)),
@@ -310,10 +341,10 @@ export function ComparisonTable({
                     />
                     <SortHeader label="Customers" sortKey="customers" numeric />
                     <th scope="col" className={overviewStyles.numeric}>
-                      Retained MRR
+                      Retained MRR ({retentionAgeDays}d)
                     </th>
                     <th scope="col" className={overviewStyles.numeric}>
-                      NRR
+                      NRR ({retentionAgeDays}d)
                     </th>
                   </tr>
                 </thead>
@@ -413,18 +444,52 @@ export function ComparisonTable({
                         <td className={overviewStyles.numeric}>
                           {row.newCustomerCount}
                         </td>
-                        <td
-                          className={`${overviewStyles.numeric} ${styles.unavailableCell}`}
-                          title={reasonFor("RETAINED_MRR")}
-                        >
-                          Unavailable
-                        </td>
-                        <td
-                          className={`${overviewStyles.numeric} ${styles.unavailableCell}`}
-                          title={reasonFor("NRR")}
-                        >
-                          Unavailable
-                        </td>
+                        {(() => {
+                          const retention = retentionFor(row);
+                          const cell = retention?.cell;
+                          if (!cell?.available) {
+                            const reason =
+                              cell?.unavailableReason === "MATURITY_PENDING"
+                                ? `Not mature yet: every customer acquired in this row's cohort period(s) must reach ${retentionAgeDays} days old before Retained MRR is shown.`
+                                : "No acquisition cohort exists for this row and age yet.";
+                            return (
+                              <>
+                                <td
+                                  className={`${overviewStyles.numeric} ${styles.unavailableCell}`}
+                                  title={reason}
+                                >
+                                  Unavailable
+                                </td>
+                                <td
+                                  className={`${overviewStyles.numeric} ${styles.unavailableCell}`}
+                                  title={reason}
+                                >
+                                  Unavailable
+                                </td>
+                              </>
+                            );
+                          }
+                          return (
+                            <>
+                              <td className={overviewStyles.numeric}>
+                                {formatMoneyMinor(
+                                  cell.retainedMrrMinor ?? 0,
+                                  row.currency,
+                                )}
+                                <span className={styles.retentionPercent}>
+                                  {cell.retentionPercentage === null
+                                    ? ""
+                                    : ` (${Math.round(cell.retentionPercentage * 100)}%)`}
+                                </span>
+                              </td>
+                              <td className={overviewStyles.numeric}>
+                                {cell.nrr === null
+                                  ? "Unavailable"
+                                  : `${Math.round(cell.nrr * 100)}%`}
+                              </td>
+                            </>
+                          );
+                        })()}
                       </tr>
                     );
                   })}
@@ -435,11 +500,11 @@ export function ComparisonTable({
         );
       })}
 
-      {comparison.unavailableMetrics.length > 0 ? (
+      {anyUnavailable ? (
         <p className={styles.unavailableNote} role="note">
-          {comparison.unavailableMetrics
-            .map((metric) => metric.reason)
-            .join(" ")}
+          Retained MRR / NRR shows &ldquo;Unavailable&rdquo; for a row whose
+          acquisition cohort hasn&apos;t reached {retentionAgeDays} days old yet
+          -- never a fabricated zero.
         </p>
       ) : null}
     </>

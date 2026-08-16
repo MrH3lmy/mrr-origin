@@ -60,10 +60,8 @@ function sourceComparison(): SourceComparison {
         customerCount: 2,
       },
     ],
-    unavailableMetrics: [
-      { metric: "RETAINED_MRR", reason: "Not available yet — depends on #25." },
-      { metric: "NRR", reason: "Not available yet — depends on #25." },
-    ],
+    retentionAgeDays: 30,
+    retention: [],
   };
 }
 
@@ -135,7 +133,12 @@ describe("SourcesClient", () => {
       baseProps.from,
       baseProps.to,
       "SOURCE",
-      { source: undefined, campaign: undefined, campaignMissing: undefined },
+      {
+        source: undefined,
+        campaign: undefined,
+        campaignMissing: undefined,
+        retentionAgeDays: 30,
+      },
     );
   });
 
@@ -180,7 +183,12 @@ describe("SourcesClient", () => {
       baseProps.from,
       baseProps.to,
       "CAMPAIGN",
-      { source: "google", campaign: undefined, campaignMissing: undefined },
+      {
+        source: "google",
+        campaign: undefined,
+        campaignMissing: undefined,
+        retentionAgeDays: 30,
+      },
     );
     // Breadcrumb now shows the drilled-into source as the current (non-clickable) crumb, plus a
     // clickable "All sources" crumb to go back to the top level.
@@ -232,7 +240,12 @@ describe("SourcesClient", () => {
       baseProps.from,
       baseProps.to,
       "LANDING_PAGE",
-      { source: "google", campaign: undefined, campaignMissing: true },
+      {
+        source: "google",
+        campaign: undefined,
+        campaignMissing: true,
+        retentionAgeDays: 30,
+      },
     );
     expect(
       screen.getByText("No campaign captured", { selector: "span" }),

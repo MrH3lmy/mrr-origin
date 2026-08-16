@@ -1,0 +1,86 @@
+.ageCellUnavailable {
+  color: var(--ds-text-muted);
+  font-size: 0.75rem;
+  white-space: normal;
+}
+
+.ageCell {
+  padding: 6px 12px;
+  border-radius: var(--ds-radius-control);
+}
+
+/* Background-only signal for retention health; the numeric value/percentage text underneath is
+   always present and is the actual carrier of meaning (DESIGN_SYSTEM.md: "color must never be the
+   only carrier of meaning"). */
+.ageCellHealthy {
+  background: var(--ds-positive-bg);
+}
+
+.ageCellModerate {
+  background: var(--ds-info-bg);
+}
+
+.ageCellWeak {
+  background: var(--ds-warning-bg);
+}
+
+.ageCellChurned {
+  background: var(--ds-danger-bg);
+}
+
+.ageCellValue {
+  display: block;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.ageCellSub {
+  display: block;
+  margin-top: 2px;
+  color: var(--ds-text-muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 16px;
+  font-size: 0.75rem;
+  color: var(--ds-text-muted);
+}
+
+.legendSwatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.legendSwatch::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.legendSwatchHealthy::before {
+  background: var(--ds-positive-bg);
+  box-shadow: inset 0 0 0 1px var(--ds-positive);
+}
+
+.legendSwatchModerate::before {
+  background: var(--ds-info-bg);
+  box-shadow: inset 0 0 0 1px var(--ds-info);
+}
+
+.legendSwatchWeak::before {
+  background: var(--ds-warning-bg);
+  box-shadow: inset 0 0 0 1px var(--ds-warning);
+}
+
+.legendSwatchChurned::before {
+  background: var(--ds-danger-bg);
+  box-shadow: inset 0 0 0 1px var(--ds-danger);
+}

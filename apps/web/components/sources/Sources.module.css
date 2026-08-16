@@ -107,3 +107,44 @@
   color: var(--ds-text-muted);
   font-size: 0.75rem;
 }
+
+.retentionAgeControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.retentionAgeLabel {
+  color: var(--ds-text-muted);
+  font-size: 0.8125rem;
+}
+
+.retentionAgeButton {
+  padding: 4px 10px;
+  color: var(--ds-text);
+  background: var(--ds-surface);
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-radius-control);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.retentionAgeButton:hover,
+.retentionAgeButton:focus-visible {
+  background: var(--ds-surface-subtle);
+}
+
+.retentionAgeButton[aria-pressed="true"] {
+  color: #fff;
+  background: var(--ds-brand);
+  border-color: var(--ds-brand);
+}
+
+.retentionPercent {
+  color: var(--ds-text-muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+}

@@ -4,6 +4,9 @@ import type {
   ComparisonDimension,
   MrrMovementsPage,
   MrrMovementType,
+  RetentionAgeDays,
+  RetentionCohorts,
+  RetentionSummary,
   RevenueOverview,
   SourceComparison,
 } from "./types";
@@ -89,6 +92,8 @@ export interface GetSourceComparisonOptions {
   campaign?: string;
   /** Selects the "no campaign captured" bucket explicitly. Mutually exclusive with `campaign`. */
   campaignMissing?: boolean;
+  /** The retained-MRR/NRR cohort age to join in. Defaults to 30 server-side. */
+  retentionAgeDays?: RetentionAgeDays;
 }
 
 export function getSourceComparison(
@@ -104,7 +109,59 @@ export function getSourceComparison(
   if (options.source) params.set("source", options.source);
   if (options.campaign) params.set("campaign", options.campaign);
   if (options.campaignMissing) params.set("campaignMissing", "true");
+  if (options.retentionAgeDays)
+    params.set("retentionAgeDays", String(options.retentionAgeDays));
   return client.get<SourceComparison>(
     `${base(workspaceId, projectId)}/reporting/comparison?${params}`,
+  );
+}
+
+// -- 30/60/90-day retained-MRR cohorts (#25) --
+
+export interface GetRetentionCohortsOptions {
+  /** Required for CAMPAIGN and LANDING_PAGE dimensions. */
+  source?: string;
+  /** Required for LANDING_PAGE (with `campaignMissing`). Mutually exclusive with `campaignMissing`. */
+  campaign?: string;
+  /** Selects the "no campaign captured" bucket explicitly. Mutually exclusive with `campaign`. */
+  campaignMissing?: boolean;
+}
+
+export function getRetentionCohorts(
+  client: ApiClient,
+  workspaceId: string,
+  projectId: string,
+  dimension: ComparisonDimension,
+  options: GetRetentionCohortsOptions = {},
+): Promise<RetentionCohorts> {
+  const params = new URLSearchParams({ dimension });
+  if (options.source) params.set("source", options.source);
+  if (options.campaign) params.set("campaign", options.campaign);
+  if (options.campaignMissing) params.set("campaignMissing", "true");
+  return client.get<RetentionCohorts>(
+    `${base(workspaceId, projectId)}/reporting/retention/cohorts?${params}`,
+  );
+}
+
+export interface GetRetentionSummaryOptions extends GetRetentionCohortsOptions {
+  ageDays?: RetentionAgeDays;
+}
+
+export function getRetentionSummary(
+  client: ApiClient,
+  workspaceId: string,
+  projectId: string,
+  from: string,
+  to: string,
+  dimension: ComparisonDimension,
+  options: GetRetentionSummaryOptions = {},
+): Promise<RetentionSummary> {
+  const params = new URLSearchParams({ from, to, dimension });
+  if (options.source) params.set("source", options.source);
+  if (options.campaign) params.set("campaign", options.campaign);
+  if (options.campaignMissing) params.set("campaignMissing", "true");
+  if (options.ageDays) params.set("ageDays", String(options.ageDays));
+  return client.get<RetentionSummary>(
+    `${base(workspaceId, projectId)}/reporting/retention/summary?${params}`,
   );
 }
