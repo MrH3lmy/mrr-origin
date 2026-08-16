@@ -519,8 +519,8 @@ export function ComparisonTable({
       {anyUnavailable ? (
         <p className={styles.unavailableNote} role="note">
           Retained MRR / NRR shows &ldquo;Unavailable&rdquo; when a row has no
-          acquisition cohort in the selected range or its cohort hasn&apos;t reached{" "}
-          {retentionAgeDays} days old yet -- never a fabricated zero.
+          acquisition cohort in the selected range or its cohort hasn&apos;t
+          reached {retentionAgeDays} days old yet -- never a fabricated zero.
         </p>
       ) : null}
     </>
