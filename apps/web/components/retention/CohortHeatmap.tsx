@@ -250,7 +250,12 @@ export function CohortHeatmap({
               const isDrillable = canDrillDown || canDrillNoEvidenceBucket;
               return (
                 <tr
-                  key={`${row.dimensionValue ?? "none"}-${row.attributed}-${row.currency}-${row.periodStart}`}
+                  key={JSON.stringify([
+                    row.dimensionValue,
+                    row.attributed,
+                    row.currency,
+                    row.periodStart,
+                  ])}
                 >
                   <td>
                     {row.dimensionValue === null ? (
