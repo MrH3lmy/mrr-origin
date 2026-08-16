@@ -216,6 +216,53 @@ export interface MrrMovementsPage {
   nextCursor: string | null;
 }
 
+// -- Source/campaign/landing-page comparison (#23) --
+
+export type ComparisonDimension = "SOURCE" | "CAMPAIGN" | "LANDING_PAGE";
+
+/**
+ * One aggregated cell of the comparison table. `dimensionValue` is null for exactly one of two
+ * distinct "no value at this level" cases, told apart by `attributed` so a real value can never be
+ * conflated with a bucket that has none:
+ *
+ * - `attributed: false` (SOURCE only): no acceptable acquisition evidence at all -- Unattributed.
+ * - `attributed: true`: strongly attributed (real customer-link + touchpoint evidence exists), but
+ *   this specific field wasn't captured on that touchpoint (e.g. a direct visit with no
+ *   `utm_source`). CAMPAIGN/LANDING_PAGE rows are always `attributed: true` -- those levels only
+ *   ever compare within an already strongly-attributed parent source.
+ *
+ * `movementType` is "NEW" or "CHURN" -- #23 does not report expansion/contraction/reactivation.
+ */
+export interface ComparisonRow {
+  dimensionValue: string | null;
+  attributed: boolean;
+  currency: string;
+  movementType: "NEW" | "CHURN";
+  totalMinor: number;
+  customerCount: number;
+}
+
+/** Names a product metric this comparison does not compute yet, and why -- never a measured zero. */
+export interface UnavailableMetric {
+  metric: string;
+  reason: string;
+}
+
+export interface SourceComparison {
+  workspaceId: string;
+  projectId: string;
+  from: string;
+  to: string;
+  dimension: ComparisonDimension;
+  /** Echoes the parent drill-down filter that was applied, if any. */
+  source: string | null;
+  campaign: string | null;
+  /** True when the request selected the "no campaign captured" bucket explicitly, rather than a real campaign value. */
+  campaignMissing: boolean;
+  rows: ComparisonRow[];
+  unavailableMetrics: UnavailableMetric[];
+}
+
 export interface StripeBillingHealthReport {
   workspaceId: string;
   status: StripeBillingHealthStatus;

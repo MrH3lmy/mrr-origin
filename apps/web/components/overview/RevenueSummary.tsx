@@ -59,9 +59,11 @@ function groupByCurrency(overview: RevenueOverview): CurrencyBucket[] {
 interface RevenueSummaryProps {
   overview: RevenueOverview;
   selectedMovementType: MrrMovementType | null;
+  /** undefined: nothing selected. null: the Unattributed bucket is selected. string: a real source. */
   selectedSource: string | null | undefined;
   selectedCurrency: string | null;
   onSelectMovementType: (type: MrrMovementType, currency: string) => void;
+  /** `source: null` means the Unattributed bucket was clicked, matching `SourceHighlight.source`. */
   onSelectSource: (source: string | null, currency: string) => void;
 }
 
@@ -209,7 +211,7 @@ export function RevenueSummary({
                 <ul className={styles.meterList}>
                   {bucket.sourceHighlights.map((highlight) => {
                     const isSelected =
-                      selectedSource === (highlight.source ?? "UNATTRIBUTED") &&
+                      selectedSource === highlight.source &&
                       selectedCurrency === bucket.currency;
                     const maxSource = Math.max(
                       1,
@@ -225,10 +227,7 @@ export function RevenueSummary({
                           className={styles.meterRow}
                           aria-pressed={isSelected}
                           onClick={() =>
-                            onSelectSource(
-                              highlight.source ?? "UNATTRIBUTED",
-                              bucket.currency,
-                            )
+                            onSelectSource(highlight.source, bucket.currency)
                           }
                         >
                           <span className={styles.meterLabel}>

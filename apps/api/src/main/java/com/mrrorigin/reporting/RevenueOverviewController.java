@@ -3,6 +3,7 @@ package com.mrrorigin.reporting;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import jakarta.validation.constraints.Max;
@@ -21,7 +22,8 @@ import com.mrrorigin.workspace.WorkspaceContext;
 
 /**
  * #22's founder overview read models: period+project-scoped MRR movement totals, current MRR,
- * source highlights, and the movement-level drill-down that backs every summarized number. Any
+ * source highlights, and the movement-level drill-down that backs every summarized number. Also
+ * exposes #23's source/campaign/landing-page comparison, an extension of the same read models. Any
  * workspace member may read these.
  */
 @RestController
@@ -29,16 +31,21 @@ import com.mrrorigin.workspace.WorkspaceContext;
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/reporting")
 public class RevenueOverviewController {
 
+    private static final Set<String> DIMENSIONS = Set.of("SOURCE", "CAMPAIGN", "LANDING_PAGE");
+
     private final RevenueOverviewService overviewService;
     private final RevenueMovementsService movementsService;
+    private final SourceComparisonService comparisonService;
     private final WorkspaceContext workspaceContext;
 
     public RevenueOverviewController(
             RevenueOverviewService overviewService,
             RevenueMovementsService movementsService,
+            SourceComparisonService comparisonService,
             WorkspaceContext workspaceContext) {
         this.overviewService = overviewService;
         this.movementsService = movementsService;
+        this.comparisonService = comparisonService;
         this.workspaceContext = workspaceContext;
     }
 
@@ -60,12 +67,49 @@ public class RevenueOverviewController {
             @RequestParam OffsetDateTime to,
             @RequestParam(required = false) String movementType,
             @RequestParam(required = false) String source,
+            @RequestParam(required = false, defaultValue = "false") boolean sourceUnattributed,
+            @RequestParam(required = false, defaultValue = "false") boolean sourceMissing,
+            @RequestParam(required = false) String campaign,
+            @RequestParam(required = false, defaultValue = "false") boolean campaignMissing,
+            @RequestParam(required = false) String landingPage,
+            @RequestParam(required = false, defaultValue = "false") boolean landingPageMissing,
             @RequestParam(required = false) String currency,
             @RequestParam(required = false) String cursor,
             @RequestParam(required = false) @Min(1) @Max(RevenueMovementsService.MAX_LIMIT) Integer limit) {
         workspaceContext.requireMembership(workspaceId);
         return MovementsPageResponse.from(movementsService.list(
-                workspaceId, projectId, from, to, movementType, source, currency, cursor, limit));
+                workspaceId, projectId, from, to, movementType, source, sourceUnattributed, sourceMissing, campaign,
+                campaignMissing, landingPage, landingPageMissing, currency, cursor, limit));
+    }
+
+    @GetMapping("/comparison")
+    public ComparisonResponse comparison(
+            @PathVariable UUID workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam OffsetDateTime from,
+            @RequestParam OffsetDateTime to,
+            @RequestParam String dimension,
+            @RequestParam(required = false) String source,
+            @RequestParam(required = false) String campaign,
+            @RequestParam(required = false, defaultValue = "false") boolean campaignMissing) {
+        workspaceContext.requireMembership(workspaceId);
+        if (!DIMENSIONS.contains(dimension)) {
+            throw new IllegalArgumentException("dimension must be one of " + DIMENSIONS);
+        }
+        SourceComparisonService.Dimension parsed = SourceComparisonService.Dimension.valueOf(dimension);
+        List<SourceComparisonService.ComparisonRow> rows =
+                comparisonService.compare(workspaceId, projectId, from, to, parsed, source, campaign, campaignMissing);
+        return new ComparisonResponse(
+                workspaceId,
+                projectId,
+                from,
+                to,
+                dimension,
+                source,
+                campaign,
+                campaignMissing,
+                rows,
+                SourceComparisonService.UNAVAILABLE_METRICS);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
@@ -102,4 +146,25 @@ public class RevenueOverviewController {
             return new MovementsPageResponse(page.entries(), page.nextCursor());
         }
     }
+
+    /**
+     * {@code dimension} is one of {@code SOURCE, CAMPAIGN, LANDING_PAGE}. {@code source}/{@code
+     * campaign}/{@code campaignMissing} echo the parent drill-down filters that were applied (null/
+     * false unless the request scoped one). {@code campaignMissing} selects the "no campaign
+     * captured" bucket explicitly, as a boolean rather than a sentinel value in {@code campaign}, so
+     * a real UTM campaign can never collide with the missing-value bucket. {@code unavailableMetrics}
+     * names product metrics this comparison does not compute yet (retained MRR, NRR) and why --
+     * present on every response so a client can never mistake their absence for a measured zero.
+     */
+    public record ComparisonResponse(
+            UUID workspaceId,
+            UUID projectId,
+            OffsetDateTime from,
+            OffsetDateTime to,
+            String dimension,
+            String source,
+            String campaign,
+            boolean campaignMissing,
+            List<SourceComparisonService.ComparisonRow> rows,
+            List<SourceComparisonService.UnavailableMetric> unavailableMetrics) {}
 }

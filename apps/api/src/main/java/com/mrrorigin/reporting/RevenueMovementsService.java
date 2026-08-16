@@ -77,6 +77,12 @@ public class RevenueMovementsService {
             OffsetDateTime to,
             String movementType,
             String source,
+            boolean sourceUnattributed,
+            boolean sourceMissing,
+            String campaign,
+            boolean campaignMissing,
+            String landingPage,
+            boolean landingPageMissing,
             String currency,
             String cursor,
             Integer limit) {
@@ -88,6 +94,25 @@ public class RevenueMovementsService {
         }
         if (movementType != null && !MOVEMENT_TYPES.contains(movementType)) {
             throw new IllegalArgumentException("movementType must be one of " + MOVEMENT_TYPES);
+        }
+        int sourceModes = (source != null ? 1 : 0) + (sourceUnattributed ? 1 : 0) + (sourceMissing ? 1 : 0);
+        if (sourceModes > 1) {
+            throw new IllegalArgumentException("source, sourceUnattributed and sourceMissing are mutually exclusive");
+        }
+        if (campaign != null && campaignMissing) {
+            throw new IllegalArgumentException("campaign and campaignMissing are mutually exclusive");
+        }
+        if (landingPage != null && landingPageMissing) {
+            throw new IllegalArgumentException("landingPage and landingPageMissing are mutually exclusive");
+        }
+        boolean hasSource = sourceModes > 0;
+        boolean hasCampaign = campaign != null || campaignMissing;
+        boolean hasLandingPage = landingPage != null || landingPageMissing;
+        if ((hasCampaign || hasLandingPage) && !hasSource) {
+            throw new IllegalArgumentException("source is required when filtering by campaign or landingPage");
+        }
+        if (hasLandingPage && !hasCampaign) {
+            throw new IllegalArgumentException("campaign or campaignMissing is required when filtering by landingPage");
         }
         int pageSize = normalizeLimit(limit);
         Optional<Cursor> decoded = Cursor.decode(cursor);
@@ -109,8 +134,16 @@ public class RevenueMovementsService {
                           AND (:hasType = FALSE OR m.movement_type = :type)
                           AND (:hasCurrency = FALSE OR m.currency = :currency)
                           AND (:hasSource = FALSE
-                               OR (:source = 'UNATTRIBUTED' AND (r.confidence IS DISTINCT FROM 'STRONG'))
-                               OR (r.confidence = 'STRONG' AND r.first_source = :source))
+                               OR (:sourceUnattributed = TRUE AND r.confidence IS DISTINCT FROM 'STRONG')
+                               OR (:sourceMissing = TRUE AND r.confidence = 'STRONG' AND r.first_source IS NULL)
+                               OR (:sourceUnattributed = FALSE AND :sourceMissing = FALSE
+                                   AND r.confidence = 'STRONG' AND r.first_source = :source))
+                          AND (:hasCampaign = FALSE
+                               OR (:campaignMissing = TRUE AND r.confidence = 'STRONG' AND r.first_campaign IS NULL)
+                               OR (:campaignMissing = FALSE AND r.confidence = 'STRONG' AND r.first_campaign = :campaign))
+                          AND (:hasLandingPage = FALSE
+                               OR (:landingPageMissing = TRUE AND r.confidence = 'STRONG' AND r.first_landing_page IS NULL)
+                               OR (:landingPageMissing = FALSE AND r.confidence = 'STRONG' AND r.first_landing_page = :landingPage))
                           AND (:hasCursor = FALSE OR (m.effective_at, m.id) > (:cursorAt, :cursorId))
                         ORDER BY m.effective_at, m.id
                         LIMIT :fetchLimit
@@ -125,8 +158,16 @@ public class RevenueMovementsService {
                 .param("type", movementType == null ? "" : movementType)
                 .param("hasCurrency", currency != null)
                 .param("currency", currency == null ? "" : currency)
-                .param("hasSource", source != null)
+                .param("hasSource", hasSource)
+                .param("sourceUnattributed", sourceUnattributed)
+                .param("sourceMissing", sourceMissing)
                 .param("source", source == null ? "" : source)
+                .param("hasCampaign", hasCampaign)
+                .param("campaignMissing", campaignMissing)
+                .param("campaign", campaign == null ? "" : campaign)
+                .param("hasLandingPage", hasLandingPage)
+                .param("landingPageMissing", landingPageMissing)
+                .param("landingPage", landingPage == null ? "" : landingPage)
                 .param("hasCursor", decoded.isPresent())
                 .param("cursorAt", decoded.map(Cursor::effectiveAt).orElse(OffsetDateTime.now()))
                 .param("cursorId", decoded.map(Cursor::movementId).orElse(new UUID(0, 0)))

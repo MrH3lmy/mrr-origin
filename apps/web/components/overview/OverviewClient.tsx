@@ -29,12 +29,15 @@ interface OverviewClientProps {
 interface Selection {
   movementType: MrrMovementType | null;
   source: string | null;
+  /** True when the Unattributed bucket was selected (distinct from "no source selected"). */
+  sourceUnattributed: boolean;
   currency: string | null;
 }
 
 const EMPTY_SELECTION: Selection = {
   movementType: null,
   source: null,
+  sourceUnattributed: false,
   currency: null,
 };
 
@@ -61,14 +64,24 @@ export function OverviewClient({
           setSelection((current) =>
             current.movementType === type && current.currency === currency
               ? EMPTY_SELECTION
-              : { movementType: type, source: null, currency },
+              : {
+                  movementType: type,
+                  source: null,
+                  sourceUnattributed: false,
+                  currency,
+                },
           )
         }
         onSelectSource={(nextSource, currency) =>
           setSelection((current) =>
             current.source === nextSource && current.currency === currency
               ? EMPTY_SELECTION
-              : { movementType: null, source: nextSource, currency },
+              : {
+                  movementType: null,
+                  source: nextSource,
+                  sourceUnattributed: nextSource === null,
+                  currency,
+                },
           )
         }
       />
@@ -88,6 +101,7 @@ export function OverviewClient({
         to={to}
         movementType={selection.movementType}
         source={selection.source}
+        sourceUnattributed={selection.sourceUnattributed}
         currency={selection.currency}
         onClearFilters={() => setSelection(EMPTY_SELECTION)}
       />

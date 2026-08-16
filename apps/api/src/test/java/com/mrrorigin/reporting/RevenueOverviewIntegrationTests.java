@@ -152,9 +152,141 @@ class RevenueOverviewIntegrationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries.length()").value(1));
 
-        mockMvc.perform(movements(OWNER, FROM, TO, null, "UNATTRIBUTED", null))
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, true, false, null, false, null, false, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries.length()").value(0));
+    }
+
+    @Test
+    void aRealSourceLiterallyNamedUnattributedIsDistinctFromTheUnattributedBucket() throws Exception {
+        // Regression: source filtering used to encode "genuinely unattributed" as the magic string
+        // "UNATTRIBUTED" inside the source parameter itself. utm_source is founder-controlled, so a
+        // real source named "UNATTRIBUTED" would have collided with that sentinel -- the drill-down
+        // for that row would then also pull in every other unrelated unattributed movement.
+        // sourceUnattributed is now a separate boolean, so the two cases can never be confused.
+        movement("cus_real_unattributed_source", "USD", 900, "2026-04-05T00:00:00Z");
+        link("cus_real_unattributed_source");
+        touchpoint("cus_real_unattributed_source", "2026-03-15T00:00:00Z", "UNATTRIBUTED");
+        attribution.recalculate(workspace, project, "cus_real_unattributed_source");
+
+        movement("cus_genuinely_unattributed", "USD", 500, "2026-04-06T00:00:00Z");
+        link("cus_genuinely_unattributed");
+        attribution.recalculate(workspace, project, "cus_genuinely_unattributed");
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "UNATTRIBUTED", null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_real_unattributed_source"))
+                .andExpect(jsonPath("$.entries[0].firstTouch.source").value("UNATTRIBUTED"));
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, true, false, null, false, null, false, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_genuinely_unattributed"));
+
+        // source and sourceUnattributed together is a contradiction, not silently resolved one way.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", true, false, null, false, null, false, null))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void aStronglyAttributedMovementWithNoSourceCapturedIsDistinctFromTheUnattributedBucket() throws Exception {
+        // A touchpoint can carry real customer-link evidence (STRONG) yet have no utm_source at all
+        // (e.g. a direct visit). That movement must never disappear from a drill-down, and must never
+        // be conflated with a movement that has no acquisition evidence whatsoever.
+        movement("cus_no_source_captured", "USD", 600, "2026-04-05T00:00:00Z");
+        link("cus_no_source_captured");
+        touchpoint("cus_no_source_captured", "2026-03-15T00:00:00Z", null);
+        attribution.recalculate(workspace, project, "cus_no_source_captured");
+
+        movement("cus_genuinely_unattributed_2", "USD", 500, "2026-04-06T00:00:00Z");
+        link("cus_genuinely_unattributed_2");
+        attribution.recalculate(workspace, project, "cus_genuinely_unattributed_2");
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, false, true, null, false, null, false, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_no_source_captured"))
+                .andExpect(jsonPath("$.entries[0].confidence").value("STRONG"));
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, true, false, null, false, null, false, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_genuinely_unattributed_2"));
+
+        // sourceMissing and sourceUnattributed together is a contradiction.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, true, true, null, false, null, false, null))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void movementsDrillDownCanBeFilteredByCampaignAndLandingPageForTheSourcesComparisonDrilldown() throws Exception {
+        // #23: Source -> campaign -> landing page -> customers. A founder drilling from a comparison
+        // row must land on exactly the movements that produced it, so campaign/landingPage narrow the
+        // same evidence columns the comparison table itself groups by -- no separate calculation.
+        movement("cus_full_evidence", "USD", 1000, "2026-04-05T00:00:00Z");
+        link("cus_full_evidence");
+        touchpoint("cus_full_evidence", "2026-03-15T00:00:00Z", "google", "spring_sale", "https://example.test/landing-a");
+        attribution.recalculate(workspace, project, "cus_full_evidence");
+
+        movement("cus_no_campaign", "USD", 400, "2026-04-06T00:00:00Z");
+        link("cus_no_campaign");
+        touchpoint("cus_no_campaign", "2026-03-16T00:00:00Z", "google", null, "https://example.test/landing-b");
+        attribution.recalculate(workspace, project, "cus_no_campaign");
+
+        // Matches source + campaign + landing page exactly.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", "spring_sale", "https://example.test/landing-a", null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_full_evidence"));
+
+        // campaignMissing=true selects the "no campaign captured" bucket as an explicit boolean, not
+        // a sentinel string -- so it can never collide with a real campaign a founder happens to name
+        // "NONE" (see the dedicated regression test below).
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", null, true, null, false, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_no_campaign"));
+
+        // campaign without source, or landingPage without campaign, are rejected rather than silently
+        // ignored -- an incomplete drill-down filter must never widen to more rows than the founder
+        // clicked into.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, null, "spring_sale", null, null))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", null, "https://example.test/landing-a", null))
+                .andExpect(status().isBadRequest());
+
+        // campaign and campaignMissing together is a contradiction, not silently resolved one way.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", "spring_sale", true, null, false, null))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void aRealCampaignLiterallyNamedNoneIsDistinctFromTheNoCampaignBucket() throws Exception {
+        // Regression: campaign/landingPage filtering used to encode "no campaign captured" as the
+        // magic string "NONE" inside the campaign parameter itself. utm_campaign is a founder-
+        // controlled value, so a real campaign named "NONE" would have collided with that sentinel.
+        // campaignMissing is now a separate boolean, so the two cases can never be confused.
+        movement("cus_real_none_campaign", "USD", 700, "2026-04-05T00:00:00Z");
+        link("cus_real_none_campaign");
+        touchpoint("cus_real_none_campaign", "2026-03-15T00:00:00Z", "google", "NONE", "https://example.test/landing-a");
+        attribution.recalculate(workspace, project, "cus_real_none_campaign");
+
+        movement("cus_no_campaign_captured", "USD", 300, "2026-04-06T00:00:00Z");
+        link("cus_no_campaign_captured");
+        touchpoint("cus_no_campaign_captured", "2026-03-16T00:00:00Z", "google", null, "https://example.test/landing-b");
+        attribution.recalculate(workspace, project, "cus_no_campaign_captured");
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", "NONE", false, null, false, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_real_none_campaign"))
+                .andExpect(jsonPath("$.entries[0].firstTouch.campaign").value("NONE"));
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", null, true, null, false, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_no_campaign_captured"));
     }
 
     @Test
@@ -353,6 +485,10 @@ class RevenueOverviewIntegrationTests {
     }
 
     private void touchpoint(String stripeCustomerId, String at, String utmSource) {
+        touchpoint(stripeCustomerId, at, utmSource, null, "https://example.test/");
+    }
+
+    private void touchpoint(String stripeCustomerId, String at, String utmSource, String utmCampaign, String landingUrl) {
         UUID identity = db.sql(
                         "SELECT external_identity_id FROM stripe_customer_links WHERE workspace_id = :w AND stripe_customer_id = :c")
                 .param("w", workspace).param("c", stripeCustomerId).query(UUID.class).single();
@@ -369,10 +505,11 @@ class RevenueOverviewIntegrationTests {
                 .param("s", session).param("w", workspace).param("p", project).param("v", visitor).param("e", session.toString()).param("at", time)
                 .update();
         db.sql(
-                        "INSERT INTO touchpoints (id, workspace_id, project_id, visitor_id, session_id, occurred_at, landing_url, utm_source, created_at) "
-                                + "VALUES (:id, :w, :p, :v, :s, :at, 'https://example.test/', :src, :created)")
+                        "INSERT INTO touchpoints (id, workspace_id, project_id, visitor_id, session_id, occurred_at, landing_url, utm_source, utm_campaign, created_at) "
+                                + "VALUES (:id, :w, :p, :v, :s, :at, :landing, :src, :campaign, :created)")
                 .param("id", UUID.randomUUID()).param("w", workspace).param("p", project).param("v", visitor).param("s", session)
-                .param("at", time).param("src", utmSource).param("created", time.plusSeconds(1))
+                .param("at", time).param("landing", landingUrl).param("src", utmSource).param("campaign", utmCampaign)
+                .param("created", time.plusSeconds(1))
                 .update();
     }
 
@@ -385,12 +522,62 @@ class RevenueOverviewIntegrationTests {
 
     private MockHttpServletRequestBuilder movements(
             String actor, String from, String to, String movementType, String source, String currency) {
+        return movements(actor, from, to, movementType, source, false, false, null, false, null, false, currency);
+    }
+
+    private MockHttpServletRequestBuilder movements(
+            String actor,
+            String from,
+            String to,
+            String movementType,
+            String source,
+            String campaign,
+            String landingPage,
+            String currency) {
+        return movements(actor, from, to, movementType, source, false, false, campaign, false, landingPage, false, currency);
+    }
+
+    private MockHttpServletRequestBuilder movements(
+            String actor,
+            String from,
+            String to,
+            String movementType,
+            String source,
+            String campaign,
+            boolean campaignMissing,
+            String landingPage,
+            boolean landingPageMissing,
+            String currency) {
+        return movements(
+                actor, from, to, movementType, source, false, false, campaign, campaignMissing, landingPage,
+                landingPageMissing, currency);
+    }
+
+    private MockHttpServletRequestBuilder movements(
+            String actor,
+            String from,
+            String to,
+            String movementType,
+            String source,
+            boolean sourceUnattributed,
+            boolean sourceMissing,
+            String campaign,
+            boolean campaignMissing,
+            String landingPage,
+            boolean landingPageMissing,
+            String currency) {
         var request = get("/api/workspaces/{workspaceId}/projects/{projectId}/reporting/movements", workspace, project)
                 .queryParam("from", from)
                 .queryParam("to", to)
                 .with(token(actor));
         if (movementType != null) request = request.queryParam("movementType", movementType);
         if (source != null) request = request.queryParam("source", source);
+        if (sourceUnattributed) request = request.queryParam("sourceUnattributed", "true");
+        if (sourceMissing) request = request.queryParam("sourceMissing", "true");
+        if (campaign != null) request = request.queryParam("campaign", campaign);
+        if (campaignMissing) request = request.queryParam("campaignMissing", "true");
+        if (landingPage != null) request = request.queryParam("landingPage", landingPage);
+        if (landingPageMissing) request = request.queryParam("landingPageMissing", "true");
         if (currency != null) request = request.queryParam("currency", currency);
         return request;
     }
