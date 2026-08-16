@@ -122,6 +122,47 @@ class SourceComparisonIntegrationTests {
     }
 
     @Test
+    void notRecalculatedAndExplicitlyUnattributedMovementsShareOneReconciledBucket() throws Exception {
+        // A linked movement can be visible to reporting before attribution recalculation creates its
+        // result row. SQL NULL and explicit non-STRONG confidence are the same Unattributed product
+        // bucket, so they must aggregate into one comparison row and one matching evidence result.
+        movement("cus_not_recalculated", "USD", 500, "2026-04-05T00:00:00Z", "NEW");
+        link("cus_not_recalculated");
+
+        movement("cus_explicitly_unattributed", "USD", 300, "2026-04-06T00:00:00Z", "NEW");
+        link("cus_explicitly_unattributed");
+        attribution.recalculate(workspace, project, "cus_explicitly_unattributed");
+
+        mockMvc.perform(comparison(OWNER, "SOURCE", null, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath(
+                                "$.rows[?(@.dimensionValue==null && @.attributed==false && @.movementType=='NEW')].length()")
+                        .value(1))
+                .andExpect(jsonPath(
+                                "$.rows[?(@.dimensionValue==null && @.attributed==false && @.movementType=='NEW')].totalMinor")
+                        .value(800))
+                .andExpect(jsonPath(
+                                "$.rows[?(@.dimensionValue==null && @.attributed==false && @.movementType=='NEW')].customerCount")
+                        .value(2));
+
+        mockMvc.perform(get(
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/reporting/movements",
+                                workspace,
+                                project)
+                        .queryParam("from", FROM)
+                        .queryParam("to", TO)
+                        .queryParam("movementType", "NEW")
+                        .queryParam("sourceUnattributed", "true")
+                        .with(token(OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(2))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_not_recalculated"))
+                .andExpect(jsonPath("$.entries[0].amountMinor").value(500))
+                .andExpect(jsonPath("$.entries[1].stripeCustomerId").value("cus_explicitly_unattributed"))
+                .andExpect(jsonPath("$.entries[1].amountMinor").value(300));
+    }
+
+    @Test
     void keepsCurrenciesSeparateRatherThanSummingThem() throws Exception {
         acquireAndAttribute("cus_usd", "USD", 1000, "2026-04-05T00:00:00Z", "google", "spring_sale", "/a");
         acquireAndAttribute("cus_eur", "EUR", 800, "2026-04-06T00:00:00Z", "google", "spring_sale", "/a");

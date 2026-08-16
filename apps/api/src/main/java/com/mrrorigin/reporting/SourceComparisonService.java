@@ -104,7 +104,7 @@ public class SourceComparisonService {
                                 + """
                         SELECT
                           CASE WHEN r.confidence = 'STRONG' THEN r.first_source ELSE NULL END AS dim,
-                          r.confidence = 'STRONG' AS attributed,
+                          COALESCE(r.confidence = 'STRONG', FALSE) AS attributed,
                           m.currency, m.movement_type, SUM(m.amount_minor) AS total_minor, COUNT(*) AS customer_count
                         FROM customer_mrr_movements m
                         JOIN owner o ON o.customer_id = m.stripe_customer_id AND o.owning_project_id = :p
