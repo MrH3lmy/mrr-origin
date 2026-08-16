@@ -62,7 +62,11 @@ interface PivotedRow {
 function pivot(rows: ComparisonRow[]): PivotedRow[] {
   const byKey = new Map<string, PivotedRow>();
   for (const row of rows) {
-    const key = `${row.dimensionValue ?? " "}|${row.attributed}|${row.currency}`;
+    const key = JSON.stringify([
+      row.dimensionValue,
+      row.attributed,
+      row.currency,
+    ]);
     const existing = byKey.get(key) ?? {
       dimensionValue: row.dimensionValue,
       attributed: row.attributed,
@@ -291,7 +295,15 @@ export function ComparisonTable({
     );
   }
 
-  const anyUnavailable = comparison.retention.some((r) => !r.cell.available);
+  const anyUnavailable = comparison.rows.some((row) => {
+    const retention = comparison.retention.find(
+      (candidate) =>
+        candidate.dimensionValue === row.dimensionValue &&
+        candidate.attributed === row.attributed &&
+        candidate.currency === row.currency,
+    );
+    return !retention?.cell.available;
+  });
 
   return (
     <>
@@ -359,7 +371,11 @@ export function ComparisonTable({
                       canDrillDown || canDrillNoEvidenceBucket;
                     return (
                       <tr
-                        key={`${row.dimensionValue ?? "none"}-${row.attributed}-${row.currency}`}
+                        key={JSON.stringify([
+                          row.dimensionValue,
+                          row.attributed,
+                          row.currency,
+                        ])}
                       >
                         <td>
                           {row.dimensionValue === null ? (
@@ -502,9 +518,9 @@ export function ComparisonTable({
 
       {anyUnavailable ? (
         <p className={styles.unavailableNote} role="note">
-          Retained MRR / NRR shows &ldquo;Unavailable&rdquo; for a row whose
-          acquisition cohort hasn&apos;t reached {retentionAgeDays} days old yet
-          -- never a fabricated zero.
+          Retained MRR / NRR shows &ldquo;Unavailable&rdquo; when a row has no
+          acquisition cohort in the selected range or its cohort hasn&apos;t reached{" "}
+          {retentionAgeDays} days old yet -- never a fabricated zero.
         </p>
       ) : null}
     </>
