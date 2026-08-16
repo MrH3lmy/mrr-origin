@@ -51,7 +51,9 @@ export function CustomersClient({
   useEffect(() => {
     let cancelled = false;
     const client = createBrowserClient();
-    listCustomers(client, workspaceId, projectId, { search: search || undefined })
+    listCustomers(client, workspaceId, projectId, {
+      search: search || undefined,
+    })
       .then((page) => {
         if (cancelled) return;
         setEntries(page.entries);
@@ -174,7 +176,8 @@ export function CustomersClient({
                       </Link>
                       {entry.acquisitionEffectiveAt ? (
                         <p className={styles.evidenceDetail}>
-                          Customer since {formatDateTime(entry.acquisitionEffectiveAt)}
+                          Customer since{" "}
+                          {formatDateTime(entry.acquisitionEffectiveAt)}
                         </p>
                       ) : null}
                     </td>
@@ -197,12 +200,16 @@ export function CustomersClient({
                           ) : null}
                         </div>
                       ) : (
-                        <StatusBadge tone="info">Not yet calculated</StatusBadge>
+                        <StatusBadge tone="info">
+                          Not yet calculated
+                        </StatusBadge>
                       )}
                     </td>
                     <td>
                       {entry.subscriptionStatuses.length === 0 ? (
-                        <span className={styles.evidenceDetail}>No subscriptions</span>
+                        <span className={styles.evidenceDetail}>
+                          No subscriptions
+                        </span>
                       ) : (
                         <div className={styles.badgeStack}>
                           {entry.subscriptionStatuses.map((status) => (

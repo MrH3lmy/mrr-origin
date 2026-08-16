@@ -13,7 +13,9 @@ vi.mock("@/lib/api/client", () => ({ createBrowserClient: () => ({}) }));
 
 const baseProps = { workspaceId: "ws-1", projectId: "proj-1" };
 
-function entry(overrides: Partial<CustomerDirectoryEntry> = {}): CustomerDirectoryEntry {
+function entry(
+  overrides: Partial<CustomerDirectoryEntry> = {},
+): CustomerDirectoryEntry {
   return {
     stripeCustomerId: "cus_1",
     deleted: false,
@@ -57,7 +59,9 @@ describe("CustomersClient", () => {
 
     render(<CustomersClient {...baseProps} />);
 
-    expect(await screen.findByText("Could not load customers")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Could not load customers"),
+    ).toBeInTheDocument();
   });
 
   it("humanizes the unattributed reason while keeping it available for inspection", async () => {
@@ -75,13 +79,18 @@ describe("CustomersClient", () => {
     render(<CustomersClient {...baseProps} />);
 
     expect(
-      await screen.findByText("No application user is linked to this Stripe customer."),
+      await screen.findByText(
+        "No application user is linked to this Stripe customer.",
+      ),
     ).toBeInTheDocument();
   });
 
   it("searches by customer ID and refetches", async () => {
     const user = userEvent.setup();
-    listCustomers.mockResolvedValueOnce({ entries: [entry()], nextCursor: null });
+    listCustomers.mockResolvedValueOnce({
+      entries: [entry()],
+      nextCursor: null,
+    });
     listCustomers.mockResolvedValueOnce({
       entries: [entry({ stripeCustomerId: "cus_match" })],
       nextCursor: null,

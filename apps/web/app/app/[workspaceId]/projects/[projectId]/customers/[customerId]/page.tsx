@@ -8,7 +8,11 @@ import { createServerClient } from "@/lib/api/server-client";
 import { getProject } from "@/lib/api/workspaces";
 
 interface CustomerDetailPageProps {
-  params: Promise<{ workspaceId: string; projectId: string; customerId: string }>;
+  params: Promise<{
+    workspaceId: string;
+    projectId: string;
+    customerId: string;
+  }>;
 }
 
 /**
@@ -16,7 +20,9 @@ interface CustomerDetailPageProps {
  * real 404 (matching the API), not a client-rendered error -- an unknown or cross-project customer
  * ID looks identical either way.
  */
-export default async function CustomerDetailPage({ params }: CustomerDetailPageProps) {
+export default async function CustomerDetailPage({
+  params,
+}: CustomerDetailPageProps) {
   const { workspaceId, projectId, customerId } = await params;
 
   const client = await createServerClient();
@@ -31,7 +37,12 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
 
   let timeline;
   try {
-    timeline = await getCustomerTimeline(client, workspaceId, projectId, customerId);
+    timeline = await getCustomerTimeline(
+      client,
+      workspaceId,
+      projectId,
+      customerId,
+    );
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) notFound();
     throw error;
@@ -46,10 +57,22 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
         >
           ← Customers
         </Link>
-        <h1 style={{ margin: "8px 0 4px", fontSize: "1.75rem", letterSpacing: "-0.01em" }}>
+        <h1
+          style={{
+            margin: "8px 0 4px",
+            fontSize: "1.75rem",
+            letterSpacing: "-0.01em",
+          }}
+        >
           {customerId}
         </h1>
-        <p style={{ margin: 0, color: "var(--ds-text-muted)", fontSize: "0.875rem" }}>
+        <p
+          style={{
+            margin: 0,
+            color: "var(--ds-text-muted)",
+            fontSize: "0.875rem",
+          }}
+        >
           {project.name} · {project.domain}
         </p>
       </div>

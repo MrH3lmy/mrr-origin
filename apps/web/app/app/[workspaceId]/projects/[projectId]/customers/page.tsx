@@ -28,10 +28,22 @@ export default async function ProjectCustomersPage({
   return (
     <div style={{ display: "grid", gap: 24, maxWidth: 1040 }}>
       <div>
-        <h1 style={{ margin: "0 0 4px", fontSize: "1.75rem", letterSpacing: "-0.01em" }}>
+        <h1
+          style={{
+            margin: "0 0 4px",
+            fontSize: "1.75rem",
+            letterSpacing: "-0.01em",
+          }}
+        >
           Customers
         </h1>
-        <p style={{ margin: 0, color: "var(--ds-text-muted)", fontSize: "0.875rem" }}>
+        <p
+          style={{
+            margin: 0,
+            color: "var(--ds-text-muted)",
+            fontSize: "0.875rem",
+          }}
+        >
           {project.name} · {project.domain}
         </p>
       </div>

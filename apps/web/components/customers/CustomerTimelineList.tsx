@@ -1,5 +1,8 @@
 import { StatusBadge, type StatusTone } from "@/components/ui/StatusBadge";
-import type { CustomerTimelineEntry, CustomerTimelineEventType } from "@/lib/api/types";
+import type {
+  CustomerTimelineEntry,
+  CustomerTimelineEventType,
+} from "@/lib/api/types";
 import { formatDateTime } from "@/lib/format";
 import { formatMoneyMinor } from "@/lib/format-currency";
 import {
@@ -42,7 +45,10 @@ export function CustomerTimelineList({ entries }: CustomerTimelineListProps) {
   return (
     <ol className={styles.timeline} aria-label="Evidence timeline">
       {entries.map((entry) => (
-        <li className={styles.timelineItem} key={`${entry.eventType}-${entry.referenceId}`}>
+        <li
+          className={styles.timelineItem}
+          key={`${entry.eventType}-${entry.referenceId}`}
+        >
           <span className={styles.timelineDot} aria-hidden="true" />
           <div className={styles.timelineTime}>{formatDateTime(entry.at)}</div>
           <StatusBadge tone={EVENT_TYPE_TONE[entry.eventType]}>
@@ -76,7 +82,9 @@ function EntryDetail({ entry }: { entry: CustomerTimelineEntry }) {
     );
   }
   if (entry.previousStatus || entry.newStatus) {
-    parts.push(`${entry.previousStatus ?? "unknown"} → ${entry.newStatus ?? "unknown"}`);
+    parts.push(
+      `${entry.previousStatus ?? "unknown"} → ${entry.newStatus ?? "unknown"}`,
+    );
   }
   if (entry.externalUserId) {
     parts.push(`Application user: ${entry.externalUserId}`);

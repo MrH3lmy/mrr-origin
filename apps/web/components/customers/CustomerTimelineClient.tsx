@@ -42,10 +42,19 @@ export function CustomerTimelineClient({
     setError(null);
     try {
       const client = createBrowserClient();
-      const page = await getCustomerTimeline(client, workspaceId, projectId, stripeCustomerId, {
-        cursor: nextCursor,
-      });
-      setTimeline((prev) => ({ ...prev, entries: [...prev.entries, ...page.entries] }));
+      const page = await getCustomerTimeline(
+        client,
+        workspaceId,
+        projectId,
+        stripeCustomerId,
+        {
+          cursor: nextCursor,
+        },
+      );
+      setTimeline((prev) => ({
+        ...prev,
+        entries: [...prev.entries, ...page.entries],
+      }));
       setNextCursor(page.nextCursor);
     } catch (loadError) {
       setError(
@@ -91,7 +100,12 @@ export function CustomerTimelineClient({
             ) : null}
             {nextCursor ? (
               <div style={{ marginTop: 12 }}>
-                <Button variant="secondary" size="small" onClick={loadMore} loading={loadingMore}>
+                <Button
+                  variant="secondary"
+                  size="small"
+                  onClick={loadMore}
+                  loading={loadingMore}
+                >
                   Load more
                 </Button>
               </div>

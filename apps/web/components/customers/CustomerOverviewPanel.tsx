@@ -41,7 +41,9 @@ export function CustomerOverviewPanel({
   return (
     <Panel
       title="Current MRR and subscription status"
-      subtitle={detail.deleted ? "This Stripe customer has been deleted." : undefined}
+      subtitle={
+        detail.deleted ? "This Stripe customer has been deleted." : undefined
+      }
     >
       <div className={styles.metricGrid}>
         <div>
@@ -77,7 +79,10 @@ export function CustomerOverviewPanel({
       {detail.subscriptions.length > 0 ? (
         <ul className={styles.subscriptionList}>
           {detail.subscriptions.map((subscription) => (
-            <li className={styles.subscriptionRow} key={subscription.stripeSubscriptionId}>
+            <li
+              className={styles.subscriptionRow}
+              key={subscription.stripeSubscriptionId}
+            >
               <div>
                 <strong>{subscription.stripeSubscriptionId}</strong>
                 <p className={styles.subscriptionMeta}>
@@ -85,7 +90,9 @@ export function CustomerOverviewPanel({
                   {subscription.currentPeriodEnd
                     ? ` · renews ${formatDateTime(subscription.currentPeriodEnd)}`
                     : ""}
-                  {subscription.cancelAtPeriodEnd ? " · cancels at period end" : ""}
+                  {subscription.cancelAtPeriodEnd
+                    ? " · cancels at period end"
+                    : ""}
                   {subscription.trialEnd
                     ? ` · trial ends ${formatDateTime(subscription.trialEnd)}`
                     : ""}
@@ -111,9 +118,9 @@ export function CustomerOverviewPanel({
               {acquisition.unattributedReason ? (
                 <>
                   {" — "}
-                  {ATTRIBUTION_EXCLUSION_REASON_COPY[acquisition.unattributedReason] ??
-                    acquisition.unattributedReason}
-                  {" "}
+                  {ATTRIBUTION_EXCLUSION_REASON_COPY[
+                    acquisition.unattributedReason
+                  ] ?? acquisition.unattributedReason}{" "}
                   <code>({acquisition.unattributedReason})</code>
                 </>
               ) : null}
@@ -255,26 +262,53 @@ function RepairSection({
   }
 
   return (
-    <form className={styles.repairForm} onSubmit={submit} aria-label="Repair identity link">
+    <form
+      className={styles.repairForm}
+      onSubmit={submit}
+      aria-label="Repair identity link"
+    >
       <div className={styles.repairField}>
         <Field
-          label={detail.activeLink ? "Correct the linked application user ID" : "Link to an application user ID"}
+          label={
+            detail.activeLink
+              ? "Correct the linked application user ID"
+              : "Link to an application user ID"
+          }
           hint="The externalUserId passed to identify() by your tracker."
           value={externalUserId}
           onChange={(event) => setExternalUserId(event.target.value)}
           placeholder="user_123"
         />
       </div>
-      <Button type="submit" variant="primary" loading={submitting} disabled={!externalUserId.trim()}>
+      <Button
+        type="submit"
+        variant="primary"
+        loading={submitting}
+        disabled={!externalUserId.trim()}
+      >
         {detail.activeLink ? "Correct link" : "Link customer"}
       </Button>
       {error ? (
-        <p role="alert" style={{ color: "var(--ds-danger)", fontSize: "0.8125rem", width: "100%" }}>
+        <p
+          role="alert"
+          style={{
+            color: "var(--ds-danger)",
+            fontSize: "0.8125rem",
+            width: "100%",
+          }}
+        >
           {error}
         </p>
       ) : null}
       {success ? (
-        <p role="status" style={{ color: "var(--ds-positive)", fontSize: "0.8125rem", width: "100%" }}>
+        <p
+          role="status"
+          style={{
+            color: "var(--ds-positive)",
+            fontSize: "0.8125rem",
+            width: "100%",
+          }}
+        >
           {success}
         </p>
       ) : null}

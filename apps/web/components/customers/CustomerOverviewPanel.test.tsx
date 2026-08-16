@@ -11,7 +11,10 @@ const { getCustomerTimeline, repairCustomerLink } = vi.hoisted(() => ({
   repairCustomerLink: vi.fn(),
 }));
 
-vi.mock("@/lib/api/customers", () => ({ getCustomerTimeline, repairCustomerLink }));
+vi.mock("@/lib/api/customers", () => ({
+  getCustomerTimeline,
+  repairCustomerLink,
+}));
 vi.mock("@/lib/api/client", () => ({ createBrowserClient: () => ({}) }));
 
 function detail(overrides: Partial<CustomerDetail> = {}): CustomerDetail {
@@ -80,7 +83,11 @@ describe("CustomerOverviewPanel", () => {
 
   it("shows current MRR, acquisition status, and subscription status", () => {
     render(
-      <CustomerOverviewPanel {...baseProps} detail={detail()} onRepaired={vi.fn()} />,
+      <CustomerOverviewPanel
+        {...baseProps}
+        detail={detail()}
+        onRepaired={vi.fn()}
+      />,
     );
 
     expect(screen.getByText("$15")).toBeInTheDocument();
@@ -138,7 +145,11 @@ describe("CustomerOverviewPanel", () => {
     getCustomerTimeline.mockResolvedValue(refreshedTimeline);
 
     render(
-      <CustomerOverviewPanel {...baseProps} detail={detail()} onRepaired={onRepaired} />,
+      <CustomerOverviewPanel
+        {...baseProps}
+        detail={detail()}
+        onRepaired={onRepaired}
+      />,
     );
 
     await user.type(
@@ -148,7 +159,13 @@ describe("CustomerOverviewPanel", () => {
     await user.click(screen.getByRole("button", { name: "Correct link" }));
 
     expect(await screen.findByText("Linked to user_2.")).toBeInTheDocument();
-    expect(repairCustomerLink).toHaveBeenCalledWith({}, "ws-1", "proj-1", "user_2", "cus_1");
+    expect(repairCustomerLink).toHaveBeenCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      "user_2",
+      "cus_1",
+    );
     expect(onRepaired).toHaveBeenCalledWith(refreshedTimeline);
   });
 
@@ -156,15 +173,24 @@ describe("CustomerOverviewPanel", () => {
     render(
       <CustomerOverviewPanel
         {...baseProps}
-        detail={detail({ repairCapability: { canRepair: false, reason: "WORKSPACE_ROLE_INSUFFICIENT" } })}
+        detail={detail({
+          repairCapability: {
+            canRepair: false,
+            reason: "WORKSPACE_ROLE_INSUFFICIENT",
+          },
+        })}
         onRepaired={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("Repair requires manager permission.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Repair requires manager permission."),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /Correct link|Link customer/ }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/application user ID/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/application user ID/),
+    ).not.toBeInTheDocument();
   });
 });

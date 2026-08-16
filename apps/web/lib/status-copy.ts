@@ -121,12 +121,16 @@ export const MOVEMENT_TYPE_LABEL: Record<MrrMovementType, string> = {
 };
 
 /** #24: humanized reason copy for the customer timeline's acquisition summary. */
-export const ACQUISITION_STATUS_COPY: Record<CustomerAcquisitionStatus, StatusCopy> = {
+export const ACQUISITION_STATUS_COPY: Record<
+  CustomerAcquisitionStatus,
+  StatusCopy
+> = {
   STRONG: {
     tone: "positive",
     label: "Attributed",
     headline: "This customer's acquisition source is strongly attributed.",
-    detail: "A tracked visitor was explicitly identified and linked to this Stripe customer.",
+    detail:
+      "A tracked visitor was explicitly identified and linked to this Stripe customer.",
   },
   UNATTRIBUTED: {
     tone: "neutral",
@@ -137,7 +141,8 @@ export const ACQUISITION_STATUS_COPY: Record<CustomerAcquisitionStatus, StatusCo
   NOT_RECALCULATED: {
     tone: "info",
     label: "Not yet calculated",
-    headline: "Attribution has not been recalculated for the current model yet.",
+    headline:
+      "Attribution has not been recalculated for the current model yet.",
     detail: "This is an operational gap, not a negative result.",
   },
   NO_ACQUISITION_MOVEMENT: {
@@ -148,7 +153,10 @@ export const ACQUISITION_STATUS_COPY: Record<CustomerAcquisitionStatus, StatusCo
   },
 };
 
-export const SUBSCRIPTION_STATUS_LABEL: Record<BillingSubscriptionStatus, string> = {
+export const SUBSCRIPTION_STATUS_LABEL: Record<
+  BillingSubscriptionStatus,
+  string
+> = {
   incomplete: "Incomplete",
   incomplete_expired: "Incomplete (expired)",
   trialing: "Trialing",
@@ -159,7 +167,10 @@ export const SUBSCRIPTION_STATUS_LABEL: Record<BillingSubscriptionStatus, string
   paused: "Paused",
 };
 
-export const SUBSCRIPTION_STATUS_TONE: Record<BillingSubscriptionStatus, StatusTone> = {
+export const SUBSCRIPTION_STATUS_TONE: Record<
+  BillingSubscriptionStatus,
+  StatusTone
+> = {
   incomplete: "neutral",
   incomplete_expired: "danger",
   trialing: "info",
