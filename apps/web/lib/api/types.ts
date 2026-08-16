@@ -242,6 +242,12 @@ export interface ComparisonRow {
   customerCount: number;
 }
 
+/** Names a metric that is unavailable for at least one comparison row, and why. */
+export interface UnavailableMetric {
+  metric: "RETAINED_MRR" | "NRR";
+  reason: string;
+}
+
 export interface SourceComparison {
   workspaceId: string;
   projectId: string;
@@ -258,6 +264,8 @@ export interface SourceComparison {
   retentionAgeDays: RetentionAgeDays;
   /** #25's authoritative Retained MRR / NRR, one row per (dimensionValue, attributed, currency). */
   retention: RetentionSummaryRow[];
+  /** Empty only when every comparison row has authoritative Retained MRR and NRR. */
+  unavailableMetrics: UnavailableMetric[];
 }
 
 // -- 30/60/90-day retained-MRR cohorts (#25) --
