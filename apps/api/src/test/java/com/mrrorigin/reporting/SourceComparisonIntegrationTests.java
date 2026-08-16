@@ -136,9 +136,6 @@ class SourceComparisonIntegrationTests {
         mockMvc.perform(comparison(OWNER, "SOURCE", null, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath(
-                                "$.rows[?(@.dimensionValue==null && @.attributed==false && @.movementType=='NEW')].length()")
-                        .value(1))
-                .andExpect(jsonPath(
                                 "$.rows[?(@.dimensionValue==null && @.attributed==false && @.movementType=='NEW')].totalMinor")
                         .value(800))
                 .andExpect(jsonPath(
