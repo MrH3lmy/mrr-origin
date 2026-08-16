@@ -129,8 +129,8 @@ public class RetentionCohortService {
                 .filter(m -> !m.acquiredAt().isBefore(from) && m.acquiredAt().isBefore(to))
                 .toList();
         if (members.isEmpty()) return List.of();
-        Map<String, List<Member>> groups = members.stream()
-                .collect(Collectors.groupingBy(m -> groupingKey(m.dimensionValue(), m.attributed(), m.currency())));
+        Map<SummaryKey, List<Member>> groups = members.stream()
+                .collect(Collectors.groupingBy(m -> new SummaryKey(m.dimensionValue(), m.attributed(), m.currency())));
         Map<String, List<Movement>> movements = movementsByMember(workspaceId, projectId);
         OffsetDateTime now = OffsetDateTime.now(clock);
 
@@ -281,10 +281,6 @@ public class RetentionCohortService {
         return OffsetDateTime.of(utc.getYear(), utc.getMonthValue(), 1, 0, 0, 0, 0, ZoneOffset.UTC);
     }
 
-    private static String groupingKey(String dimensionValue, boolean attributed, String currency) {
-        return (dimensionValue == null ? "" : dimensionValue) + " " + attributed + " " + currency;
-    }
-
     private static void validateDimension(Dimension dimension, String source, String campaign, boolean campaignMissing) {
         if (campaign != null && campaignMissing) {
             throw new IllegalArgumentException("campaign and campaignMissing are mutually exclusive");
@@ -348,6 +344,9 @@ public class RetentionCohortService {
     private record Movement(String customerId, String currency, String type, long amountMinor, OffsetDateTime effectiveAt) {}
 
     private record CohortKey(String dimensionValue, boolean attributed, String currency, OffsetDateTime periodStart) {}
+
+    /** Collision-free summary grouping key: null bucket modes never share a string namespace with real values. */
+    private record SummaryKey(String dimensionValue, boolean attributed, String currency) {}
 
     /**
      * One acquisition-month cohort cell. {@code dimensionValue}/{@code attributed} follow the same
