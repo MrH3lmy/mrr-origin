@@ -34,6 +34,7 @@ function comparison(
     rows,
     retentionAgeDays: 30,
     retention,
+    unavailableMetrics: [],
   };
 }
 
@@ -150,6 +151,36 @@ describe("ComparisonTable", () => {
 
     expect(await screen.findByText("No source captured")).toBeInTheDocument();
     expect(screen.getByText("Unattributed")).toBeInTheDocument();
+    expect(screen.getByText("$7")).toBeInTheDocument();
+    expect(screen.getByText("$3")).toBeInTheDocument();
+  });
+
+  it("keeps a literal dimension value distinct from the missing-value bucket", async () => {
+    getSourceComparison.mockResolvedValue(
+      comparison([
+        {
+          dimensionValue: " ",
+          attributed: true,
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 700,
+          customerCount: 1,
+        },
+        {
+          dimensionValue: null,
+          attributed: true,
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 300,
+          customerCount: 1,
+        },
+      ]),
+    );
+
+    render(<ComparisonTable {...baseProps} />);
+
+    await screen.findByText("No source captured");
+    expect(screen.getAllByRole("row")).toHaveLength(3);
     expect(screen.getByText("$7")).toBeInTheDocument();
     expect(screen.getByText("$3")).toBeInTheDocument();
   });
