@@ -89,12 +89,36 @@ class SourceComparisonIntegrationTests {
         mockMvc.perform(comparison(OWNER, "SOURCE", null, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue=='google' && @.movementType=='NEW')].totalMinor").value(1000))
+                .andExpect(jsonPath("$.rows[?(@.dimensionValue=='google' && @.movementType=='NEW')].attributed").value(true))
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue=='google' && @.movementType=='CHURN')].totalMinor").value(1000))
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue=='bing' && @.movementType=='NEW')].totalMinor").value(500))
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue==null && @.movementType=='NEW')].totalMinor").value(300))
+                .andExpect(jsonPath("$.rows[?(@.dimensionValue==null && @.movementType=='NEW')].attributed").value(false))
                 .andExpect(jsonPath("$.unavailableMetrics.length()").value(2))
                 .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='RETAINED_MRR')]").exists())
                 .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='NRR')]").exists());
+    }
+
+    @Test
+    void distinguishesAttributedMovementsWithNoSourceCapturedFromGenuinelyUnattributedMovements() throws Exception {
+        // Regression: a movement can be STRONG (real customer-link + touchpoint evidence) yet have no
+        // utm_source at all (e.g. a direct visit). That row must never merge with, or be indistinguishable
+        // from, a movement with no acquisition evidence whatsoever -- both previously grouped into the
+        // same dimensionValue==null bucket. attributed now tells them apart.
+        acquireAndAttribute("cus_no_source_captured", "USD", 600, "2026-04-05T00:00:00Z", null, null, "/direct");
+
+        movement("cus_unattributed_2", "USD", 300, "2026-04-06T00:00:00Z", "NEW");
+        link("cus_unattributed_2");
+        attribution.recalculate(workspace, project, "cus_unattributed_2");
+
+        mockMvc.perform(comparison(OWNER, "SOURCE", null, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[?(@.attributed==true && @.movementType=='NEW')].totalMinor").value(600))
+                .andExpect(jsonPath("$.rows[?(@.attributed==true && @.movementType=='NEW')].customerCount").value(1))
+                .andExpect(jsonPath("$.rows[?(@.attributed==false && @.movementType=='NEW')].totalMinor").value(300))
+                .andExpect(jsonPath("$.rows[?(@.attributed==false && @.movementType=='NEW')].customerCount").value(1))
+                // Both rows have dimensionValue==null, but there are two of them, not one merged row.
+                .andExpect(jsonPath("$.rows.length()").value(2));
     }
 
     @Test

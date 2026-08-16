@@ -27,7 +27,12 @@ export function getRevenueOverview(
 
 export interface ListMovementsOptions {
   movementType?: MrrMovementType;
+  /** A real source value. Mutually exclusive with `sourceUnattributed` and `sourceMissing`. */
   source?: string;
+  /** Selects movements with no acquisition evidence at all. Mutually exclusive with `source`/`sourceMissing`. */
+  sourceUnattributed?: boolean;
+  /** Selects strongly-attributed movements whose touchpoint captured no source (e.g. direct traffic). Mutually exclusive with `source`/`sourceUnattributed`. */
+  sourceMissing?: boolean;
   /** Requires `source`. Mutually exclusive with `campaignMissing`. */
   campaign?: string;
   /** Selects the "no campaign captured" bucket explicitly. Mutually exclusive with `campaign`. */
@@ -53,6 +58,8 @@ export function listMrrMovements(
   const params = new URLSearchParams({ from, to });
   if (options.movementType) params.set("movementType", options.movementType);
   if (options.source) params.set("source", options.source);
+  if (options.sourceUnattributed) params.set("sourceUnattributed", "true");
+  if (options.sourceMissing) params.set("sourceMissing", "true");
   if (options.campaign) params.set("campaign", options.campaign);
   if (options.campaignMissing) params.set("campaignMissing", "true");
   if (options.landingPage) params.set("landingPage", options.landingPage);

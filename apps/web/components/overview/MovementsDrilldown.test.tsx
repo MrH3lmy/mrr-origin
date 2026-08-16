@@ -225,4 +225,66 @@ describe("MovementsDrilldown", () => {
     expect(screen.getByText("NONE")).toBeInTheDocument();
     expect(screen.queryByText("No campaign")).not.toBeInTheDocument();
   });
+
+  it("distinguishes a real source literally named 'UNATTRIBUTED' from the Unattributed bucket", async () => {
+    // Regression: source filtering used to encode "genuinely unattributed" as the sentinel string
+    // "UNATTRIBUTED" inside the source value itself, colliding with any real utm_source named
+    // "UNATTRIBUTED". sourceUnattributed is now a separate boolean.
+    listMrrMovements.mockResolvedValue({ entries: [entry], nextCursor: null });
+
+    render(<MovementsDrilldown {...baseProps} source="UNATTRIBUTED" />);
+
+    await screen.findByText("cus_1");
+
+    expect(listMrrMovements).toHaveBeenCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      expect.objectContaining({
+        source: "UNATTRIBUTED",
+        sourceUnattributed: undefined,
+      }),
+    );
+    // Two filter chips would appear if the literal source were also being read as the sentinel.
+    expect(screen.getAllByText("UNATTRIBUTED")).toHaveLength(1);
+  });
+
+  it("passes sourceUnattributed and sourceMissing as explicit booleans and shows the right chip", async () => {
+    listMrrMovements.mockResolvedValue({ entries: [entry], nextCursor: null });
+
+    const { rerender } = render(
+      <MovementsDrilldown {...baseProps} source={null} sourceUnattributed />,
+    );
+    await screen.findByText("cus_1");
+    expect(listMrrMovements).toHaveBeenLastCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      expect.objectContaining({ source: undefined, sourceUnattributed: true }),
+    );
+    expect(screen.getByText("Unattributed")).toBeInTheDocument();
+
+    rerender(
+      <MovementsDrilldown
+        {...baseProps}
+        source={null}
+        sourceUnattributed={false}
+        sourceMissing
+      />,
+    );
+    await screen.findByText("cus_1");
+    expect(listMrrMovements).toHaveBeenLastCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      expect.objectContaining({ source: undefined, sourceMissing: true }),
+    );
+    expect(screen.getByText("No source captured")).toBeInTheDocument();
+  });
 });

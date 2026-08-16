@@ -20,6 +20,9 @@ import styles from "./Sources.module.css";
 
 export interface MetricSelection {
   dimensionValue: string | null;
+  /** Only meaningful when dimensionValue is null: distinguishes the Unattributed bucket (false) from
+   * the strongly-attributed-but-no-value-captured bucket (true). See `ComparisonRow.attributed`. */
+  attributed: boolean;
   movementType: "NEW" | "CHURN";
   currency: string;
 }
@@ -44,6 +47,9 @@ interface ComparisonTableProps {
 
 interface PivotedRow {
   dimensionValue: string | null;
+  /** See `ComparisonRow.attributed`. Part of the grouping key so the Unattributed bucket and the
+   * no-value-captured bucket (both dimensionValue: null) never merge into one row. */
+  attributed: boolean;
   currency: string;
   newTotalMinor: number;
   newCustomerCount: number;
@@ -54,9 +60,10 @@ interface PivotedRow {
 function pivot(rows: ComparisonRow[]): PivotedRow[] {
   const byKey = new Map<string, PivotedRow>();
   for (const row of rows) {
-    const key = `${row.dimensionValue ?? " "}|${row.currency}`;
+    const key = `${row.dimensionValue ?? " "}|${row.attributed}|${row.currency}`;
     const existing = byKey.get(key) ?? {
       dimensionValue: row.dimensionValue,
+      attributed: row.attributed,
       currency: row.currency,
       newTotalMinor: 0,
       newCustomerCount: 0,
@@ -99,7 +106,13 @@ function sortRows(
       primary = a.newCustomerCount - b.newCustomerCount;
     }
     if (primary !== 0) return primary * factor;
-    return (a.dimensionValue ?? "").localeCompare(b.dimensionValue ?? "");
+    const byDimension = (a.dimensionValue ?? "").localeCompare(
+      b.dimensionValue ?? "",
+    );
+    if (byDimension !== 0) return byDimension;
+    // Tiebreaker for the two distinct dimensionValue===null buckets (Unattributed vs. no-value-
+    // captured): without this, their relative order would be undefined.
+    return Number(a.attributed) - Number(b.attributed);
   });
 }
 
@@ -114,10 +127,19 @@ function dimensionLabel(dimension: ComparisonDimension): string {
   }
 }
 
-function noEvidenceLabel(dimension: ComparisonDimension): string {
+/**
+ * Label for a dimensionValue===null row. At SOURCE, `attributed` distinguishes two different
+ * buckets: `false` is genuinely no evidence (Unattributed); `true` is real customer-link/touchpoint
+ * evidence with no source string captured (e.g. direct traffic). CAMPAIGN/LANDING_PAGE rows are
+ * always attributed, so their null bucket only ever means "this field wasn't captured."
+ */
+function noEvidenceLabel(
+  dimension: ComparisonDimension,
+  attributed: boolean,
+): string {
   switch (dimension) {
     case "SOURCE":
-      return "Unattributed";
+      return attributed ? "No source captured" : "Unattributed";
     case "CAMPAIGN":
       return "No campaign captured";
     case "LANDING_PAGE":
@@ -306,13 +328,13 @@ export function ComparisonTable({
                       canDrillDown || canDrillNoEvidenceBucket;
                     return (
                       <tr
-                        key={`${row.dimensionValue ?? "none"}-${row.currency}`}
+                        key={`${row.dimensionValue ?? "none"}-${row.attributed}-${row.currency}`}
                       >
                         <td>
                           {row.dimensionValue === null ? (
                             dimension === "SOURCE" ? (
                               <StatusBadge tone="neutral">
-                                {noEvidenceLabel(dimension)}
+                                {noEvidenceLabel(dimension, row.attributed)}
                               </StatusBadge>
                             ) : isDrillable ? (
                               <button
@@ -320,10 +342,10 @@ export function ComparisonTable({
                                 className={styles.dimensionButton}
                                 onClick={() => onDrillDown(null)}
                               >
-                                {noEvidenceLabel(dimension)}
+                                {noEvidenceLabel(dimension, row.attributed)}
                               </button>
                             ) : (
-                              noEvidenceLabel(dimension)
+                              noEvidenceLabel(dimension, row.attributed)
                             )
                           ) : isDrillable ? (
                             <button
@@ -344,12 +366,14 @@ export function ComparisonTable({
                             aria-pressed={
                               selectedMetric?.dimensionValue ===
                                 row.dimensionValue &&
+                              selectedMetric?.attributed === row.attributed &&
                               selectedMetric?.movementType === "NEW" &&
                               selectedMetric?.currency === row.currency
                             }
                             onClick={() =>
                               onSelectMetric({
                                 dimensionValue: row.dimensionValue,
+                                attributed: row.attributed,
                                 movementType: "NEW",
                                 currency: row.currency,
                               })
@@ -366,12 +390,14 @@ export function ComparisonTable({
                             aria-pressed={
                               selectedMetric?.dimensionValue ===
                                 row.dimensionValue &&
+                              selectedMetric?.attributed === row.attributed &&
                               selectedMetric?.movementType === "CHURN" &&
                               selectedMetric?.currency === row.currency
                             }
                             onClick={() =>
                               onSelectMetric({
                                 dimensionValue: row.dimensionValue,
+                                attributed: row.attributed,
                                 movementType: "CHURN",
                                 currency: row.currency,
                               })

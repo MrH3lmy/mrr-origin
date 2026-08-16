@@ -104,6 +104,7 @@ public class SourceComparisonService {
                                 + """
                         SELECT
                           CASE WHEN r.confidence = 'STRONG' THEN r.first_source ELSE NULL END AS dim,
+                          r.confidence = 'STRONG' AS attributed,
                           m.currency, m.movement_type, SUM(m.amount_minor) AS total_minor, COUNT(*) AS customer_count
                         FROM customer_mrr_movements m
                         JOIN owner o ON o.customer_id = m.stripe_customer_id AND o.owning_project_id = :p
@@ -113,8 +114,8 @@ public class SourceComparisonService {
                         WHERE m.workspace_id = :w AND m.calculation_version = :cv
                           AND m.movement_type IN (:types)
                           AND m.effective_at >= :from AND m.effective_at < :to
-                        GROUP BY dim, m.currency, m.movement_type
-                        ORDER BY total_minor DESC, dim ASC NULLS LAST, m.currency, m.movement_type
+                        GROUP BY dim, attributed, m.currency, m.movement_type
+                        ORDER BY total_minor DESC, dim ASC NULLS LAST, attributed, m.currency, m.movement_type
                         """)
                 .param("w", w)
                 .param("p", p)
@@ -132,7 +133,7 @@ public class SourceComparisonService {
                         "WITH " + OWNER_CTE
                                 + """
                         SELECT
-                          r.first_campaign AS dim,
+                          r.first_campaign AS dim, TRUE AS attributed,
                           m.currency, m.movement_type, SUM(m.amount_minor) AS total_minor, COUNT(*) AS customer_count
                         FROM customer_mrr_movements m
                         JOIN owner o ON o.customer_id = m.stripe_customer_id AND o.owning_project_id = :p
@@ -165,7 +166,7 @@ public class SourceComparisonService {
                         "WITH " + OWNER_CTE
                                 + """
                         SELECT
-                          r.first_landing_page AS dim,
+                          r.first_landing_page AS dim, TRUE AS attributed,
                           m.currency, m.movement_type, SUM(m.amount_minor) AS total_minor, COUNT(*) AS customer_count
                         FROM customer_mrr_movements m
                         JOIN owner o ON o.customer_id = m.stripe_customer_id AND o.owning_project_id = :p
@@ -198,6 +199,7 @@ public class SourceComparisonService {
     private static ComparisonRow row(ResultSet rs, int n) throws SQLException {
         return new ComparisonRow(
                 rs.getString("dim"),
+                rs.getBoolean("attributed"),
                 rs.getString("currency"),
                 rs.getString("movement_type"),
                 rs.getLong("total_minor"),
@@ -214,14 +216,31 @@ public class SourceComparisonService {
     }
 
     /**
-     * One aggregated cell of the comparison table. {@code dimensionValue} is null when the row is the
-     * "no evidence at this level" bucket: at {@link Dimension#SOURCE} that means Unattributed; at
-     * {@link Dimension#CAMPAIGN}/{@link Dimension#LANDING_PAGE} it means the parent touch was strongly
-     * attributed but this specific UTM field was not captured. {@code movementType} is {@code NEW} or
-     * {@code CHURN}.
+     * One aggregated cell of the comparison table. {@code dimensionValue} is null when the row is a
+     * "no value at this level" bucket -- which is exactly one of two distinct cases, told apart by
+     * {@code attributed} so a client can never conflate "no evidence at all" with "evidence exists,
+     * this specific field just wasn't captured":
+     *
+     * <ul>
+     *   <li>{@code attributed = false} (only possible at {@link Dimension#SOURCE}): the movement has
+     *       no acceptable acquisition evidence at all (not {@code STRONG}) -- the Unattributed bucket.
+     *   <li>{@code attributed = true}: the movement is strongly attributed (real customer-link and
+     *       touchpoint evidence exists), but this specific field was not captured on that touchpoint
+     *       -- e.g. a direct visit with no {@code utm_source}, or a touchpoint with no {@code
+     *       utm_campaign}/landing-page UTM tagging. {@link Dimension#CAMPAIGN}/{@link
+     *       Dimension#LANDING_PAGE} rows are always {@code attributed = true}: those two levels only
+     *       ever compare within an already {@code STRONG}-attributed parent source.
+     * </ul>
+     *
+     * {@code movementType} is {@code NEW} or {@code CHURN}.
      */
     public record ComparisonRow(
-            String dimensionValue, String currency, String movementType, long totalMinor, long customerCount) {}
+            String dimensionValue,
+            boolean attributed,
+            String currency,
+            String movementType,
+            long totalMinor,
+            long customerCount) {}
 
     /** Names a product metric this comparison does not compute yet, and why, so a client can never mistake absence for a measured zero. */
     public record UnavailableMetric(String metric, String reason) {}

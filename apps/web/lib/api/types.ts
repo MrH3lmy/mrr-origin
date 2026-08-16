@@ -221,13 +221,21 @@ export interface MrrMovementsPage {
 export type ComparisonDimension = "SOURCE" | "CAMPAIGN" | "LANDING_PAGE";
 
 /**
- * One aggregated cell of the comparison table. `dimensionValue` is null when the row is the "no
- * evidence at this level" bucket: at SOURCE that means Unattributed; at CAMPAIGN/LANDING_PAGE it
- * means the parent touch was strongly attributed but this specific UTM field was not captured.
+ * One aggregated cell of the comparison table. `dimensionValue` is null for exactly one of two
+ * distinct "no value at this level" cases, told apart by `attributed` so a real value can never be
+ * conflated with a bucket that has none:
+ *
+ * - `attributed: false` (SOURCE only): no acceptable acquisition evidence at all -- Unattributed.
+ * - `attributed: true`: strongly attributed (real customer-link + touchpoint evidence exists), but
+ *   this specific field wasn't captured on that touchpoint (e.g. a direct visit with no
+ *   `utm_source`). CAMPAIGN/LANDING_PAGE rows are always `attributed: true` -- those levels only
+ *   ever compare within an already strongly-attributed parent source.
+ *
  * `movementType` is "NEW" or "CHURN" -- #23 does not report expansion/contraction/reactivation.
  */
 export interface ComparisonRow {
   dimensionValue: string | null;
+  attributed: boolean;
   currency: string;
   movementType: "NEW" | "CHURN";
   totalMinor: number;

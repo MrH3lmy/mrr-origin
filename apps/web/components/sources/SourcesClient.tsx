@@ -87,6 +87,7 @@ export function SourcesClient({
   function selectMetric(selection: MetricSelection) {
     setSelectedMetric((current) =>
       current?.dimensionValue === selection.dimensionValue &&
+      current?.attributed === selection.attributed &&
       current?.movementType === selection.movementType &&
       current?.currency === selection.currency
         ? null
@@ -105,10 +106,14 @@ export function SourcesClient({
     if (selectedMetric) {
       if (dimension === "SOURCE") {
         return {
-          source:
-            selectedMetric.dimensionValue === null
-              ? "UNATTRIBUTED"
-              : selectedMetric.dimensionValue,
+          source: selectedMetric.dimensionValue,
+          // Two distinct null-source buckets, each an explicit boolean rather than a sentinel value
+          // in `source`, so a real source string can never collide with either.
+          sourceUnattributed:
+            selectedMetric.dimensionValue === null &&
+            !selectedMetric.attributed,
+          sourceMissing:
+            selectedMetric.dimensionValue === null && selectedMetric.attributed,
           campaign: null,
           campaignMissing: false,
           landingPage: null,
@@ -118,6 +123,8 @@ export function SourcesClient({
       if (dimension === "CAMPAIGN") {
         return {
           source: path.source,
+          sourceUnattributed: false,
+          sourceMissing: false,
           campaign: selectedMetric.dimensionValue,
           campaignMissing: selectedMetric.dimensionValue === null,
           landingPage: null,
@@ -126,6 +133,8 @@ export function SourcesClient({
       }
       return {
         source: path.source,
+        sourceUnattributed: false,
+        sourceMissing: false,
         campaign: path.campaign,
         campaignMissing: path.campaignMissing,
         landingPage: selectedMetric.dimensionValue,
@@ -135,6 +144,8 @@ export function SourcesClient({
     if (path.source === null) return null;
     return {
       source: path.source,
+      sourceUnattributed: false,
+      sourceMissing: false,
       campaign: path.campaign,
       campaignMissing: path.campaignMissing,
       landingPage: null,
@@ -218,6 +229,8 @@ export function SourcesClient({
         to={to}
         movementType={selectedMetric?.movementType ?? null}
         source={evidence?.source ?? null}
+        sourceUnattributed={evidence?.sourceUnattributed ?? false}
+        sourceMissing={evidence?.sourceMissing ?? false}
         campaign={evidence?.campaign ?? null}
         campaignMissing={evidence?.campaignMissing ?? false}
         landingPage={evidence?.landingPage ?? null}

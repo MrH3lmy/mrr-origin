@@ -56,6 +56,7 @@ describe("ComparisonTable", () => {
       comparison([
         {
           dimensionValue: "google",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 1000,
@@ -96,6 +97,7 @@ describe("ComparisonTable", () => {
       comparison([
         {
           dimensionValue: null,
+          attributed: false,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 500,
@@ -114,11 +116,45 @@ describe("ComparisonTable", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows the no-source-captured bucket as distinct from the Unattributed bucket, both present at once", async () => {
+    // Regression: a strongly-attributed movement with no utm_source captured (e.g. direct traffic)
+    // must never merge with, or be confused for, a genuinely unattributed movement -- both previously
+    // shared the same null dimensionValue with no way to tell them apart.
+    getSourceComparison.mockResolvedValue(
+      comparison([
+        {
+          dimensionValue: null,
+          attributed: true,
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 700,
+          customerCount: 1,
+        },
+        {
+          dimensionValue: null,
+          attributed: false,
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 300,
+          customerCount: 1,
+        },
+      ]),
+    );
+
+    render(<ComparisonTable {...baseProps} />);
+
+    expect(await screen.findByText("No source captured")).toBeInTheDocument();
+    expect(screen.getByText("Unattributed")).toBeInTheDocument();
+    expect(screen.getByText("$7")).toBeInTheDocument();
+    expect(screen.getByText("$3")).toBeInTheDocument();
+  });
+
   it("always renders Retained MRR and NRR as an explicit unavailable state, never a number", async () => {
     getSourceComparison.mockResolvedValue(
       comparison([
         {
           dimensionValue: "google",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 1000,
@@ -141,6 +177,7 @@ describe("ComparisonTable", () => {
       comparison([
         {
           dimensionValue: "google",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 1000,
@@ -163,6 +200,7 @@ describe("ComparisonTable", () => {
       comparison([
         {
           dimensionValue: "google",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 1000,
@@ -177,6 +215,7 @@ describe("ComparisonTable", () => {
     await user.click(amount);
     expect(onSelectMetric).toHaveBeenCalledWith({
       dimensionValue: "google",
+      attributed: true,
       movementType: "NEW",
       currency: "USD",
     });
@@ -188,6 +227,7 @@ describe("ComparisonTable", () => {
       comparison([
         {
           dimensionValue: "small",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 500,
@@ -195,6 +235,7 @@ describe("ComparisonTable", () => {
         },
         {
           dimensionValue: "big",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 2000,
@@ -223,6 +264,7 @@ describe("ComparisonTable", () => {
       comparison([
         {
           dimensionValue: "google",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 1000,
@@ -230,6 +272,7 @@ describe("ComparisonTable", () => {
         },
         {
           dimensionValue: "google",
+          attributed: true,
           currency: "EUR",
           movementType: "NEW",
           totalMinor: 800,
@@ -250,6 +293,7 @@ describe("ComparisonTable", () => {
       comparison([
         {
           dimensionValue: "/landing-a",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 500,

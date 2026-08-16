@@ -67,6 +67,8 @@ public class RevenueOverviewController {
             @RequestParam OffsetDateTime to,
             @RequestParam(required = false) String movementType,
             @RequestParam(required = false) String source,
+            @RequestParam(required = false, defaultValue = "false") boolean sourceUnattributed,
+            @RequestParam(required = false, defaultValue = "false") boolean sourceMissing,
             @RequestParam(required = false) String campaign,
             @RequestParam(required = false, defaultValue = "false") boolean campaignMissing,
             @RequestParam(required = false) String landingPage,
@@ -76,8 +78,8 @@ public class RevenueOverviewController {
             @RequestParam(required = false) @Min(1) @Max(RevenueMovementsService.MAX_LIMIT) Integer limit) {
         workspaceContext.requireMembership(workspaceId);
         return MovementsPageResponse.from(movementsService.list(
-                workspaceId, projectId, from, to, movementType, source, campaign, campaignMissing, landingPage,
-                landingPageMissing, currency, cursor, limit));
+                workspaceId, projectId, from, to, movementType, source, sourceUnattributed, sourceMissing, campaign,
+                campaignMissing, landingPage, landingPageMissing, currency, cursor, limit));
     }
 
     @GetMapping("/comparison")

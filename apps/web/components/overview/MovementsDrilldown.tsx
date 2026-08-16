@@ -26,7 +26,12 @@ interface MovementsDrilldownProps {
   from: string;
   to: string;
   movementType: MrrMovementType | null;
+  /** A real source value. Mutually exclusive with `sourceUnattributed`/`sourceMissing`. */
   source: string | null;
+  /** Selects movements with no acquisition evidence at all. Mutually exclusive with `source`/`sourceMissing`. */
+  sourceUnattributed?: boolean;
+  /** Selects strongly-attributed movements whose touchpoint captured no source. Mutually exclusive with `source`/`sourceUnattributed`. */
+  sourceMissing?: boolean;
   /** Requires `source`. #23's source -> campaign -> landing page drill-down. Mutually exclusive with `campaignMissing`. */
   campaign?: string | null;
   /** Selects the "no campaign captured" bucket explicitly, rather than a sentinel value in `campaign`. */
@@ -46,6 +51,8 @@ export function MovementsDrilldown({
   to,
   movementType,
   source,
+  sourceUnattributed = false,
+  sourceMissing = false,
   campaign = null,
   campaignMissing = false,
   landingPage = null,
@@ -62,7 +69,7 @@ export function MovementsDrilldown({
   // Render-phase reset when the filter/period params change -- React's recommended alternative to
   // an effect that only mirrors props (same pattern AppShell uses for its pathname-keyed drawer
   // reset), so the pending fetch below only ever calls setState from its async continuation.
-  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${movementType ?? ""}|${source ?? ""}|${campaign ?? ""}|${campaignMissing}|${landingPage ?? ""}|${landingPageMissing}|${currency ?? ""}`;
+  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${movementType ?? ""}|${source ?? ""}|${sourceUnattributed}|${sourceMissing}|${campaign ?? ""}|${campaignMissing}|${landingPage ?? ""}|${landingPageMissing}|${currency ?? ""}`;
   const [loadedKey, setLoadedKey] = useState(filterKey);
   if (filterKey !== loadedKey) {
     setLoadedKey(filterKey);
@@ -76,6 +83,8 @@ export function MovementsDrilldown({
     listMrrMovements(client, workspaceId, projectId, from, to, {
       movementType: movementType ?? undefined,
       source: source ?? undefined,
+      sourceUnattributed: sourceUnattributed || undefined,
+      sourceMissing: sourceMissing || undefined,
       campaign: campaign ?? undefined,
       campaignMissing: campaignMissing || undefined,
       landingPage: landingPage ?? undefined,
@@ -108,6 +117,8 @@ export function MovementsDrilldown({
     to,
     movementType,
     source,
+    sourceUnattributed,
+    sourceMissing,
     campaign,
     campaignMissing,
     landingPage,
@@ -129,6 +140,8 @@ export function MovementsDrilldown({
         {
           movementType: movementType ?? undefined,
           source: source ?? undefined,
+          sourceUnattributed: sourceUnattributed || undefined,
+          sourceMissing: sourceMissing || undefined,
           campaign: campaign ?? undefined,
           campaignMissing: campaignMissing || undefined,
           landingPage: landingPage ?? undefined,
@@ -153,6 +166,8 @@ export function MovementsDrilldown({
   const hasFilters = Boolean(
     movementType ||
       source ||
+      sourceUnattributed ||
+      sourceMissing ||
       campaign ||
       campaignMissing ||
       landingPage ||
@@ -173,9 +188,11 @@ export function MovementsDrilldown({
             </span>
           ) : null}
           {source ? (
-            <span className={styles.filterChip}>
-              {source === "UNATTRIBUTED" ? "Unattributed" : source}
-            </span>
+            <span className={styles.filterChip}>{source}</span>
+          ) : sourceUnattributed ? (
+            <span className={styles.filterChip}>Unattributed</span>
+          ) : sourceMissing ? (
+            <span className={styles.filterChip}>No source captured</span>
           ) : null}
           {campaign ? (
             <span className={styles.filterChip}>{campaign}</span>

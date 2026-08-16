@@ -53,6 +53,7 @@ function sourceComparison(): SourceComparison {
     rows: [
       {
         dimensionValue: "google",
+        attributed: true,
         currency: "USD",
         movementType: "NEW",
         totalMinor: 1000,
@@ -74,6 +75,7 @@ function campaignComparison(): SourceComparison {
     rows: [
       {
         dimensionValue: "spring_sale",
+        attributed: true,
         currency: "USD",
         movementType: "NEW",
         totalMinor: 700,
@@ -81,6 +83,7 @@ function campaignComparison(): SourceComparison {
       },
       {
         dimensionValue: null,
+        attributed: true,
         currency: "USD",
         movementType: "NEW",
         totalMinor: 300,
@@ -200,6 +203,7 @@ describe("SourcesClient", () => {
       rows: [
         {
           dimensionValue: "https://example.test/no-campaign-landing",
+          attributed: true,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 300,
@@ -263,13 +267,14 @@ describe("SourcesClient", () => {
     );
   });
 
-  it("filters evidence to the Unattributed bucket using the UNATTRIBUTED sentinel", async () => {
+  it("filters evidence to the Unattributed bucket using an explicit sourceUnattributed boolean", async () => {
     const user = userEvent.setup();
     getSourceComparison.mockResolvedValue({
       ...sourceComparison(),
       rows: [
         {
           dimensionValue: null,
+          attributed: false,
           currency: "USD",
           movementType: "NEW",
           totalMinor: 400,
@@ -290,7 +295,50 @@ describe("SourcesClient", () => {
       "proj-1",
       baseProps.from,
       baseProps.to,
-      expect.objectContaining({ source: "UNATTRIBUTED" }),
+      expect.objectContaining({
+        source: undefined,
+        sourceUnattributed: true,
+        sourceMissing: undefined,
+      }),
+    );
+  });
+
+  it("filters evidence to the no-source-captured bucket using sourceMissing, distinct from Unattributed", async () => {
+    // Regression: both the Unattributed bucket and the no-source-captured bucket have
+    // dimensionValue===null; without the `attributed` discriminator they were indistinguishable,
+    // and clicking one could silently reconcile against the other's movements.
+    const user = userEvent.setup();
+    getSourceComparison.mockResolvedValue({
+      ...sourceComparison(),
+      rows: [
+        {
+          dimensionValue: null,
+          attributed: true,
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 600,
+          customerCount: 1,
+        },
+      ],
+    });
+    listMrrMovements.mockResolvedValue({ entries: [], nextCursor: null });
+
+    render(<SourcesClient {...baseProps} />);
+
+    const amount = await screen.findByRole("button", { name: "$6" });
+    await user.click(amount);
+
+    expect(listMrrMovements).toHaveBeenCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      expect.objectContaining({
+        source: undefined,
+        sourceUnattributed: undefined,
+        sourceMissing: true,
+      }),
     );
   });
 });
