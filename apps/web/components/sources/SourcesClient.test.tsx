@@ -65,11 +65,13 @@ function sourceComparison(): SourceComparison {
     unavailableMetrics: [
       {
         metric: "RETAINED_MRR",
-        reason: "Unavailable for one or more comparison rows: NO_ACQUISITION_COHORT.",
+        reason:
+          "Unavailable for one or more comparison rows: NO_ACQUISITION_COHORT.",
       },
       {
         metric: "NRR",
-        reason: "Unavailable for one or more comparison rows: NO_ACQUISITION_COHORT.",
+        reason:
+          "Unavailable for one or more comparison rows: NO_ACQUISITION_COHORT.",
       },
     ],
   };
