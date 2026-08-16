@@ -242,9 +242,9 @@ export interface ComparisonRow {
   customerCount: number;
 }
 
-/** Names a product metric this comparison does not compute yet, and why -- never a measured zero. */
+/** Names a metric that is unavailable for at least one comparison row, and why. */
 export interface UnavailableMetric {
-  metric: string;
+  metric: "RETAINED_MRR" | "NRR";
   reason: string;
 }
 
@@ -260,7 +260,86 @@ export interface SourceComparison {
   /** True when the request selected the "no campaign captured" bucket explicitly, rather than a real campaign value. */
   campaignMissing: boolean;
   rows: ComparisonRow[];
+  /** The cohort age (30/60/90) `retention` was computed at. */
+  retentionAgeDays: RetentionAgeDays;
+  /** #25's authoritative Retained MRR / NRR, one row per (dimensionValue, attributed, currency). */
+  retention: RetentionSummaryRow[];
+  /** Empty only when every comparison row has authoritative Retained MRR and NRR. */
   unavailableMetrics: UnavailableMetric[];
+}
+
+// -- 30/60/90-day retained-MRR cohorts (#25) --
+
+export type RetentionAgeDays = 30 | 60 | 90;
+
+/**
+ * One cohort's outcome at a given age. `available: false` means the age hasn't matured yet
+ * (`unavailableReason: "MATURITY_PENDING"`) -- every numeric field is null, never a fabricated zero.
+ * `retentionPercentage`/`nrr` are ratios (0.85, not 85). `retainedMrrMinor` includes expansion and
+ * reactivation and is zero for a fully churned cohort; `nrr` deliberately excludes reactivation
+ * (ADR-0004/ADR-0006), so the two can visibly diverge for a cohort that churned and came back.
+ */
+export interface RetentionAgeCell {
+  available: boolean;
+  unavailableReason: string | null;
+  retainedMrrMinor: number | null;
+  retentionPercentage: number | null;
+  expansionMrrMinor: number | null;
+  contractionMrrMinor: number | null;
+  churnMrrMinor: number | null;
+  reactivationMrrMinor: number | null;
+  nrr: number | null;
+}
+
+/**
+ * One acquisition-month cohort. `dimensionValue`/`attributed` follow the same "no value at this
+ * level" convention as `ComparisonRow`. `startingMrrMinor`/`sampleSize` are acquisition facts and
+ * are always populated; `age30`/`age60`/`age90` are populated only once mature.
+ */
+export interface RetentionCohortRow {
+  dimensionValue: string | null;
+  attributed: boolean;
+  currency: string;
+  periodStart: string;
+  periodEnd: string;
+  startingMrrMinor: number;
+  sampleSize: number;
+  age30: RetentionAgeCell;
+  age60: RetentionAgeCell;
+  age90: RetentionAgeCell;
+}
+
+export interface RetentionCohorts {
+  workspaceId: string;
+  projectId: string;
+  dimension: ComparisonDimension;
+  source: string | null;
+  campaign: string | null;
+  campaignMissing: boolean;
+  cohorts: RetentionCohortRow[];
+}
+
+/** One dimension value's cohorts combined across an arbitrary date range, for one age. */
+export interface RetentionSummaryRow {
+  dimensionValue: string | null;
+  attributed: boolean;
+  currency: string;
+  startingMrrMinor: number;
+  sampleSize: number;
+  cell: RetentionAgeCell;
+}
+
+export interface RetentionSummary {
+  workspaceId: string;
+  projectId: string;
+  from: string;
+  to: string;
+  dimension: ComparisonDimension;
+  source: string | null;
+  campaign: string | null;
+  campaignMissing: boolean;
+  ageDays: RetentionAgeDays;
+  rows: RetentionSummaryRow[];
 }
 
 export interface StripeBillingHealthReport {

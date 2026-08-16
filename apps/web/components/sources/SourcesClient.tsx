@@ -157,7 +157,7 @@ export function SourcesClient({
     <div style={{ display: "grid", gap: 24 }}>
       <Panel
         title="Compare by source, campaign, and landing page"
-        subtitle="New MRR, Churned MRR, and customer count for the selected period. Retained MRR and NRR ship with Retention (#25)."
+        subtitle="New MRR, Churned MRR, customer count, and 30/60/90-day Retained MRR / NRR for the selected period."
       >
         <nav aria-label="Drill-down" className={styles.breadcrumb}>
           {path.source === null ? (

@@ -17,7 +17,7 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-const COMING_SOON_ITEMS = ["Retention", "Customers", "Settings"];
+const COMING_SOON_ITEMS = ["Customers", "Settings"];
 
 // "workspaces" and "new" are excluded from their capture groups: /app/workspaces/new and
 // /app/{workspaceId}/projects/new are reserved creation routes, not scoped to a real workspace or
@@ -119,6 +119,13 @@ export function AppShell({ initialWorkspaces, children }: AppShellProps) {
       : undefined;
   const isSourcesActive = Boolean(sourcesHref) && pathname === sourcesHref;
 
+  const retentionHref =
+    currentWorkspaceId && currentProjectId
+      ? `/app/${currentWorkspaceId}/projects/${currentProjectId}/retention`
+      : undefined;
+  const isRetentionActive =
+    Boolean(retentionHref) && pathname === retentionHref;
+
   const sidebar = (
     <nav
       id="primary-navigation"
@@ -192,6 +199,19 @@ export function AppShell({ initialWorkspaces, children }: AppShellProps) {
               </Link>
             ) : (
               <span className={styles.navLinkDisabled}>Sources</span>
+            )}
+          </li>
+          <li>
+            {retentionHref ? (
+              <Link
+                href={retentionHref}
+                className={`${styles.navLink} ${isRetentionActive ? styles.navLinkActive : ""}`}
+                aria-current={isRetentionActive ? "page" : undefined}
+              >
+                Retention
+              </Link>
+            ) : (
+              <span className={styles.navLinkDisabled}>Retention</span>
             )}
           </li>
           <li>

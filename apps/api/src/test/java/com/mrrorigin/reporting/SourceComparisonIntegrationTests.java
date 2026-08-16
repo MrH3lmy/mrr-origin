@@ -94,9 +94,45 @@ class SourceComparisonIntegrationTests {
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue=='bing' && @.movementType=='NEW')].totalMinor").value(500))
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue==null && @.movementType=='NEW')].totalMinor").value(300))
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue==null && @.movementType=='NEW')].attributed").value(false))
+                // #25: these April-2026 cohorts are long mature by the time this test runs, so the
+                // comparison's `retention` list carries real, reconciled Retained MRR / NRR -- not a
+                // permanent "Unavailable" placeholder. google churned back to zero within 30 days
+                // (retention 0%); bing and the unattributed customer kept their full starting MRR.
+                .andExpect(jsonPath("$.retentionAgeDays").value(30))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.available").value(true))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.retainedMrrMinor").value(0))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.churnMrrMinor").value(1000))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.retentionPercentage").value(0.0))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='google')].cell.nrr").value(0.0))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='bing')].cell.retainedMrrMinor").value(500))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue=='bing')].cell.retentionPercentage").value(1.0))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue==null && @.attributed==false)].cell.retainedMrrMinor").value(300))
+                .andExpect(jsonPath("$.retention[?(@.dimensionValue==null && @.attributed==false)].cell.retentionPercentage").value(1.0))
+                .andExpect(jsonPath("$.unavailableMetrics.length()").value(0));
+    }
+
+    @Test
+    void preservesUnavailableMetricContractForImmatureComparisonRows() throws Exception {
+        acquireAndAttribute(
+                "cus_future", "USD", 1000, "2099-04-05T00:00:00Z", "google", "future_campaign", "/future");
+
+        mockMvc.perform(get(
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/reporting/comparison",
+                                workspace,
+                                project)
+                        .queryParam("from", "2099-04-01T00:00:00Z")
+                        .queryParam("to", "2099-05-01T00:00:00Z")
+                        .queryParam("dimension", "SOURCE")
+                        .queryParam("retentionAgeDays", "30")
+                        .with(token(OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.retention[0].cell.available").value(false))
+                .andExpect(jsonPath("$.retention[0].cell.unavailableReason").value("MATURITY_PENDING"))
                 .andExpect(jsonPath("$.unavailableMetrics.length()").value(2))
-                .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='RETAINED_MRR')]").exists())
-                .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='NRR')]").exists());
+                .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='RETAINED_MRR')].reason")
+                        .value("Unavailable for one or more comparison rows: MATURITY_PENDING."))
+                .andExpect(jsonPath("$.unavailableMetrics[?(@.metric=='NRR')].reason")
+                        .value("Unavailable for one or more comparison rows: MATURITY_PENDING."));
     }
 
     @Test

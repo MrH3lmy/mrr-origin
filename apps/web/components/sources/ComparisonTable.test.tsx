@@ -3,7 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api/errors";
-import type { ComparisonRow, SourceComparison } from "@/lib/api/types";
+import type {
+  ComparisonRow,
+  RetentionSummaryRow,
+  SourceComparison,
+} from "@/lib/api/types";
 
 import { ComparisonTable } from "./ComparisonTable";
 
@@ -14,7 +18,10 @@ const { getSourceComparison } = vi.hoisted(() => ({
 vi.mock("@/lib/api/reporting", () => ({ getSourceComparison }));
 vi.mock("@/lib/api/client", () => ({ createBrowserClient: () => ({}) }));
 
-function comparison(rows: ComparisonRow[]): SourceComparison {
+function comparison(
+  rows: ComparisonRow[],
+  retention: RetentionSummaryRow[] = [],
+): SourceComparison {
   return {
     workspaceId: "ws-1",
     projectId: "proj-1",
@@ -25,10 +32,9 @@ function comparison(rows: ComparisonRow[]): SourceComparison {
     campaign: null,
     campaignMissing: false,
     rows,
-    unavailableMetrics: [
-      { metric: "RETAINED_MRR", reason: "Not available yet — depends on #25." },
-      { metric: "NRR", reason: "Not available yet — depends on #25." },
-    ],
+    retentionAgeDays: 30,
+    retention,
+    unavailableMetrics: [],
   };
 }
 
@@ -149,7 +155,37 @@ describe("ComparisonTable", () => {
     expect(screen.getByText("$3")).toBeInTheDocument();
   });
 
-  it("always renders Retained MRR and NRR as an explicit unavailable state, never a number", async () => {
+  it("keeps a literal dimension value distinct from the missing-value bucket", async () => {
+    getSourceComparison.mockResolvedValue(
+      comparison([
+        {
+          dimensionValue: " ",
+          attributed: true,
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 700,
+          customerCount: 1,
+        },
+        {
+          dimensionValue: null,
+          attributed: true,
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 300,
+          customerCount: 1,
+        },
+      ]),
+    );
+
+    render(<ComparisonTable {...baseProps} />);
+
+    await screen.findByText("No source captured");
+    expect(screen.getAllByRole("row")).toHaveLength(3);
+    expect(screen.getByText("$7")).toBeInTheDocument();
+    expect(screen.getByText("$3")).toBeInTheDocument();
+  });
+
+  it("renders Retained MRR and NRR as an explicit unavailable state, never a number, when no cohort exists for the row", async () => {
     getSourceComparison.mockResolvedValue(
       comparison([
         {
@@ -167,7 +203,133 @@ describe("ComparisonTable", () => {
 
     await screen.findByText("google");
     expect(screen.getAllByText("Unavailable").length).toBe(2);
-    expect(screen.getByText(/depends on #25/i)).toBeInTheDocument();
+  });
+
+  it("shows the maturity-pending reason and never a fabricated zero when the cohort hasn't matured", async () => {
+    getSourceComparison.mockResolvedValue(
+      comparison(
+        [
+          {
+            dimensionValue: "google",
+            attributed: true,
+            currency: "USD",
+            movementType: "NEW",
+            totalMinor: 1000,
+            customerCount: 2,
+          },
+        ],
+        [
+          {
+            dimensionValue: "google",
+            attributed: true,
+            currency: "USD",
+            startingMrrMinor: 1000,
+            sampleSize: 2,
+            cell: {
+              available: false,
+              unavailableReason: "MATURITY_PENDING",
+              retainedMrrMinor: null,
+              retentionPercentage: null,
+              expansionMrrMinor: null,
+              contractionMrrMinor: null,
+              churnMrrMinor: null,
+              reactivationMrrMinor: null,
+              nrr: null,
+            },
+          },
+        ],
+      ),
+    );
+
+    render(<ComparisonTable {...baseProps} />);
+
+    await screen.findByText("google");
+    expect(screen.getAllByText("Unavailable").length).toBe(2);
+    expect(
+      screen.getByText(/hasn't reached 30 days old yet/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows real Retained MRR and NRR once the cohort is mature", async () => {
+    getSourceComparison.mockResolvedValue(
+      comparison(
+        [
+          {
+            dimensionValue: "google",
+            attributed: true,
+            currency: "USD",
+            movementType: "NEW",
+            totalMinor: 1000,
+            customerCount: 2,
+          },
+        ],
+        [
+          {
+            dimensionValue: "google",
+            attributed: true,
+            currency: "USD",
+            startingMrrMinor: 1000,
+            sampleSize: 2,
+            cell: {
+              available: true,
+              unavailableReason: null,
+              retainedMrrMinor: 900,
+              retentionPercentage: 0.9,
+              expansionMrrMinor: 0,
+              contractionMrrMinor: 100,
+              churnMrrMinor: 0,
+              reactivationMrrMinor: 0,
+              nrr: 0.9,
+            },
+          },
+        ],
+      ),
+    );
+
+    render(<ComparisonTable {...baseProps} />);
+
+    await screen.findByText("google");
+    expect(screen.getByText("$9")).toBeInTheDocument();
+    expect(screen.getByText("(90%)")).toBeInTheDocument();
+    expect(screen.getByText("90%")).toBeInTheDocument();
+    expect(screen.queryByText("Unavailable")).not.toBeInTheDocument();
+  });
+
+  it("re-fetches at a different cohort age when a cohort-age button is clicked", async () => {
+    const user = userEvent.setup();
+    getSourceComparison.mockResolvedValue(
+      comparison([
+        {
+          dimensionValue: "google",
+          attributed: true,
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 1000,
+          customerCount: 2,
+        },
+      ]),
+    );
+
+    render(<ComparisonTable {...baseProps} />);
+    await screen.findByText("google");
+
+    await user.click(screen.getByRole("button", { name: "60d" }));
+
+    expect(await screen.findByText("Retained MRR (60d)")).toBeInTheDocument();
+    expect(getSourceComparison).toHaveBeenLastCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      "SOURCE",
+      {
+        source: undefined,
+        campaign: undefined,
+        campaignMissing: undefined,
+        retentionAgeDays: 60,
+      },
+    );
   });
 
   it("calls onDrillDown when a source label is clicked", async () => {
@@ -321,7 +483,12 @@ describe("ComparisonTable", () => {
       baseProps.from,
       baseProps.to,
       "LANDING_PAGE",
-      { source: "google", campaign: undefined, campaignMissing: true },
+      {
+        source: "google",
+        campaign: undefined,
+        campaignMissing: true,
+        retentionAgeDays: 30,
+      },
     );
   });
 });

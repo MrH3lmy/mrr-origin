@@ -31,9 +31,10 @@ import com.mrrorigin.revenue.RevenueCalculationService;
  * compare within an already-attributed source -- there is no "unattributed campaign" bucket, only an
  * "unattributed source" bucket at the top level.
  *
- * <p>Retained MRR and NRR are deliberately not included: no cohort data model or approved
- * calculation ADR exists yet (#25). {@link #UNAVAILABLE_METRICS} names that gap explicitly in every
- * response so a client can never mistake "not computed" for a measured zero.
+ * <p>Retained MRR and NRR are not computed by this service. {@link RetentionCohortService#summary}
+ * supplies them (#25), keyed by the same {@code (dimensionValue, attributed, currency)} tuple as
+ * {@link ComparisonRow} so a caller can join the two by that key; {@link
+ * RevenueOverviewController#comparison} does exactly that.
  */
 @Service
 public class SourceComparisonService {
@@ -43,14 +44,6 @@ public class SourceComparisonService {
 
     /** Movement types this comparison reports; expansion/contraction/reactivation are out of #23's scope. */
     private static final List<String> COMPARISON_MOVEMENT_TYPES = List.of("NEW", "CHURN");
-
-    public static final List<UnavailableMetric> UNAVAILABLE_METRICS = List.of(
-            new UnavailableMetric(
-                    "RETAINED_MRR",
-                    "Not available yet — depends on 30/60/90-day retention cohorts (#25)."),
-            new UnavailableMetric(
-                    "NRR",
-                    "Not available yet — depends on 30/60/90-day retention cohorts (#25)."));
 
     public enum Dimension {
         SOURCE,
@@ -241,7 +234,4 @@ public class SourceComparisonService {
             String movementType,
             long totalMinor,
             long customerCount) {}
-
-    /** Names a product metric this comparison does not compute yet, and why, so a client can never mistake absence for a measured zero. */
-    public record UnavailableMetric(String metric, String reason) {}
 }
