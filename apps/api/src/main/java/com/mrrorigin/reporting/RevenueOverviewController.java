@@ -68,14 +68,16 @@ public class RevenueOverviewController {
             @RequestParam(required = false) String movementType,
             @RequestParam(required = false) String source,
             @RequestParam(required = false) String campaign,
+            @RequestParam(required = false, defaultValue = "false") boolean campaignMissing,
             @RequestParam(required = false) String landingPage,
+            @RequestParam(required = false, defaultValue = "false") boolean landingPageMissing,
             @RequestParam(required = false) String currency,
             @RequestParam(required = false) String cursor,
             @RequestParam(required = false) @Min(1) @Max(RevenueMovementsService.MAX_LIMIT) Integer limit) {
         workspaceContext.requireMembership(workspaceId);
         return MovementsPageResponse.from(movementsService.list(
-                workspaceId, projectId, from, to, movementType, source, campaign, landingPage, currency, cursor,
-                limit));
+                workspaceId, projectId, from, to, movementType, source, campaign, campaignMissing, landingPage,
+                landingPageMissing, currency, cursor, limit));
     }
 
     @GetMapping("/comparison")
@@ -86,14 +88,15 @@ public class RevenueOverviewController {
             @RequestParam OffsetDateTime to,
             @RequestParam String dimension,
             @RequestParam(required = false) String source,
-            @RequestParam(required = false) String campaign) {
+            @RequestParam(required = false) String campaign,
+            @RequestParam(required = false, defaultValue = "false") boolean campaignMissing) {
         workspaceContext.requireMembership(workspaceId);
         if (!DIMENSIONS.contains(dimension)) {
             throw new IllegalArgumentException("dimension must be one of " + DIMENSIONS);
         }
         SourceComparisonService.Dimension parsed = SourceComparisonService.Dimension.valueOf(dimension);
         List<SourceComparisonService.ComparisonRow> rows =
-                comparisonService.compare(workspaceId, projectId, from, to, parsed, source, campaign);
+                comparisonService.compare(workspaceId, projectId, from, to, parsed, source, campaign, campaignMissing);
         return new ComparisonResponse(
                 workspaceId,
                 projectId,
@@ -102,6 +105,7 @@ public class RevenueOverviewController {
                 dimension,
                 source,
                 campaign,
+                campaignMissing,
                 rows,
                 SourceComparisonService.UNAVAILABLE_METRICS);
     }
@@ -143,10 +147,12 @@ public class RevenueOverviewController {
 
     /**
      * {@code dimension} is one of {@code SOURCE, CAMPAIGN, LANDING_PAGE}. {@code source}/{@code
-     * campaign} echo the parent drill-down filters that were applied (null unless the request scoped
-     * one). {@code unavailableMetrics} names product metrics this comparison does not compute yet
-     * (retained MRR, NRR) and why -- present on every response so a client can never mistake their
-     * absence for a measured zero.
+     * campaign}/{@code campaignMissing} echo the parent drill-down filters that were applied (null/
+     * false unless the request scoped one). {@code campaignMissing} selects the "no campaign
+     * captured" bucket explicitly, as a boolean rather than a sentinel value in {@code campaign}, so
+     * a real UTM campaign can never collide with the missing-value bucket. {@code unavailableMetrics}
+     * names product metrics this comparison does not compute yet (retained MRR, NRR) and why --
+     * present on every response so a client can never mistake their absence for a measured zero.
      */
     public record ComparisonResponse(
             UUID workspaceId,
@@ -156,6 +162,7 @@ public class RevenueOverviewController {
             String dimension,
             String source,
             String campaign,
+            boolean campaignMissing,
             List<SourceComparisonService.ComparisonRow> rows,
             List<SourceComparisonService.UnavailableMetric> unavailableMetrics) {}
 }

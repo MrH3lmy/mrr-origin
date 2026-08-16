@@ -178,9 +178,10 @@ class RevenueOverviewIntegrationTests {
                 .andExpect(jsonPath("$.entries.length()").value(1))
                 .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_full_evidence"));
 
-        // The "NONE" sentinel selects the "no campaign captured" bucket, mirroring the UNATTRIBUTED
-        // sentinel already used for source.
-        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", "NONE", null, null))
+        // campaignMissing=true selects the "no campaign captured" bucket as an explicit boolean, not
+        // a sentinel string -- so it can never collide with a real campaign a founder happens to name
+        // "NONE" (see the dedicated regression test below).
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", null, true, null, false, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries.length()").value(1))
                 .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_no_campaign"));
@@ -192,6 +193,38 @@ class RevenueOverviewIntegrationTests {
                 .andExpect(status().isBadRequest());
         mockMvc.perform(movements(OWNER, FROM, TO, null, "google", null, "https://example.test/landing-a", null))
                 .andExpect(status().isBadRequest());
+
+        // campaign and campaignMissing together is a contradiction, not silently resolved one way.
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", "spring_sale", true, null, false, null))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void aRealCampaignLiterallyNamedNoneIsDistinctFromTheNoCampaignBucket() throws Exception {
+        // Regression: campaign/landingPage filtering used to encode "no campaign captured" as the
+        // magic string "NONE" inside the campaign parameter itself. utm_campaign is a founder-
+        // controlled value, so a real campaign named "NONE" would have collided with that sentinel.
+        // campaignMissing is now a separate boolean, so the two cases can never be confused.
+        movement("cus_real_none_campaign", "USD", 700, "2026-04-05T00:00:00Z");
+        link("cus_real_none_campaign");
+        touchpoint("cus_real_none_campaign", "2026-03-15T00:00:00Z", "google", "NONE", "https://example.test/landing-a");
+        attribution.recalculate(workspace, project, "cus_real_none_campaign");
+
+        movement("cus_no_campaign_captured", "USD", 300, "2026-04-06T00:00:00Z");
+        link("cus_no_campaign_captured");
+        touchpoint("cus_no_campaign_captured", "2026-03-16T00:00:00Z", "google", null, "https://example.test/landing-b");
+        attribution.recalculate(workspace, project, "cus_no_campaign_captured");
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", "NONE", false, null, false, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_real_none_campaign"))
+                .andExpect(jsonPath("$.entries[0].firstTouch.campaign").value("NONE"));
+
+        mockMvc.perform(movements(OWNER, FROM, TO, null, "google", null, true, null, false, null))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.entries.length()").value(1))
+                .andExpect(jsonPath("$.entries[0].stripeCustomerId").value("cus_no_campaign_captured"));
     }
 
     @Test
@@ -427,7 +460,7 @@ class RevenueOverviewIntegrationTests {
 
     private MockHttpServletRequestBuilder movements(
             String actor, String from, String to, String movementType, String source, String currency) {
-        return movements(actor, from, to, movementType, source, null, null, currency);
+        return movements(actor, from, to, movementType, source, null, false, null, false, currency);
     }
 
     private MockHttpServletRequestBuilder movements(
@@ -439,6 +472,20 @@ class RevenueOverviewIntegrationTests {
             String campaign,
             String landingPage,
             String currency) {
+        return movements(actor, from, to, movementType, source, campaign, false, landingPage, false, currency);
+    }
+
+    private MockHttpServletRequestBuilder movements(
+            String actor,
+            String from,
+            String to,
+            String movementType,
+            String source,
+            String campaign,
+            boolean campaignMissing,
+            String landingPage,
+            boolean landingPageMissing,
+            String currency) {
         var request = get("/api/workspaces/{workspaceId}/projects/{projectId}/reporting/movements", workspace, project)
                 .queryParam("from", from)
                 .queryParam("to", to)
@@ -446,7 +493,9 @@ class RevenueOverviewIntegrationTests {
         if (movementType != null) request = request.queryParam("movementType", movementType);
         if (source != null) request = request.queryParam("source", source);
         if (campaign != null) request = request.queryParam("campaign", campaign);
+        if (campaignMissing) request = request.queryParam("campaignMissing", "true");
         if (landingPage != null) request = request.queryParam("landingPage", landingPage);
+        if (landingPageMissing) request = request.queryParam("landingPageMissing", "true");
         if (currency != null) request = request.queryParam("currency", currency);
         return request;
     }

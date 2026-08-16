@@ -32,8 +32,10 @@ interface ComparisonTableProps {
   dimension: ComparisonDimension;
   /** Parent filter, required for CAMPAIGN/LANDING_PAGE. */
   source: string | null;
-  /** Parent filter, required for LANDING_PAGE. Use "NONE" for the no-campaign bucket. */
+  /** Parent filter for LANDING_PAGE. Mutually exclusive with `campaignMissing`. */
   campaign: string | null;
+  /** Selects the "no campaign captured" bucket explicitly, rather than a sentinel value in `campaign`. */
+  campaignMissing: boolean;
   /** dimensionValue is null for the "no campaign"/"no landing page" bucket at CAMPAIGN/LANDING_PAGE. */
   onDrillDown: (dimensionValue: string | null) => void;
   onSelectMetric: (selection: MetricSelection) => void;
@@ -131,6 +133,7 @@ export function ComparisonTable({
   dimension,
   source,
   campaign,
+  campaignMissing,
   onDrillDown,
   onSelectMetric,
   selectedMetric,
@@ -143,7 +146,7 @@ export function ComparisonTable({
     direction: "desc",
   });
 
-  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${dimension}|${source ?? ""}|${campaign ?? ""}`;
+  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${dimension}|${source ?? ""}|${campaign ?? ""}|${campaignMissing}`;
   const [loadedKey, setLoadedKey] = useState(filterKey);
   if (filterKey !== loadedKey) {
     setLoadedKey(filterKey);
@@ -157,6 +160,7 @@ export function ComparisonTable({
     getSourceComparison(client, workspaceId, projectId, from, to, dimension, {
       source: source ?? undefined,
       campaign: campaign ?? undefined,
+      campaignMissing: campaignMissing || undefined,
     })
       .then((result) => {
         if (cancelled) return;
@@ -176,7 +180,16 @@ export function ComparisonTable({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, projectId, from, to, dimension, source, campaign]);
+  }, [
+    workspaceId,
+    projectId,
+    from,
+    to,
+    dimension,
+    source,
+    campaign,
+    campaignMissing,
+  ]);
 
   if (loading) {
     return <SkeletonBlock label="Loading comparison" lines={4} />;

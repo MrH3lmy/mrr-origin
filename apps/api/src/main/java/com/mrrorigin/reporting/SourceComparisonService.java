@@ -44,10 +44,6 @@ public class SourceComparisonService {
     /** Movement types this comparison reports; expansion/contraction/reactivation are out of #23's scope. */
     private static final List<String> COMPARISON_MOVEMENT_TYPES = List.of("NEW", "CHURN");
 
-    /** Sentinel selecting the "no campaign captured" / "no landing page captured" bucket, mirroring the
-     * {@code UNATTRIBUTED} sentinel {@link RevenueMovementsService} already uses for source. */
-    static final String NONE = "NONE";
-
     public static final List<UnavailableMetric> UNAVAILABLE_METRICS = List.of(
             new UnavailableMetric(
                     "RETAINED_MRR",
@@ -75,8 +71,12 @@ public class SourceComparisonService {
             OffsetDateTime to,
             Dimension dimension,
             String source,
-            String campaign) {
+            String campaign,
+            boolean campaignMissing) {
         require(workspaceId, projectId, from, to);
+        if (campaign != null && campaignMissing) {
+            throw new IllegalArgumentException("campaign and campaignMissing are mutually exclusive");
+        }
         return switch (dimension) {
             case SOURCE -> bySource(workspaceId, projectId, from, to);
             case CAMPAIGN -> {
@@ -89,11 +89,11 @@ public class SourceComparisonService {
                 if (source == null || source.isBlank()) {
                     throw new IllegalArgumentException("source is required to compare landing pages within it");
                 }
-                if (campaign == null || campaign.isBlank()) {
+                if (!campaignMissing && (campaign == null || campaign.isBlank())) {
                     throw new IllegalArgumentException(
-                            "campaign is required to compare landing pages within it (use '" + NONE + "' for the no-campaign bucket)");
+                            "campaign or campaignMissing is required to compare landing pages within a campaign");
                 }
-                yield byLandingPage(workspaceId, projectId, from, to, source, campaign);
+                yield byLandingPage(workspaceId, projectId, from, to, source, campaign, campaignMissing);
             }
         };
     }
@@ -159,8 +159,8 @@ public class SourceComparisonService {
     }
 
     private List<ComparisonRow> byLandingPage(
-            UUID w, UUID p, OffsetDateTime from, OffsetDateTime to, String source, String campaign) {
-        boolean noCampaign = NONE.equals(campaign);
+            UUID w, UUID p, OffsetDateTime from, OffsetDateTime to, String source, String campaign,
+            boolean campaignMissing) {
         return db.sql(
                         "WITH " + OWNER_CTE
                                 + """
@@ -176,8 +176,8 @@ public class SourceComparisonService {
                           AND m.movement_type IN (:types)
                           AND m.effective_at >= :from AND m.effective_at < :to
                           AND r.confidence = 'STRONG' AND r.first_source = :source
-                          AND ((:noCampaign = TRUE AND r.first_campaign IS NULL)
-                               OR (:noCampaign = FALSE AND r.first_campaign = :campaign))
+                          AND ((:campaignMissing = TRUE AND r.first_campaign IS NULL)
+                               OR (:campaignMissing = FALSE AND r.first_campaign = :campaign))
                         GROUP BY dim, m.currency, m.movement_type
                         ORDER BY total_minor DESC, dim ASC NULLS LAST, m.currency, m.movement_type
                         """)
@@ -189,8 +189,8 @@ public class SourceComparisonService {
                 .param("to", to)
                 .param("types", COMPARISON_MOVEMENT_TYPES)
                 .param("source", source)
-                .param("noCampaign", noCampaign)
-                .param("campaign", noCampaign ? "" : campaign)
+                .param("campaignMissing", campaignMissing)
+                .param("campaign", campaignMissing ? "" : campaign)
                 .query(SourceComparisonService::row)
                 .list();
     }

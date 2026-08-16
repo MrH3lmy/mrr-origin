@@ -168,14 +168,14 @@ describe("MovementsDrilldown", () => {
     expect(screen.getByText("USD")).toBeInTheDocument();
   });
 
-  it("passes campaign and landingPage filters through to the API and shows them as chips", async () => {
+  it("passes campaignMissing and landingPage filters through to the API and shows them as chips", async () => {
     listMrrMovements.mockResolvedValue({ entries: [entry], nextCursor: null });
 
     render(
       <MovementsDrilldown
         {...baseProps}
         source="google"
-        campaign="NONE"
+        campaignMissing
         landingPage="https://example.test/a"
       />,
     );
@@ -190,11 +190,39 @@ describe("MovementsDrilldown", () => {
       baseProps.to,
       expect.objectContaining({
         source: "google",
-        campaign: "NONE",
+        campaignMissing: true,
         landingPage: "https://example.test/a",
       }),
     );
     expect(screen.getByText("No campaign")).toBeInTheDocument();
     expect(screen.getByText("https://example.test/a")).toBeInTheDocument();
+  });
+
+  it("distinguishes a real campaign literally named 'NONE' from the no-campaign bucket", async () => {
+    // Regression: campaign filtering used to encode "no campaign captured" as the sentinel string
+    // "NONE" inside the campaign value itself, colliding with any real UTM campaign named "NONE".
+    listMrrMovements.mockResolvedValue({ entries: [entry], nextCursor: null });
+
+    render(
+      <MovementsDrilldown {...baseProps} source="google" campaign="NONE" />,
+    );
+
+    await screen.findByText("cus_1");
+
+    expect(listMrrMovements).toHaveBeenCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      expect.objectContaining({
+        source: "google",
+        campaign: "NONE",
+        campaignMissing: undefined,
+      }),
+    );
+    // The filter chip shows the literal campaign name, not "No campaign".
+    expect(screen.getByText("NONE")).toBeInTheDocument();
+    expect(screen.queryByText("No campaign")).not.toBeInTheDocument();
   });
 });

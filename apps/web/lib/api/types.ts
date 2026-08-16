@@ -249,6 +249,8 @@ export interface SourceComparison {
   /** Echoes the parent drill-down filter that was applied, if any. */
   source: string | null;
   campaign: string | null;
+  /** True when the request selected the "no campaign captured" bucket explicitly, rather than a real campaign value. */
+  campaignMissing: boolean;
   rows: ComparisonRow[];
   unavailableMetrics: UnavailableMetric[];
 }

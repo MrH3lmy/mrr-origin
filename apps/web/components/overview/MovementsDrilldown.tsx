@@ -27,10 +27,14 @@ interface MovementsDrilldownProps {
   to: string;
   movementType: MrrMovementType | null;
   source: string | null;
-  /** Requires `source`. #23's source -> campaign -> landing page drill-down. */
+  /** Requires `source`. #23's source -> campaign -> landing page drill-down. Mutually exclusive with `campaignMissing`. */
   campaign?: string | null;
-  /** Requires `campaign`. */
+  /** Selects the "no campaign captured" bucket explicitly, rather than a sentinel value in `campaign`. */
+  campaignMissing?: boolean;
+  /** Requires `campaign` or `campaignMissing`. Mutually exclusive with `landingPageMissing`. */
   landingPage?: string | null;
+  /** Selects the "no landing page captured" bucket explicitly, rather than a sentinel value in `landingPage`. */
+  landingPageMissing?: boolean;
   currency: string | null;
   onClearFilters: () => void;
 }
@@ -43,7 +47,9 @@ export function MovementsDrilldown({
   movementType,
   source,
   campaign = null,
+  campaignMissing = false,
   landingPage = null,
+  landingPageMissing = false,
   currency,
   onClearFilters,
 }: MovementsDrilldownProps) {
@@ -56,7 +62,7 @@ export function MovementsDrilldown({
   // Render-phase reset when the filter/period params change -- React's recommended alternative to
   // an effect that only mirrors props (same pattern AppShell uses for its pathname-keyed drawer
   // reset), so the pending fetch below only ever calls setState from its async continuation.
-  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${movementType ?? ""}|${source ?? ""}|${campaign ?? ""}|${landingPage ?? ""}|${currency ?? ""}`;
+  const filterKey = `${workspaceId}|${projectId}|${from}|${to}|${movementType ?? ""}|${source ?? ""}|${campaign ?? ""}|${campaignMissing}|${landingPage ?? ""}|${landingPageMissing}|${currency ?? ""}`;
   const [loadedKey, setLoadedKey] = useState(filterKey);
   if (filterKey !== loadedKey) {
     setLoadedKey(filterKey);
@@ -71,7 +77,9 @@ export function MovementsDrilldown({
       movementType: movementType ?? undefined,
       source: source ?? undefined,
       campaign: campaign ?? undefined,
+      campaignMissing: campaignMissing || undefined,
       landingPage: landingPage ?? undefined,
+      landingPageMissing: landingPageMissing || undefined,
       currency: currency ?? undefined,
     })
       .then((page) => {
@@ -101,7 +109,9 @@ export function MovementsDrilldown({
     movementType,
     source,
     campaign,
+    campaignMissing,
     landingPage,
+    landingPageMissing,
     currency,
   ]);
 
@@ -120,7 +130,9 @@ export function MovementsDrilldown({
           movementType: movementType ?? undefined,
           source: source ?? undefined,
           campaign: campaign ?? undefined,
+          campaignMissing: campaignMissing || undefined,
           landingPage: landingPage ?? undefined,
+          landingPageMissing: landingPageMissing || undefined,
           currency: currency ?? undefined,
           cursor: nextCursor,
         },
@@ -139,7 +151,13 @@ export function MovementsDrilldown({
   }
 
   const hasFilters = Boolean(
-    movementType || source || campaign || landingPage || currency,
+    movementType ||
+      source ||
+      campaign ||
+      campaignMissing ||
+      landingPage ||
+      landingPageMissing ||
+      currency,
   );
 
   return (
@@ -160,14 +178,14 @@ export function MovementsDrilldown({
             </span>
           ) : null}
           {campaign ? (
-            <span className={styles.filterChip}>
-              {campaign === "NONE" ? "No campaign" : campaign}
-            </span>
+            <span className={styles.filterChip}>{campaign}</span>
+          ) : campaignMissing ? (
+            <span className={styles.filterChip}>No campaign</span>
           ) : null}
           {landingPage ? (
-            <span className={styles.filterChip}>
-              {landingPage === "NONE" ? "No landing page" : landingPage}
-            </span>
+            <span className={styles.filterChip}>{landingPage}</span>
+          ) : landingPageMissing ? (
+            <span className={styles.filterChip}>No landing page</span>
           ) : null}
           {currency ? (
             <span className={styles.filterChip}>{currency}</span>

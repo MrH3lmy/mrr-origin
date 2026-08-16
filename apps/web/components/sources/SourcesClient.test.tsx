@@ -2,26 +2,42 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { MrrMovementEntry, SourceComparison } from "@/lib/api/types";
+import type {
+  AttributionCoverage,
+  MrrMovementEntry,
+  SourceComparison,
+} from "@/lib/api/types";
 
 import { SourcesClient } from "./SourcesClient";
 
-const { getSourceComparison, listMrrMovements } = vi.hoisted(() => ({
-  getSourceComparison: vi.fn(),
-  listMrrMovements: vi.fn(),
-}));
+const { getSourceComparison, listMrrMovements, getAttributionCoverage } =
+  vi.hoisted(() => ({
+    getSourceComparison: vi.fn(),
+    listMrrMovements: vi.fn(),
+    getAttributionCoverage: vi.fn(),
+  }));
 
 vi.mock("@/lib/api/reporting", () => ({
   getSourceComparison,
   listMrrMovements,
+  getAttributionCoverage,
 }));
 vi.mock("@/lib/api/client", () => ({ createBrowserClient: () => ({}) }));
+
+const fullCoverage: AttributionCoverage = {
+  modelVersion: "attribution-v1",
+  eligibleNewCustomers: 4,
+  attributedNewCustomers: 4,
+  coverageRatio: 1,
+  exclusionReasonCounts: {},
+};
 
 const baseProps = {
   workspaceId: "ws-1",
   projectId: "proj-1",
   from: "2026-04-01T00:00:00Z",
   to: "2026-05-01T00:00:00Z",
+  coverage: fullCoverage,
 };
 
 function sourceComparison(): SourceComparison {
@@ -33,6 +49,7 @@ function sourceComparison(): SourceComparison {
     dimension: "SOURCE",
     source: null,
     campaign: null,
+    campaignMissing: false,
     rows: [
       {
         dimensionValue: "google",
@@ -60,6 +77,13 @@ function campaignComparison(): SourceComparison {
         currency: "USD",
         movementType: "NEW",
         totalMinor: 700,
+        customerCount: 1,
+      },
+      {
+        dimensionValue: null,
+        currency: "USD",
+        movementType: "NEW",
+        totalMinor: 300,
         customerCount: 1,
       },
     ],
@@ -108,8 +132,31 @@ describe("SourcesClient", () => {
       baseProps.from,
       baseProps.to,
       "SOURCE",
-      { source: undefined, campaign: undefined },
+      { source: undefined, campaign: undefined, campaignMissing: undefined },
     );
+  });
+
+  it("renders the attribution coverage panel alongside the comparison", async () => {
+    getSourceComparison.mockResolvedValue(sourceComparison());
+
+    render(<SourcesClient {...baseProps} />);
+
+    await screen.findByText("google");
+    expect(
+      screen.getByText("4 of 4 eligible new customers attributed"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
+  });
+
+  it("renders an honest unavailable coverage state when the signal failed to load", async () => {
+    getSourceComparison.mockResolvedValue(sourceComparison());
+
+    render(<SourcesClient {...baseProps} coverage={null} />);
+
+    await screen.findByText("google");
+    expect(
+      screen.getByText("Couldn't load attribution coverage. Try refreshing."),
+    ).toBeInTheDocument();
   });
 
   it("drills into campaigns within a source when its label is clicked, and back out via the breadcrumb", async () => {
@@ -130,7 +177,7 @@ describe("SourcesClient", () => {
       baseProps.from,
       baseProps.to,
       "CAMPAIGN",
-      { source: "google", campaign: undefined },
+      { source: "google", campaign: undefined, campaignMissing: undefined },
     );
     // Breadcrumb now shows the drilled-into source as the current (non-clickable) crumb, plus a
     // clickable "All sources" crumb to go back to the top level.
@@ -141,6 +188,51 @@ describe("SourcesClient", () => {
     getSourceComparison.mockResolvedValueOnce(sourceComparison());
     await user.click(screen.getByRole("button", { name: "All sources" }));
     expect(await screen.findByText("All sources")).toBeInTheDocument();
+  });
+
+  it("drills into the no-campaign-captured bucket using an explicit boolean, not a sentinel string", async () => {
+    const user = userEvent.setup();
+    getSourceComparison.mockResolvedValueOnce(sourceComparison());
+    getSourceComparison.mockResolvedValueOnce(campaignComparison());
+    getSourceComparison.mockResolvedValueOnce({
+      ...campaignComparison(),
+      dimension: "LANDING_PAGE",
+      rows: [
+        {
+          dimensionValue: "https://example.test/no-campaign-landing",
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 300,
+          customerCount: 1,
+        },
+      ],
+    });
+
+    render(<SourcesClient {...baseProps} />);
+
+    await user.click(await screen.findByRole("button", { name: "google" }));
+    await screen.findByText("spring_sale");
+
+    const noCampaignLabel = screen.getByRole("button", {
+      name: "No campaign captured",
+    });
+    await user.click(noCampaignLabel);
+
+    expect(
+      await screen.findByText("https://example.test/no-campaign-landing"),
+    ).toBeInTheDocument();
+    expect(getSourceComparison).toHaveBeenLastCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      "LANDING_PAGE",
+      { source: "google", campaign: undefined, campaignMissing: true },
+    );
+    expect(
+      screen.getByText("No campaign captured", { selector: "span" }),
+    ).toBeInTheDocument();
   });
 
   it("reconciles the evidence table exactly to the clicked New MRR cell", async () => {

@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { PeriodFilter } from "@/components/overview/PeriodFilter";
 import { SourcesClient } from "@/components/sources/SourcesClient";
 import { ApiError } from "@/lib/api/errors";
+import { getAttributionCoverage } from "@/lib/api/reporting";
 import { createServerClient } from "@/lib/api/server-client";
 import { getProject } from "@/lib/api/workspaces";
 import {
@@ -38,6 +39,16 @@ export default async function ProjectSourcesPage({
     if (error instanceof ApiError && error.status === 404) notFound();
     throw error;
   }
+
+  // Attribution coverage is a supporting data-quality signal, not the primary content -- a
+  // transient failure here must not take down the whole comparison screen (or silently pretend
+  // coverage is 100%). CoveragePanel renders an honest "couldn't load" state on null, matching
+  // DataHealthPanel's precedent for the same read model on the Overview screen.
+  const coverage = await getAttributionCoverage(
+    client,
+    workspaceId,
+    projectId,
+  ).catch(() => null);
 
   return (
     <div style={{ display: "grid", gap: 24, maxWidth: 1040 }}>
@@ -78,6 +89,7 @@ export default async function ProjectSourcesPage({
         projectId={projectId}
         from={from}
         to={to}
+        coverage={coverage}
       />
     </div>
   );

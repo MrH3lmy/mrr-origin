@@ -138,13 +138,40 @@ class SourceComparisonIntegrationTests {
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue=='https://example.test/landing-b')].totalMinor").value(600))
                 .andExpect(jsonPath("$.rows.length()").value(2));
 
-        mockMvc.perform(comparison(OWNER, "LANDING_PAGE", "google", "NONE"))
+        mockMvc.perform(comparisonWithMissingCampaign(OWNER, "google"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.rows[?(@.dimensionValue=='https://example.test/landing-c')].totalMinor").value(400))
                 .andExpect(jsonPath("$.rows.length()").value(1));
 
         mockMvc.perform(comparison(OWNER, "LANDING_PAGE", "google", null)).andExpect(status().isBadRequest());
         mockMvc.perform(comparison(OWNER, "LANDING_PAGE", null, "spring_sale")).andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void aRealCampaignLiterallyNamedNoneIsDistinctFromTheNoCampaignBucket() throws Exception {
+        // Regression: the LANDING_PAGE comparison used to encode "no campaign captured" as the magic
+        // string "NONE" inside the campaign parameter itself. utm_campaign is a founder-controlled
+        // value, so a real campaign named "NONE" would have collided with that sentinel and silently
+        // shown the wrong landing pages. campaignMissing is now a separate boolean.
+        acquireAndAttribute("cus_real_none", "USD", 900, "2026-04-05T00:00:00Z", "google", "NONE", "/landing-real");
+        acquireAndAttribute("cus_missing_campaign", "USD", 500, "2026-04-06T00:00:00Z", "google", null, "/landing-missing");
+
+        mockMvc.perform(comparison(OWNER, "LANDING_PAGE", "google", "NONE"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[?(@.dimensionValue=='https://example.test/landing-real')].totalMinor").value(900))
+                .andExpect(jsonPath("$.rows.length()").value(1));
+
+        mockMvc.perform(comparisonWithMissingCampaign(OWNER, "google"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[?(@.dimensionValue=='https://example.test/landing-missing')].totalMinor").value(500))
+                .andExpect(jsonPath("$.rows.length()").value(1));
+
+        // campaign and campaignMissing together is a contradiction, not silently resolved one way.
+        mockMvc.perform(get("/api/workspaces/{workspaceId}/projects/{projectId}/reporting/comparison", workspace, project)
+                        .queryParam("from", FROM).queryParam("to", TO).queryParam("dimension", "LANDING_PAGE")
+                        .queryParam("source", "google").queryParam("campaign", "spring_sale")
+                        .queryParam("campaignMissing", "true").with(token(OWNER)))
+                .andExpect(status().isBadRequest());
     }
 
     @Test
@@ -407,6 +434,16 @@ class SourceComparisonIntegrationTests {
         if (source != null) request = request.queryParam("source", source);
         if (campaign != null) request = request.queryParam("campaign", campaign);
         return request;
+    }
+
+    private MockHttpServletRequestBuilder comparisonWithMissingCampaign(String actor, String source) {
+        return get("/api/workspaces/{workspaceId}/projects/{projectId}/reporting/comparison", workspace, project)
+                .queryParam("from", FROM)
+                .queryParam("to", TO)
+                .queryParam("dimension", "LANDING_PAGE")
+                .queryParam("source", source)
+                .queryParam("campaignMissing", "true")
+                .with(token(actor));
     }
 
     private MockHttpServletRequestBuilder movements(String actor, String source, String campaign, String landingPage) {

@@ -23,6 +23,7 @@ function comparison(rows: ComparisonRow[]): SourceComparison {
     dimension: "SOURCE",
     source: null,
     campaign: null,
+    campaignMissing: false,
     rows,
     unavailableMetrics: [
       { metric: "RETAINED_MRR", reason: "Not available yet — depends on #25." },
@@ -39,6 +40,7 @@ const baseProps = {
   dimension: "SOURCE" as const,
   source: null,
   campaign: null,
+  campaignMissing: false,
   onDrillDown: vi.fn(),
   onSelectMetric: vi.fn(),
   selectedMetric: null,
@@ -241,5 +243,41 @@ describe("ComparisonTable", () => {
     await screen.findByText("USD");
     expect(screen.getByText("EUR")).toBeInTheDocument();
     expect(screen.getAllByText("google")).toHaveLength(2);
+  });
+
+  it("passes campaignMissing as an explicit boolean rather than a sentinel value in campaign", async () => {
+    getSourceComparison.mockResolvedValue(
+      comparison([
+        {
+          dimensionValue: "/landing-a",
+          currency: "USD",
+          movementType: "NEW",
+          totalMinor: 500,
+          customerCount: 1,
+        },
+      ]),
+    );
+
+    render(
+      <ComparisonTable
+        {...baseProps}
+        dimension="LANDING_PAGE"
+        source="google"
+        campaign={null}
+        campaignMissing
+      />,
+    );
+
+    await screen.findByText("/landing-a");
+
+    expect(getSourceComparison).toHaveBeenCalledWith(
+      {},
+      "ws-1",
+      "proj-1",
+      baseProps.from,
+      baseProps.to,
+      "LANDING_PAGE",
+      { source: "google", campaign: undefined, campaignMissing: true },
+    );
   });
 });

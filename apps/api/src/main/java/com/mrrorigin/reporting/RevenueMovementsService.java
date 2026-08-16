@@ -78,7 +78,9 @@ public class RevenueMovementsService {
             String movementType,
             String source,
             String campaign,
+            boolean campaignMissing,
             String landingPage,
+            boolean landingPageMissing,
             String currency,
             String cursor,
             Integer limit) {
@@ -91,11 +93,19 @@ public class RevenueMovementsService {
         if (movementType != null && !MOVEMENT_TYPES.contains(movementType)) {
             throw new IllegalArgumentException("movementType must be one of " + MOVEMENT_TYPES);
         }
-        if ((campaign != null || landingPage != null) && source == null) {
+        if (campaign != null && campaignMissing) {
+            throw new IllegalArgumentException("campaign and campaignMissing are mutually exclusive");
+        }
+        if (landingPage != null && landingPageMissing) {
+            throw new IllegalArgumentException("landingPage and landingPageMissing are mutually exclusive");
+        }
+        boolean hasCampaign = campaign != null || campaignMissing;
+        boolean hasLandingPage = landingPage != null || landingPageMissing;
+        if ((hasCampaign || hasLandingPage) && source == null) {
             throw new IllegalArgumentException("source is required when filtering by campaign or landingPage");
         }
-        if (landingPage != null && campaign == null) {
-            throw new IllegalArgumentException("campaign is required when filtering by landingPage");
+        if (hasLandingPage && !hasCampaign) {
+            throw new IllegalArgumentException("campaign or campaignMissing is required when filtering by landingPage");
         }
         int pageSize = normalizeLimit(limit);
         Optional<Cursor> decoded = Cursor.decode(cursor);
@@ -120,11 +130,11 @@ public class RevenueMovementsService {
                                OR (:source = 'UNATTRIBUTED' AND (r.confidence IS DISTINCT FROM 'STRONG'))
                                OR (r.confidence = 'STRONG' AND r.first_source = :source))
                           AND (:hasCampaign = FALSE
-                               OR (:campaign = 'NONE' AND r.confidence = 'STRONG' AND r.first_campaign IS NULL)
-                               OR (r.confidence = 'STRONG' AND r.first_campaign = :campaign))
+                               OR (:campaignMissing = TRUE AND r.confidence = 'STRONG' AND r.first_campaign IS NULL)
+                               OR (:campaignMissing = FALSE AND r.confidence = 'STRONG' AND r.first_campaign = :campaign))
                           AND (:hasLandingPage = FALSE
-                               OR (:landingPage = 'NONE' AND r.confidence = 'STRONG' AND r.first_landing_page IS NULL)
-                               OR (r.confidence = 'STRONG' AND r.first_landing_page = :landingPage))
+                               OR (:landingPageMissing = TRUE AND r.confidence = 'STRONG' AND r.first_landing_page IS NULL)
+                               OR (:landingPageMissing = FALSE AND r.confidence = 'STRONG' AND r.first_landing_page = :landingPage))
                           AND (:hasCursor = FALSE OR (m.effective_at, m.id) > (:cursorAt, :cursorId))
                         ORDER BY m.effective_at, m.id
                         LIMIT :fetchLimit
@@ -141,9 +151,11 @@ public class RevenueMovementsService {
                 .param("currency", currency == null ? "" : currency)
                 .param("hasSource", source != null)
                 .param("source", source == null ? "" : source)
-                .param("hasCampaign", campaign != null)
+                .param("hasCampaign", hasCampaign)
+                .param("campaignMissing", campaignMissing)
                 .param("campaign", campaign == null ? "" : campaign)
-                .param("hasLandingPage", landingPage != null)
+                .param("hasLandingPage", hasLandingPage)
+                .param("landingPageMissing", landingPageMissing)
                 .param("landingPage", landingPage == null ? "" : landingPage)
                 .param("hasCursor", decoded.isPresent())
                 .param("cursorAt", decoded.map(Cursor::effectiveAt).orElse(OffsetDateTime.now()))
