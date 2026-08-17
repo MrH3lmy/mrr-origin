@@ -134,7 +134,9 @@ class PostmarkEmailSender implements EmailSender {
         if (code == 429 || code >= 500) {
             return false;
         }
-        return code >= 400;
+        // This method is called only for non-2xx responses. Redirects are not a usable send
+        // outcome for this fixed provider endpoint and a bare retry cannot correct one.
+        return true;
     }
 
     private static String textField(JsonNode node, String field) {
