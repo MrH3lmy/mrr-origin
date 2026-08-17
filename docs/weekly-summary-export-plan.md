@@ -64,11 +64,10 @@ currency)` — the two movement-based metrics that don't require cohort
   - `STABLE`: none of the above; sample is sufficient but change is < 25%.
   - Never described as a statistically detected anomaly (no stddev/z-score
     language anywhere in copy).
-- **Interpretation flagged for review**: "the applicable customer count" for
-  an ordinary (non-zero-crossing) comparison is defined here as
+- **Confirmed interpretation**: "the applicable customer count" for an
+  ordinary (non-zero-crossing) comparison is
   `min(currentWeekCount, priorWeekCount)` — if either week's sample is thin,
-  the comparison is unreliable regardless of the other week's size. Please
-  confirm or correct before implementation.
+  the comparison is unreliable regardless of the other week's size.
 
 ### 3. Delivery scope
 
@@ -105,9 +104,10 @@ WeeklySummaryResponse {
 
 CurrencySection {
   currency
-  insights: [ Insight ]     // ordered dimension ASC, dimension_value ASC (real
-                             // values before NONE before UNATTRIBUTED), movementType
-                             // (NEW before CHURN) -- deterministic, matches CSV row order
+  insights: [ Insight ]     // ordered dimension ASC, parent source/campaign
+                             // hierarchy ASC, dimension_value ASC (real values
+                             // before NONE before UNATTRIBUTED), movementType
+                             // (NEW before CHURN) -- deterministic
 }
 
 Insight {
@@ -117,9 +117,9 @@ Insight {
   movementType               // NEW | CHURN
   currentAmountMinor, currentCustomerCount
   priorAmountMinor, priorCustomerCount
-  percentageChange           // nullable Double (ratio, e.g. 0.30); null exactly when priorAmountMinor
-                              // = 0 (mathematically undefined) -- both NEWLY_APPEARED and DISAPPEARED
-                              // always carry percentageChange = null
+  percentageChange           // nullable Double (ratio, e.g. 0.30); null exactly when
+                              // priorAmountMinor = 0 (mathematically undefined), so
+                              // NEWLY_APPEARED is null; DISAPPEARED is -1.0
   applicableCustomerCount    // the count actually used for the §2 threshold gate --
                               // min(currentCustomerCount, priorCustomerCount) except
                               // NEWLY_APPEARED (= currentCustomerCount) and
@@ -127,12 +127,25 @@ Insight {
                               // and clients don't have to re-derive the gating rule
   status                     // MATERIAL_CHANGE | NEWLY_APPEARED | DISAPPEARED |
                               // INSUFFICIENT_SAMPLE | STABLE
-  evidenceLink                // dashboard path, see below
+  currentEvidenceFilters {    // exact RevenueMovementsService filter contract
+    from, to, movementType, currency
+    source, sourceUnattributed, sourceMissing
+    campaign, campaignMissing
+    landingPage, landingPageMissing
+  }
+  priorEvidenceFilters {       // same hierarchy/type/currency; prior week's from/to
+    from, to, movementType, currency
+    source, sourceUnattributed, sourceMissing
+    campaign, campaignMissing
+    landingPage, landingPageMissing
+  }
+  currentEvidenceLink          // current-week dashboard evidence
+  priorEvidenceLink            // prior-week dashboard evidence
 }
 ```
 
-One `Insight` per `(dimension, dimensionValue-or-bucket, movementType)` that
-has a nonzero amount in the current week, the prior week, or both -- the same
+One `Insight` per `(dimension, parent filter hierarchy,
+dimensionValue-or-bucket, movementType)` that has a nonzero amount in the current week, the prior week, or both -- the same
 population `comparison-v1`'s pivoted rows would cover for New/Churned MRR, so
 the DTO and the CSV export reconcile against the same underlying query. No
 insight is dropped for being `STABLE` or `INSUFFICIENT_SAMPLE`: every
@@ -140,20 +153,36 @@ qualifying bucket gets a statement, per the issue's "every summary statement
 links to a dashboard view" requirement -- suppression per §1 changes an
 insight's _language_, never its presence.
 
-`evidenceLink` is a relative path into the existing Sources screen (#23),
-carrying the exact filters that reconcile to the insight:
-`/app/{workspaceId}/projects/{projectId}/sources?dimension={dimension}&value={dimensionValue|bucket}&from={weekStart}&to={weekEnd}&currency={currency}`.
-Exact query parameter names are finalized against `SourcesClient.tsx`'s
-current `searchParams` contract during implementation, not invented here;
-the path target and filter set are what's fixed by this contract.
+Each insight carries the complete parent hierarchy in both
+`currentEvidenceFilters` and `priorEvidenceFilters`. They differ only in
+their `from`/`to` week boundaries. Campaign evidence includes its real parent `source`; landing-page evidence
+includes its real parent `source` plus either `campaign` or
+`campaignMissing=true`. SOURCE buckets use `sourceMissing=true` for
+`NONE` and `sourceUnattributed=true` for `UNATTRIBUTED`. CAMPAIGN and
+LANDING_PAGE missing buckets use `campaignMissing=true` and
+`landingPageMissing=true`, respectively. Bucket labels are never sent as
+sentinel values in a string filter, so real values such as `NONE` or
+`UNATTRIBUTED` cannot collide with a bucket.
+
+`currentEvidenceLink` and `priorEvidenceLink` are relative paths into the
+Sources screen (#23) carrying those exact filters, with `from`/`to` set to
+the applicable current or prior week. The implementation must widen the
+Sources page's `searchParams` contract to accept and initialize
+`movementType`, `currency`, `source`, `sourceUnattributed`,
+`sourceMissing`, `campaign`, `campaignMissing`, `landingPage`, and
+`landingPageMissing`, using the same explicit boolean modes as
+`RevenueMovementsService`. Opening either link must preselect the exact
+comparison cell and widened movement drill-down whose total and row count
+reconcile to that side of the insight.
 
 **Text/HTML rendering contract**: both are pure functions over
 `WeeklySummaryResponse`, one section per currency, one line per insight
 _except_ `STABLE` insights, which are omitted from the rendered narrative
 (they remain in the DTO/JSON for reconciliation) and rolled up into a single
-trailing line per currency section ("N other sources were stable this week")
+trailing line per currency section ("N other comparison signals were stable this week")
 linking to the full `comparison-v1`/Sources view for that period and
-currency. Line copy follows §1/§2's wording rules verbatim (no "anomaly"
+currency. Every rendered non-`STABLE` statement exposes both current- and
+prior-week evidence links. Line copy follows §1/§2's wording rules verbatim (no "anomaly"
 language, `INSUFFICIENT_SAMPLE` insights use the flat factual phrasing from
 §1, never comparative language). HTML output is the same line structure
 wrapped in the existing `apps/web` component styling conventions, not a
@@ -195,7 +224,9 @@ Shared conventions across all three:
   `NO_ACQUISITION_COHORT` (no retention row exists for this key at all, per
   `RevenueOverviewController#unavailableMetrics`'s identical reason code).
   Both leave every numeric field of the row's retained-MRR/retention-
-  percentage/NRR blank with `..._available = false` -- the two reasons only
+  percentage/NRR blank; `retained_mrr_available`,
+  `retention_percentage_available`, and `nrr_available` are all `false`
+  (and are always identical for a row) -- the two reasons only
   differ in _why_, never in the shape of the unavailable value.
 - Every row carries an `evidence_link`: a relative dashboard path (workspace/
   project/period/dimension/currency filter) that reconciles to that exact
@@ -229,12 +260,13 @@ Ordered columns:
 11. `retention_age_days` — `30` \| `60` \| `90` (single value, caller-selected)
 12. `retained_mrr_available`
 13. `retained_mrr_amount_minor` — blank when unavailable
-14. `retention_percentage` — ratio (e.g. `0.85`), blank when unavailable
-15. `nrr_available`
-16. `nrr` — ratio, blank when unavailable
-17. `unavailable_reason` — `MATURITY_PENDING` \| `NO_ACQUISITION_COHORT` \|
+14. `retention_percentage_available`
+15. `retention_percentage` — ratio (e.g. `0.85`), blank when unavailable
+16. `nrr_available`
+17. `nrr` — ratio, blank when unavailable
+18. `unavailable_reason` — `MATURITY_PENDING` \| `NO_ACQUISITION_COHORT` \|
     blank
-18. `evidence_link`
+19. `evidence_link`
 
 Row order: `currency ASC`, then `dimension_value ASC` (real values before
 `NONE` before `UNATTRIBUTED`).
