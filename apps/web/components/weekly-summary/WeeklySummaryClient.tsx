@@ -60,6 +60,53 @@ function EvidenceLinks({ insight }: { insight: WeeklySummaryInsight }) {
   );
 }
 
+function fullSourcesLink(
+  workspaceId: string,
+  projectId: string,
+  from: string,
+  to: string,
+  currency: string,
+): string {
+  const params = new URLSearchParams({ from, to, currency });
+  return `/app/${workspaceId}/projects/${projectId}/sources?${params}`;
+}
+
+function FullEvidenceLinks({
+  summary,
+  currency,
+}: {
+  summary: WeeklySummary;
+  currency: string;
+}) {
+  return (
+    <span className={styles.evidenceLinks}>
+      <Link
+        href={fullSourcesLink(
+          summary.workspaceId,
+          summary.projectId,
+          summary.weekStart,
+          summary.weekEnd,
+          currency,
+        )}
+      >
+        This week
+      </Link>
+      {" / "}
+      <Link
+        href={fullSourcesLink(
+          summary.workspaceId,
+          summary.projectId,
+          summary.priorWeekStart,
+          summary.priorWeekEnd,
+          currency,
+        )}
+      >
+        Prior week
+      </Link>
+    </span>
+  );
+}
+
 function InsightRow({
   insight,
   currency,
@@ -80,13 +127,23 @@ function InsightRow({
         </StatusBadge>
       </div>
       <p className={styles.insightDetail}>
-        {formatMoneyMinor(insight.currentAmountMinor, currency)} this week (
-        {insight.currentCustomerCount} customers), was{" "}
-        {formatMoneyMinor(insight.priorAmountMinor, currency)} (
-        {insight.priorCustomerCount} customers) prior week.
-        {insight.percentageChange !== null
-          ? ` ${Math.round(insight.percentageChange * 100)}% change.`
-          : ""}
+        {insight.status === "INSUFFICIENT_SAMPLE" ? (
+          <>
+            {formatMoneyMinor(insight.currentAmountMinor, currency)} this week
+            across {insight.currentCustomerCount} customers — too few customers
+            to compare week over week.
+          </>
+        ) : (
+          <>
+            {formatMoneyMinor(insight.currentAmountMinor, currency)} this week (
+            {insight.currentCustomerCount} customers), was{" "}
+            {formatMoneyMinor(insight.priorAmountMinor, currency)} (
+            {insight.priorCustomerCount} customers) prior week.
+            {insight.percentageChange !== null
+              ? ` ${Math.round(insight.percentageChange * 100)}% change.`
+              : ""}
+          </>
+        )}
       </p>
       <EvidenceLinks insight={insight} />
     </li>
@@ -180,7 +237,11 @@ export function WeeklySummaryClient({
             >
               {actionable.length === 0 ? (
                 <p className={styles.allStable}>
-                  Every comparison signal was stable this week.
+                  Every comparison signal was stable this week.{" "}
+                  <FullEvidenceLinks
+                    summary={summary}
+                    currency={section.currency}
+                  />
                 </p>
               ) : (
                 <ul className={styles.insightList}>
@@ -196,7 +257,11 @@ export function WeeklySummaryClient({
               {stableCount > 0 ? (
                 <p className={styles.stableNote}>
                   {stableCount} other comparison signal
-                  {stableCount === 1 ? "" : "s"} stable this week.
+                  {stableCount === 1 ? "" : "s"} stable this week.{" "}
+                  <FullEvidenceLinks
+                    summary={summary}
+                    currency={section.currency}
+                  />
                 </p>
               ) : null}
             </Panel>
