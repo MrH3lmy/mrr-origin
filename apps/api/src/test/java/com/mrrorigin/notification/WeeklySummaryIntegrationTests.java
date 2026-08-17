@@ -5,6 +5,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -12,6 +15,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,6 +36,9 @@ import org.springframework.test.web.servlet.request.RequestPostProcessor;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import com.mrrorigin.attribution.AttributionApplicationService;
 
@@ -68,6 +75,7 @@ class WeeklySummaryIntegrationTests {
     private static final String PRIOR_TO = "2026-03-02T00:00:00Z";
 
     @Autowired private MockMvc mockMvc;
+    @Autowired private ObjectMapper objectMapper;
     @Autowired private JdbcClient db;
     @Autowired private AttributionApplicationService attribution;
 
@@ -176,33 +184,77 @@ class WeeklySummaryIntegrationTests {
     }
 
     @Test
-    void evidenceLinksReconcileExactlyWithTheMovementsDrilldown() throws Exception {
+    void everyComparisonInsightReconcilesExactlyWithTheMovementsDrilldown() throws Exception {
         acquireEight("goog_prior", "google", "USD", 1000, PRIOR_FROM);
         acquireEight("goog_cur", "google", "USD", 1300, CURRENT_FROM);
 
-        // The exact path EvidenceLink.path() builds for this insight's current-week filters -- proves
-        // the JSON response carries this precise, decodable filter set rather than an opaque summary.
-        String expectedLink = "/app/" + workspace + "/projects/" + project + "/sources?"
-                + "from=" + enc(OffsetDateTime.parse(CURRENT_FROM).toString())
-                + "&to=" + enc(OffsetDateTime.parse(CURRENT_TO).toString())
-                + "&movementType=NEW&currency=USD&source=google";
+        // Exercise the explicit missing-field hierarchy as well as real values.
+        acquireAndAttribute("campaign_none_prior", "USD", 250, PRIOR_FROM, "google", null, "/campaign-none");
+        acquireAndAttribute("campaign_none_cur", "USD", 300, CURRENT_FROM, "google", null, "/campaign-none");
+        acquireAndAttribute("landing_none_prior", "USD", 350, PRIOR_FROM, "google", "landingless", null);
+        acquireAndAttribute("landing_none_cur", "USD", 400, CURRENT_FROM, "google", "landingless", null);
+        acquireAndAttribute("source_none_prior", "USD", 450, PRIOR_FROM, null, null, "/direct");
+        acquireAndAttribute("source_none_cur", "USD", 500, CURRENT_FROM, null, null, "/direct");
 
-        mockMvc.perform(weeklySummary(OWNER))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath(insightPath("google") + ".currentEvidenceLink").value(expectedLink));
+        // Exercise genuinely unattributed SOURCE rows (no acceptable touchpoint evidence).
+        movement("unattributed_prior", "USD", 550, PRIOR_FROM, "NEW");
+        link("unattributed_prior");
+        attribution.recalculate(workspace, project, "unattributed_prior");
+        movement("unattributed_cur", "USD", 600, CURRENT_FROM, "NEW");
+        link("unattributed_cur");
+        attribution.recalculate(workspace, project, "unattributed_cur");
 
-        // Replaying that exact filter set against #22's own movement drilldown must reconcile to the
-        // insight's currentAmountMinor/currentCustomerCount -- not a looser or different query.
-        mockMvc.perform(get("/api/workspaces/{workspaceId}/projects/{projectId}/reporting/movements", workspace, project)
-                        .queryParam("from", CURRENT_FROM)
-                        .queryParam("to", CURRENT_TO)
-                        .queryParam("movementType", "NEW")
-                        .queryParam("currency", "USD")
-                        .queryParam("source", "google")
-                        .with(token(OWNER)))
+        MvcResult result = mockMvc.perform(weeklySummary(OWNER))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.entries.length()").value(8))
-                .andExpect(jsonPath("$.entries[0].amountMinor").value(1300));
+                .andReturn();
+        JsonNode sections = objectMapper
+                .readTree(result.getResponse().getContentAsString())
+                .path("currencySections");
+
+        int reconciled = 0;
+        for (JsonNode section : sections) {
+            for (JsonNode insight : section.path("insights")) {
+                reconcileEvidence(
+                        insight.path("currentEvidenceLink").asText(),
+                        insight.path("currentAmountMinor").asLong(),
+                        insight.path("currentCustomerCount").asLong());
+                reconcileEvidence(
+                        insight.path("priorEvidenceLink").asText(),
+                        insight.path("priorAmountMinor").asLong(),
+                        insight.path("priorCustomerCount").asLong());
+                reconciled++;
+            }
+        }
+        Assertions.assertTrue(reconciled >= 8, "expected all hierarchy and bucket rows to be exercised");
+    }
+
+    private void reconcileEvidence(String link, long expectedAmountMinor, long expectedCustomerCount)
+            throws Exception {
+        MockHttpServletRequestBuilder request = get(
+                        "/api/workspaces/{workspaceId}/projects/{projectId}/reporting/movements",
+                        workspace,
+                        project)
+                .with(token(OWNER));
+        String rawQuery = URI.create(link).getRawQuery();
+        for (String pair : rawQuery.split("&")) {
+            String[] parts = pair.split("=", 2);
+            String name = URLDecoder.decode(parts[0], StandardCharsets.UTF_8);
+            String value = URLDecoder.decode(parts[1], StandardCharsets.UTF_8);
+            request.queryParam(name, value);
+        }
+
+        MvcResult result = mockMvc.perform(request)
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode entries = objectMapper
+                .readTree(result.getResponse().getContentAsString())
+                .path("entries");
+        long actualAmountMinor = 0;
+        for (JsonNode entry : entries) {
+            actualAmountMinor += entry.path("amountMinor").asLong();
+        }
+        Assertions.assertEquals(expectedCustomerCount, entries.size(), link);
+        Assertions.assertEquals(expectedAmountMinor, actualAmountMinor, link);
     }
 
     private static String enc(String value) {
@@ -315,7 +367,7 @@ class WeeklySummaryIntegrationTests {
         movement(stripeCustomerId, currency, amountMinor, effectiveAt, "NEW");
         link(stripeCustomerId);
         touchpoint(stripeCustomerId, OffsetDateTime.parse(effectiveAt).minusHours(1).toString(), source, campaign,
-                "https://example.test" + landingPath);
+                landingPath == null ? null : "https://example.test" + landingPath);
         attribution.recalculate(workspace, project, stripeCustomerId);
     }
 
