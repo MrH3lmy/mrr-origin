@@ -290,6 +290,23 @@ class WeeklySummaryDeliveryIntegrationTests {
     }
 
     @Test
+    void ambiguousOutcomeSurvivesManualReplay() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+
+        ClaimedDelivery claim = deliveryRepository.claimBatch(10, now).get(0);
+        deliveryRepository.markFailed(
+                claim.id(), claim.leaseToken(), "ambiguous permanent outcome", true, true, claim.attemptCount(), now);
+        assertThat(statusFor(OWNER)).isEqualTo("PERMANENTLY_FAILED");
+        assertThat(ambiguousFor(OWNER)).isTrue();
+
+        assertThat(deliveryRepository.resetPermanentlyFailedForReplay(claim.id(), now.plusMinutes(1))).isTrue();
+
+        assertThat(statusFor(OWNER)).isEqualTo("PENDING");
+        assertThat(ambiguousFor(OWNER)).isTrue();
+    }
+
+    @Test
     void isLeaseCurrentDetectsAReclaimedLease() {
         // Backs the pre-send freshness check (#59, review fix): narrows, though it cannot fully close,
         // the window where a merely-paused (not dead) worker could otherwise resume its own send after
@@ -298,13 +315,17 @@ class WeeklySummaryDeliveryIntegrationTests {
         deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
 
         ClaimedDelivery original = deliveryRepository.claimBatch(10, now).get(0);
-        assertThat(deliveryRepository.isLeaseCurrent(original.id(), original.leaseToken())).isTrue();
+        assertThat(deliveryRepository.isLeaseCurrent(original.id(), original.leaseToken(), now)).isTrue();
+
+        // An expired-but-not-yet-reclaimed lease is no longer current and must not pass the
+        // pre-send guard merely because its token is still stored on the row.
+        assertThat(deliveryRepository.isLeaseCurrent(original.id(), original.leaseToken(), now.plusMinutes(11))).isFalse();
 
         OffsetDateTime muchLater = now.plusMinutes(30);
         ClaimedDelivery reclaimed = deliveryRepository.claimBatch(10, muchLater).get(0);
 
-        assertThat(deliveryRepository.isLeaseCurrent(original.id(), original.leaseToken())).isFalse();
-        assertThat(deliveryRepository.isLeaseCurrent(reclaimed.id(), reclaimed.leaseToken())).isTrue();
+        assertThat(deliveryRepository.isLeaseCurrent(original.id(), original.leaseToken(), muchLater)).isFalse();
+        assertThat(deliveryRepository.isLeaseCurrent(reclaimed.id(), reclaimed.leaseToken(), muchLater)).isTrue();
     }
 
     @Test
