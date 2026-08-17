@@ -2,13 +2,13 @@
 
 ## Status
 
-**PROPOSED — pending owner review.** This document, plus
-[ADR-0007](adr/0007-weekly-summary-email-provider.md), must be reviewed and
-the open questions in "Blocking questions" resolved by the issue owner
-before implementation code is written, per `CLAUDE.md`'s task instructions
-and the precedent set by `docs/weekly-summary-export-plan.md` (frozen only
-after owner review). No delivery/scheduling/retry/opt-out code has been
-written yet.
+**FROZEN — approved by the issue owner on 2026-08-17.** All decisions
+proposed below (B1-B7) are accepted as written and are now the authoritative
+contract for #59's implementation, per the same precedent
+`docs/weekly-summary-export-plan.md` set for #26. Section headings below are
+left as originally written (including the word "proposed") so the rationale
+stays attached to each decision; the "Blocking questions" section at the end
+records the accepted resolution for each one.
 
 ## What this reuses (no new calculation or presentation rule)
 
@@ -334,30 +334,32 @@ question B7.
 - No new public/unauthenticated endpoint (see §3b on the unsubscribe-link
   question).
 
-## Blocking questions (need owner confirmation before implementation)
+## Blocking questions — resolved 2026-08-17
 
-- **B1 (weekday/time/DST)**: Confirm or override the proposed Monday 08:00
-  project-local delivery time (§1b). DST handling itself (recompute from
-  `ZoneId` each week, never a stored UTC instant) is not expected to be
-  controversial, but the day/time default is a product choice.
-- **B2 (default recipient roles)**: Confirm `OWNER`+`ADMIN` as default
-  recipients, with `MEMBER`/`VIEWER` excluded by default and no opt-in path
+All seven accepted as proposed:
+
+- **B1 (weekday/time/DST) — ACCEPTED**: Monday 08:00 project-local delivery
+  time (§1b), DST handled by recomputing from `ZoneId` each week (never a
+  stored UTC instant).
+- **B2 (default recipient roles) — ACCEPTED**: `OWNER`+`ADMIN` are the
+  default recipients, `MEMBER`/`VIEWER` excluded by default, no opt-in path
   in v1 (§2a).
-- **B3 (recipient email source)**: Confirm storing `email` on
-  `WorkspaceMember` sourced from the OIDC token claim (§2c), or specify a
-  different source if the identity-provider integration already has one
-  planned.
-- **B4 (unsubscribe mechanism)**: Confirm authenticated-only opt-out is
-  acceptable for v1, or require an unauthenticated one-click unsubscribe
-  link (compliance-relevant) — if required, its token design needs to be
-  specified before implementation (§3b).
-- **B5 (retry schedule)**: Confirm or override the proposed 5-attempt,
-  1m/15m/1h/6h/24h backoff schedule (§4c).
-- **B6 (provider, sender, reply-to)**: Confirm the ADR-0007 provider
-  recommendation, and provide the sender and reply-to addresses to use
-  (§5) — no domain/mailbox convention exists anywhere in the repo today.
-- **B7 (audit retention)**: Confirm workspace-lifetime retention for
-  `weekly_summary_deliveries` (§6), or specify a shorter compliance window.
+- **B3 (recipient email source) — ACCEPTED**: `email` stored on
+  `WorkspaceMember`, sourced from the OIDC token's `email` claim (§2c).
+- **B4 (unsubscribe mechanism) — ACCEPTED**: authenticated-only opt-out for
+  v1; no unauthenticated one-click unsubscribe link (§3b).
+- **B5 (retry schedule) — ACCEPTED**: 5 attempts, 1m/15m/1h/6h/24h backoff,
+  then `PERMANENTLY_FAILED` (§4c).
+- **B6 (provider, sender, reply-to) — ACCEPTED**: Postmark per ADR-0007.
+  Sender and reply-to addresses remain purely operator-configured
+  (`WEEKLY_SUMMARY_SENDER_ADDRESS` / `WEEKLY_SUMMARY_REPLY_TO_ADDRESS`, no
+  value committed to the repo) — no concrete domain/mailbox was supplied
+  with this approval, so the API continues to start cleanly with these
+  blank and the scheduler skips dispatch with a one-time logged warning
+  until an operator sets them for a given deployment (§5, ADR-0007
+  "Migration and operational consequences").
+- **B7 (audit retention) — ACCEPTED**: workspace-lifetime retention for
+  `weekly_summary_deliveries`, cascade-deleted with the workspace (§6).
 
 ## Out-of-scope follow-ups (not blocking #59)
 

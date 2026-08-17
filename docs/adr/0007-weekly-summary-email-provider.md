@@ -1,6 +1,6 @@
 # ADR-0007: Weekly summary email provider
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-17
 
 ## Context
@@ -96,9 +96,11 @@ and the free/entry tier is sufficient through private beta. If sustained
 volume or cost ever changes this calculus post-beta, revisit as a new ADR —
 this decision is not assumed permanent.
 
-Sender and reply-to addresses are a separate, still-open product decision
-(see `docs/weekly-summary-delivery-plan.md` blocking question B6) and are
-not fixed by this ADR; only the provider is decided here.
+Sender and reply-to addresses remain purely operator-configured (per
+`docs/weekly-summary-delivery-plan.md` blocking question B6, accepted
+2026-08-17) — no value is fixed by this ADR or committed to the repo; each
+deployment supplies its own via `WEEKLY_SUMMARY_SENDER_ADDRESS` /
+`WEEKLY_SUMMARY_REPLY_TO_ADDRESS`.
 
 ## Provider-neutral interface
 
