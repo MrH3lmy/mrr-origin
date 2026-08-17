@@ -40,6 +40,16 @@ mrrorigin:
       live-webhook-secret: ${STRIPE_CONNECT_LIVE_WEBHOOK_SECRET:}
       redirect-uri: ${STRIPE_CONNECT_REDIRECT_URI:}
       state-ttl: ${STRIPE_CONNECT_STATE_TTL:PT15M}
+  notification:
+    email:
+      # Per #59/ADR-0007: Postmark is the only supported provider. Sender/reply-to are intentionally
+      # blank by default (no domain/mailbox convention exists in this repo) -- the scheduler skips
+      # dispatch with a logged warning until an operator configures these for a given deployment.
+      postmark-server-token: ${POSTMARK_SERVER_TOKEN:}
+      sender-address: ${WEEKLY_SUMMARY_SENDER_ADDRESS:}
+      reply-to-address: ${WEEKLY_SUMMARY_REPLY_TO_ADDRESS:}
+      message-stream: ${POSTMARK_MESSAGE_STREAM:outbound}
+      request-timeout: ${POSTMARK_REQUEST_TIMEOUT:PT10S}
 
 server:
   port: ${PORT:8080}

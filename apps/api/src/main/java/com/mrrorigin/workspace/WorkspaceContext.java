@@ -20,11 +20,13 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 public class WorkspaceContext {
 
     private final WorkspaceMemberRepository memberRepository;
+    private final WorkspaceMemberEmailCaptureService emailCaptureService;
     private final Map<UUID, WorkspaceMember> memberships = new HashMap<>();
     private String subjectId;
 
-    public WorkspaceContext(WorkspaceMemberRepository memberRepository) {
+    public WorkspaceContext(WorkspaceMemberRepository memberRepository, WorkspaceMemberEmailCaptureService emailCaptureService) {
         this.memberRepository = memberRepository;
+        this.emailCaptureService = emailCaptureService;
     }
 
     public String subjectId() {
@@ -45,9 +47,29 @@ public class WorkspaceContext {
     }
 
     public WorkspaceMember requireMembership(UUID workspaceId) {
-        return memberships.computeIfAbsent(workspaceId, id -> memberRepository
-                .findByWorkspaceIdAndSubjectId(id, subjectId())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Workspace not found")));
+        return memberships.computeIfAbsent(workspaceId, id -> {
+            WorkspaceMember member = memberRepository
+                    .findByWorkspaceIdAndSubjectId(id, subjectId())
+                    .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Workspace not found"));
+            captureEmailIfPresent(id, member);
+            return member;
+        });
+    }
+
+    /** Per #59: best-effort, lazy capture of this caller's own email from their JWT, at most once per member. */
+    private void captureEmailIfPresent(UUID workspaceId, WorkspaceMember member) {
+        if (member.email() != null) {
+            return;
+        }
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (!(authentication instanceof JwtAuthenticationToken jwtAuthentication)) {
+            return;
+        }
+        String email = jwtAuthentication.getToken().getClaimAsString("email");
+        if (email == null || email.isBlank()) {
+            return;
+        }
+        emailCaptureService.captureIfAbsent(workspaceId, member.subjectId(), email);
     }
 
     public WorkspaceMember requireManager(UUID workspaceId) {

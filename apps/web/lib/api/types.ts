@@ -621,3 +621,28 @@ export interface WeeklySummary {
   generatedAt: string;
   currencySections: WeeklySummaryCurrencySection[];
 }
+
+// -- Weekly summary delivery (#59) --
+
+export interface WeeklySummaryOptOut {
+  optedOut: boolean;
+}
+
+export type WeeklySummaryDeliveryStatus =
+  | "PENDING"
+  | "SENDING"
+  | "SENT"
+  | "FAILED"
+  | "PERMANENTLY_FAILED";
+
+export interface WeeklySummaryDelivery {
+  id: string;
+  recipientEmail: string;
+  weekStart: string;
+  status: WeeklySummaryDeliveryStatus;
+  attemptCount: number;
+  lastError: string | null;
+  providerMessageId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}

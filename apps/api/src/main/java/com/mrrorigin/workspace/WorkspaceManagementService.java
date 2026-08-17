@@ -153,6 +153,48 @@ public class WorkspaceManagementService {
         return getProject(workspaceId, projectId).timezone();
     }
 
+    /**
+     * Workspace members eligible by default to receive the weekly summary email (#59, per
+     * {@code docs/weekly-summary-delivery-plan.md} §2a/B2): manage-level role (OWNER/ADMIN) with a
+     * captured email address. A member with no captured email yet (see {@link WorkspaceMember}'s
+     * {@code email} field) is silently excluded -- an operational gap, never a failed delivery.
+     * Unlike every other method here, this is called from the scheduler's own background thread, not
+     * a per-caller authenticated request, so it does not go through {@link WorkspaceContext}.
+     */
+    public List<WeeklySummaryRecipient> listWeeklySummaryRecipients(UUID workspaceId) {
+        return memberRepository.findAllByWorkspaceIdOrderByCreatedAtAsc(workspaceId).stream()
+                .filter(member -> member.role().canManage())
+                .filter(member -> member.email() != null && !member.email().isBlank())
+                .map(member -> new WeeklySummaryRecipient(member.subjectId(), member.email()))
+                .toList();
+    }
+
+    public record WeeklySummaryRecipient(String subjectId, String email) {}
+
+    /**
+     * Every project system-wide, for the weekly-summary scheduler's own tick (#59), which has no
+     * authenticated caller/workspace context to scope a membership check against -- unlike every other
+     * method here. Returns a plain projection rather than the {@link Project} entity, whose accessors
+     * are package-private.
+     */
+    public List<SchedulableProject> listAllProjectsForScheduling() {
+        return projectRepository.findAll().stream()
+                .map(project -> new SchedulableProject(project.workspaceId(), project.id(), project.name(), project.timezone()))
+                .toList();
+    }
+
+    public record SchedulableProject(UUID workspaceId, UUID projectId, String projectName, String timezone) {}
+
+    /**
+     * A single project's name, for the scheduler's rendered email subject (#59) -- unlike {@link
+     * #getProject}, does not require an authenticated {@link WorkspaceContext}, since the scheduler
+     * runs on a background thread with no caller. Falls back to a generic label rather than throwing
+     * if the project has since been deleted between claiming a delivery and sending it.
+     */
+    public String projectNameForScheduling(UUID workspaceId, UUID projectId) {
+        return projectRepository.findByIdAndWorkspaceId(projectId, workspaceId).map(Project::name).orElse("your project");
+    }
+
     private static String normalizeCurrency(String reportingCurrency) {
         String currency = reportingCurrency == null || reportingCurrency.isBlank()
                 ? "USD"

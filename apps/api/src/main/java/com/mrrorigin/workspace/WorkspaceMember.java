@@ -29,6 +29,15 @@ public class WorkspaceMember {
     @Column(nullable = false, length = 32)
     private WorkspaceRole role;
 
+    /**
+     * Best-effort, nullable: captured lazily from the member's own JWT {@code email} claim (see
+     * {@link WorkspaceContext#requireMembership}), never required at row-creation time. Used only by
+     * weekly-summary recipient resolution (#59); a null value simply excludes the member from that
+     * resolution rather than failing anything.
+     */
+    @Column(length = 320)
+    private String email;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
@@ -51,6 +60,16 @@ public class WorkspaceMember {
 
     WorkspaceRole role() {
         return role;
+    }
+
+    /** Nullable; see the field's own doc comment. */
+    String email() {
+        return email;
+    }
+
+    /** Best-effort capture of the member's own email from their JWT claim; see the field's doc comment. */
+    void captureEmail(String email) {
+        this.email = email;
     }
 
     OffsetDateTime createdAt() {

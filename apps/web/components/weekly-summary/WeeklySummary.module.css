@@ -50,3 +50,26 @@
 .stableNote {
   margin-top: 12px;
 }
+
+.optOutRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--ds-border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--ds-surface-subtle);
+}
+
+.optOutLabel {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.optOutError {
+  margin: 4px 0 0;
+  color: var(--ds-danger);
+  font-size: 0.8125rem;
+}

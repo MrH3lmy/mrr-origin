@@ -19,6 +19,7 @@ import type {
 import { formatDateTime } from "@/lib/format";
 import { formatMoneyMinor } from "@/lib/format-currency";
 
+import { WeeklySummaryOptOutToggle } from "./WeeklySummaryOptOutToggle";
 import styles from "./WeeklySummary.module.css";
 
 interface WeeklySummaryClientProps {
@@ -182,23 +183,40 @@ export function WeeklySummaryClient({
     };
   }, [workspaceId, projectId]);
 
+  const optOutToggle = (
+    <WeeklySummaryOptOutToggle
+      workspaceId={workspaceId}
+      projectId={projectId}
+    />
+  );
+
   if (loading) {
-    return <SkeletonBlock label="Loading weekly summary" lines={6} />;
+    return (
+      <div style={{ display: "grid", gap: 20 }}>
+        {optOutToggle}
+        <SkeletonBlock label="Loading weekly summary" lines={6} />
+      </div>
+    );
   }
   if (error) {
     return (
-      <ErrorState
-        title="Could not load the weekly summary"
-        description={error}
-      />
+      <div style={{ display: "grid", gap: 20 }}>
+        {optOutToggle}
+        <ErrorState
+          title="Could not load the weekly summary"
+          description={error}
+        />
+      </div>
     );
   }
   if (!summary) {
-    return null;
+    return optOutToggle;
   }
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
+      {optOutToggle}
+
       <p className={styles.periodLabel}>
         Week of {formatDateTime(summary.weekStart)} to{" "}
         {formatDateTime(summary.weekEnd)} ({summary.timezone}), compared with
