@@ -41,3 +41,5 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Validate workspace
         run: pnpm check
+      - name: Audit dependencies
+        run: pnpm audit --audit-level=high
