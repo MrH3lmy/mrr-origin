@@ -375,8 +375,10 @@ class WeeklySummaryIntegrationTests {
 
     private void clearAttributedLandingPage(String stripeCustomerId) {
         db.sql(
-                        "UPDATE customer_attribution_results SET first_landing_page = NULL "
-                                + "WHERE workspace_id = :w AND stripe_customer_id = :c")
+                        "UPDATE customer_attribution_results r SET first_landing_page = NULL "
+                                + "FROM customer_mrr_movements m "
+                                + "WHERE r.workspace_id = :w AND m.workspace_id = r.workspace_id "
+                                + "AND m.id = r.movement_id AND m.stripe_customer_id = :c")
                 .param("w", workspace)
                 .param("c", stripeCustomerId)
                 .update();
