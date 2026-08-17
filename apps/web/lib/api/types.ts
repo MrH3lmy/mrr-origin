@@ -426,11 +426,15 @@ export interface CustomerAcquisitionSummary {
   calculatedAt: string | null;
 }
 
+/**
+ * Raw application-user and actor subject IDs are null for non-manager roles. Link existence and
+ * evidence metadata remain visible so read-only members can still audit attribution.
+ */
 export interface CustomerActiveLink {
   id: string;
-  externalUserId: string;
+  externalUserId: string | null;
   evidenceSource: string;
-  linkedBySubjectId: string;
+  linkedBySubjectId: string | null;
   createdAt: string;
 }
 
