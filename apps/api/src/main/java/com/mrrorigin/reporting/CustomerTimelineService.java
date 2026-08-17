@@ -47,7 +47,6 @@ import com.mrrorigin.workspace.WorkspaceContext;
 public class CustomerTimelineService {
     private static final int DEFAULT_LIMIT = 50;
     static final int MAX_LIMIT = 200;
-    private static final int MAX_REPAIR_HISTORY = 500;
 
     /**
      * Explicit, documented tie-break rank for timeline entries sharing the same timestamp -- the
@@ -109,7 +108,7 @@ public class CustomerTimelineService {
         List<LinkRow> links = links(workspaceId, projectId, stripeCustomerId);
         List<StatusEventRow> statusEvents = statusEvents(workspaceId, stripeCustomerId);
         List<CustomerLinkRepairAuditService.AuditEntry> repairs =
-                repairAudit.history(workspaceId, projectId, stripeCustomerId, MAX_REPAIR_HISTORY);
+                repairAudit.history(workspaceId, projectId, stripeCustomerId, Integer.MAX_VALUE);
 
         Map<UUID, OffsetDateTime> touchpointOccurredAt =
                 touchpointOccurredAt(workspaceId, projectId, acquisitionExplanation.orElse(null));
