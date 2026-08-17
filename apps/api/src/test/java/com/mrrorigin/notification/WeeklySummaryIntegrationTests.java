@@ -127,7 +127,7 @@ class WeeklySummaryIntegrationTests {
                 .andExpect(jsonPath(insightPath("google") + ".applicableCustomerCount").value(8))
                 .andExpect(insight("bing", "NEWLY_APPEARED"))
                 .andExpect(jsonPath(insightPath("bing") + ".percentageChange")
-                        .value(org.hamcrest.Matchers.nullValue()))
+                        .value(org.hamcrest.Matchers.contains(org.hamcrest.Matchers.nullValue())))
                 .andExpect(jsonPath(insightPath("bing") + ".priorAmountMinor").value(0))
                 .andExpect(insight("reddit", "DISAPPEARED"))
                 .andExpect(jsonPath(insightPath("reddit") + ".percentageChange").value(-1.0))
@@ -191,8 +191,10 @@ class WeeklySummaryIntegrationTests {
         // Exercise the explicit missing-field hierarchy as well as real values.
         acquireAndAttribute("campaign_none_prior", "USD", 250, PRIOR_FROM, "google", null, "/campaign-none");
         acquireAndAttribute("campaign_none_cur", "USD", 300, CURRENT_FROM, "google", null, "/campaign-none");
-        acquireAndAttribute("landing_none_prior", "USD", 350, PRIOR_FROM, "google", "landingless", null);
-        acquireAndAttribute("landing_none_cur", "USD", 400, CURRENT_FROM, "google", "landingless", null);
+        acquireAndAttribute("landing_none_prior", "USD", 350, PRIOR_FROM, "google", "landingless", "/placeholder");
+        clearAttributedLandingPage("landing_none_prior");
+        acquireAndAttribute("landing_none_cur", "USD", 400, CURRENT_FROM, "google", "landingless", "/placeholder");
+        clearAttributedLandingPage("landing_none_cur");
         acquireAndAttribute("source_none_prior", "USD", 450, PRIOR_FROM, null, null, "/direct");
         acquireAndAttribute("source_none_cur", "USD", 500, CURRENT_FROM, null, null, "/direct");
 
@@ -367,8 +369,17 @@ class WeeklySummaryIntegrationTests {
         movement(stripeCustomerId, currency, amountMinor, effectiveAt, "NEW");
         link(stripeCustomerId);
         touchpoint(stripeCustomerId, OffsetDateTime.parse(effectiveAt).minusHours(1).toString(), source, campaign,
-                landingPath == null ? null : "https://example.test" + landingPath);
+                "https://example.test" + landingPath);
         attribution.recalculate(workspace, project, stripeCustomerId);
+    }
+
+    private void clearAttributedLandingPage(String stripeCustomerId) {
+        db.sql(
+                        "UPDATE customer_attribution_results SET first_landing_page = NULL "
+                                + "WHERE workspace_id = :w AND stripe_customer_id = :c")
+                .param("w", workspace)
+                .param("c", stripeCustomerId)
+                .update();
     }
 
     private void movement(String stripeCustomerId, String currency, long amountMinor, String effectiveAt, String movementType) {
