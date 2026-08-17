@@ -109,8 +109,10 @@ class CustomerDirectoryIntegrationTests {
         mockMvc.perform(list(OWNER, null, null, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entries[0].currentMrr.length()").value(2))
-                .andExpect(jsonPath("$.entries[0].currentMrr[?(@.currency=='USD')].amountMinor").value(List.of(1000)))
-                .andExpect(jsonPath("$.entries[0].currentMrr[?(@.currency=='EUR')].amountMinor").value(List.of(900)));
+                .andExpect(jsonPath("$.entries[0].currentMrr[0].currency").value("EUR"))
+                .andExpect(jsonPath("$.entries[0].currentMrr[0].amountMinor").value(900))
+                .andExpect(jsonPath("$.entries[0].currentMrr[1].currency").value("USD"))
+                .andExpect(jsonPath("$.entries[0].currentMrr[1].amountMinor").value(1000));
     }
 
     @Test
