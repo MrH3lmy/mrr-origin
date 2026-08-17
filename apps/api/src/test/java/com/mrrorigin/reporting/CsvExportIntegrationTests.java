@@ -144,10 +144,40 @@ class CsvExportIntegrationTests {
         String csv = mockMvc.perform(request).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         String row = csv.lines().filter(l -> l.startsWith("SOURCE,google,,USD,")).findFirst().orElseThrow();
         String[] cols = row.split(",", -1);
-        // retained_mrr_available=false, retained_mrr_amount_minor blank, unavailable_reason=MATURITY_PENDING.
+        // Every unavailable metric uses the same false + blank shape, never a fabricated zero.
         Assertions.assertEquals("false", cols[11]);
         Assertions.assertEquals("", cols[12]);
+        Assertions.assertEquals("false", cols[13]);
+        Assertions.assertEquals("", cols[14]);
+        Assertions.assertEquals("false", cols[15]);
+        Assertions.assertEquals("", cols[16]);
         Assertions.assertEquals("MATURITY_PENDING", cols[17]);
+    }
+
+    @Test
+    void comparisonExportUsesTheSameUnavailableShapeWhenNoAcquisitionCohortExists() throws Exception {
+        movement("cus_churn_only", "USD", 700, "2026-04-05T00:00:00Z", "CHURN");
+        link("cus_churn_only");
+        attribution.recalculate(workspace, project, "cus_churn_only");
+
+        String csv = mockMvc.perform(comparisonExport(OWNER, "SOURCE"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        String row = csv.lines()
+                .filter(l -> l.startsWith("SOURCE,,UNATTRIBUTED,USD,"))
+                .findFirst()
+                .orElseThrow();
+        String[] cols = row.split(",", -1);
+
+        Assertions.assertEquals("false", cols[11]);
+        Assertions.assertEquals("", cols[12]);
+        Assertions.assertEquals("false", cols[13]);
+        Assertions.assertEquals("", cols[14]);
+        Assertions.assertEquals("false", cols[15]);
+        Assertions.assertEquals("", cols[16]);
+        Assertions.assertEquals("NO_ACQUISITION_COHORT", cols[17]);
     }
 
     @Test
