@@ -13,7 +13,7 @@ written yet.
 ## What this reuses (no new calculation or presentation rule)
 
 - **Summary content**: `WeeklySummaryService#summary(workspaceId, projectId,
-  weekStart)` (#26, `com.mrrorigin.notification`) — unchanged. Delivery
+weekStart)` (#26, `com.mrrorigin.notification`) — unchanged. Delivery
   calls it with `weekStart = null` (last completed week) exactly as the
   scheduler's own trigger time implies.
 - **Presentation**: `WeeklySummaryRenderer.renderText` /
@@ -24,13 +24,13 @@ written yet.
   and resolving recipients. No new tenancy primitive.
 - **Lease/claim pattern**: `StripeWebhookNormalizationService`'s
   claim-then-work-then-fenced-apply pattern (`SELECT ... FOR UPDATE SKIP
-  LOCKED` + lease timestamp stamped in the same statement, fenced
+LOCKED` + lease timestamp stamped in the same statement, fenced
   apply/fail by the exact claimed lease value) — reused verbatim for
   delivery-attempt claiming. `StripeWebhookReplayService`'s batch `FOR
-  UPDATE SKIP LOCKED` CTE shape is reused for the retry sweep.
+UPDATE SKIP LOCKED` CTE shape is reused for the retry sweep.
 - **Audit pattern**: `export_audit_log` (V18) / `stripe_customer_link_repair_audit_log`
   (V17) — append-only, no row-level/content data, `(project_id,
-  workspace_id) → projects ON DELETE CASCADE`. Reused for
+workspace_id) → projects ON DELETE CASCADE`. Reused for
   `weekly_summary_deliveries`.
 - **Project-scoped settings pattern**: `project_tracking_retention_settings`
   (V15) — one row per project, absent row means default — reused for opt-out
@@ -89,7 +89,7 @@ that boundary passes:
 
 - **Proposed: Monday 08:00, `Project.timezone`.** The delivery instant for
   week `W` is `ZonedDateTime.of(W.weekEnd_date, LocalTime.of(8, 0),
-  ZoneId.of(project.timezone))`, recomputed fresh at dispatch-check time —
+ZoneId.of(project.timezone))`, recomputed fresh at dispatch-check time —
   never a stored absolute UTC instant. `java.time.ZoneId` resolves DST
   transitions correctly for this local-wall-clock computation with no
   special-casing: a project in `America/New_York` gets 08:00 America/New_York
@@ -133,7 +133,7 @@ There is no per-project membership model in this codebase — `WorkspaceMember`
 is keyed by `(workspace_id, subject_id)` only, and `Project` belongs to a
 workspace with no separate access list. So "recipients" are drawn from
 workspace membership (§2a's role filter), and "delivery" is per-project
-(§1c). A member is a recipient of *every* project in their workspace where
+(§1c). A member is a recipient of _every_ project in their workspace where
 their role is eligible and they have not opted out of that specific project
 (§3).
 
@@ -144,6 +144,7 @@ address. Sending requires a real email per recipient. No email-address field
 exists on `WorkspaceMember` today, and `ARCHITECTURE.md`'s deferred-decisions
 list names "Production identity provider... topology" as still open. Two
 options:
+
 1. Add `email` to `WorkspaceMember` (or a joined identity-provider profile
    fetch) sourced from the OIDC token claims at membership-creation time.
 2. Resolve email at send time from the IdP's userinfo/admin API.
@@ -191,7 +192,7 @@ every other project-scoped setting.
 ### 3b. Control surface — proposed
 
 - **Authenticated UI + API only in v1.** `PUT
-  /api/workspaces/{workspaceId}/projects/{projectId}/notifications/weekly-summary/opt-out`
+/api/workspaces/{workspaceId}/projects/{projectId}/notifications/weekly-summary/opt-out`
   (body `{optedOut: boolean}`), `requireMembership` (a member manages their
   own subscription; no manager privilege needed to opt out of email one
   receives). `GET` the same path returns current state. UI control lives in
@@ -259,8 +260,8 @@ Directly reuses `StripeWebhookNormalizationService`'s three-phase shape:
 
 1. **Claim** (one short transaction): `SELECT ... FOR UPDATE SKIP LOCKED`
    over `status IN ('PENDING','FAILED') AND next_attempt_at <= now`, `UPDATE
-   ... SET status='SENDING', last_attempted_at=now, attempt_count =
-   attempt_count + 1` in the same statement — the lease.
+... SET status='SENDING', last_attempted_at=now, attempt_count =
+attempt_count + 1` in the same statement — the lease.
 2. **Send** (no open transaction): render (`WeeklySummaryRenderer`) and call
    the email provider client. Network call never happens inside a DB
    transaction, matching `StripeBackfillClient`'s established rule.
@@ -308,7 +309,7 @@ question B6.
 
 ## 6. Delivery audit and retention
 
-`weekly_summary_deliveries` (§4a) *is* the audit trail — it already records
+`weekly_summary_deliveries` (§4a) _is_ the audit trail — it already records
 who, which project, which week, how many attempts, final status, and the
 provider's message id, without ever storing the rendered email body/subject
 (the content is always reproducible on demand from `WeeklySummaryService` +

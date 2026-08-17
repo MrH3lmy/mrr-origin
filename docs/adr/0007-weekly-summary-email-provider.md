@@ -18,7 +18,7 @@ email — those flows use the external OIDC provider), so this decision also
 sets the pattern for any future transactional email in the product.
 
 `ARCHITECTURE.md`'s "do not add ... before private beta" list covers Kafka,
-Redis, microservices, a warehouse, or another *billing* provider — it does
+Redis, microservices, a warehouse, or another _billing_ provider — it does
 not restrict adding a focused, single-purpose external email API client,
 which is the smallest possible integration for this need (one outbound
 HTTPS call per delivery attempt, no SDK-mandated infrastructure).
