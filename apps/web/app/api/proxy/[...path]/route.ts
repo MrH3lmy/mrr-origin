@@ -40,7 +40,6 @@ async function handle(
     cache: "no-store",
   });
 
-  const body = await upstream.text();
   const headers: Record<string, string> = {
     "content-type": upstream.headers.get("content-type") ?? "application/json",
   };
@@ -52,7 +51,7 @@ async function handle(
   const schemaVersion = upstream.headers.get("x-export-schema-version");
   if (schemaVersion) headers["x-export-schema-version"] = schemaVersion;
 
-  return new NextResponse(body, { status: upstream.status, headers });
+  return new NextResponse(upstream.body, { status: upstream.status, headers });
 }
 
 export {
