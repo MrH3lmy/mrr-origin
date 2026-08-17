@@ -156,9 +156,10 @@ class CsvExportIntegrationTests {
 
     @Test
     void comparisonExportUsesTheSameUnavailableShapeWhenNoAcquisitionCohortExists() throws Exception {
+        // The customer was acquired before this export period, so the April comparison has a
+        // CHURN row but deliberately has no April acquisition cohort to join.
+        acquireAndAttribute("cus_churn_only", "USD", 1000, "2026-03-15T00:00:00Z", "google", "old", "/old");
         movement("cus_churn_only", "USD", 700, "2026-04-05T00:00:00Z", "CHURN");
-        link("cus_churn_only");
-        attribution.recalculate(workspace, project, "cus_churn_only");
 
         String csv = mockMvc.perform(comparisonExport(OWNER, "SOURCE"))
                 .andExpect(status().isOk())
@@ -166,7 +167,7 @@ class CsvExportIntegrationTests {
                 .getResponse()
                 .getContentAsString();
         String row = csv.lines()
-                .filter(l -> l.startsWith("SOURCE,,UNATTRIBUTED,USD,"))
+                .filter(l -> l.startsWith("SOURCE,google,,USD,"))
                 .findFirst()
                 .orElseThrow();
         String[] cols = row.split(",", -1);
