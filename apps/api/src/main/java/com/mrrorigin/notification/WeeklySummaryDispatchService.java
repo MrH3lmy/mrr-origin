@@ -178,6 +178,7 @@ class WeeklySummaryDispatchService {
                     delivery.id(), delivery.lastAttemptedAt(), sendFailure.getMessage(), sendFailure.permanent(),
                     delivery.attemptCount(), completedAt);
         } catch (RuntimeException unexpected) {
+            log.error("Unexpected failure rendering/sending weekly summary delivery {}", delivery.id(), unexpected);
             OffsetDateTime completedAt = OffsetDateTime.now(clock);
             deliveryRepository.markFailed(
                     delivery.id(), delivery.lastAttemptedAt(), unexpected.getMessage(), false, delivery.attemptCount(), completedAt);
@@ -185,8 +186,9 @@ class WeeklySummaryDispatchService {
     }
 
     private EmailMessage renderMessage(ClaimedDelivery delivery) {
+        String timezone = workspaceManagementService.projectTimezoneForScheduling(delivery.workspaceId(), delivery.projectId());
         WeeklySummaryResponse summary =
-                weeklySummaryService.summary(delivery.workspaceId(), delivery.projectId(), delivery.weekStart());
+                weeklySummaryService.summary(delivery.workspaceId(), delivery.projectId(), delivery.weekStart(), timezone);
         String projectName = workspaceManagementService.projectNameForScheduling(delivery.workspaceId(), delivery.projectId());
         String subject = "Weekly summary for " + projectName + " -- week of " + delivery.weekStart();
         return new EmailMessage(

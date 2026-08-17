@@ -195,6 +195,16 @@ public class WorkspaceManagementService {
         return projectRepository.findByIdAndWorkspaceId(projectId, workspaceId).map(Project::name).orElse("your project");
     }
 
+    /**
+     * A single project's timezone, for {@code WeeklySummaryService}'s scheduler entry point (#59) --
+     * unlike {@link #projectTimezone}, does not require an authenticated {@link WorkspaceContext}.
+     * Falls back to UTC (matching {@link Project}'s own column default) rather than throwing if the
+     * project has since been deleted between claiming a delivery and rendering it.
+     */
+    public String projectTimezoneForScheduling(UUID workspaceId, UUID projectId) {
+        return projectRepository.findByIdAndWorkspaceId(projectId, workspaceId).map(Project::timezone).orElse("UTC");
+    }
+
     private static String normalizeCurrency(String reportingCurrency) {
         String currency = reportingCurrency == null || reportingCurrency.isBlank()
                 ? "USD"

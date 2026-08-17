@@ -91,7 +91,9 @@ class WorkspaceMemberEmailCaptureIntegrationTests {
     private String emailInDb() {
         return db.sql("SELECT email FROM workspace_members WHERE workspace_id = :w AND subject_id = :s")
                 .param("w", workspace).param("s", SUBJECT)
-                .query(String.class).single();
+                .query((rs, rowNum) -> rs.getString("email"))
+                .list()
+                .get(0);
     }
 
     private RequestPostProcessor token(String subject, String email) {

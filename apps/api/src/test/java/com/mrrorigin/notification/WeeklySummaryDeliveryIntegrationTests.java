@@ -137,9 +137,13 @@ class WeeklySummaryDeliveryIntegrationTests {
     void renderedEmailUsesConfiguredSenderAndSubjectNamesTheProject() {
         dispatchService.dispatchDue();
 
-        assertThat(emailSender.sent()).hasSize(1);
-        EmailMessage message = emailSender.sent().get(0);
-        assertThat(message.toAddress()).isEqualTo("owner@example.com");
+        // Both OWNER and ADMIN are eligible and not opted out here, so both receive a message; this
+        // test only cares about the OWNER's.
+        assertThat(emailSender.sent()).hasSize(2);
+        EmailMessage message = emailSender.sent().stream()
+                .filter(sent -> sent.toAddress().equals("owner@example.com"))
+                .findFirst()
+                .orElseThrow();
         assertThat(message.fromAddress()).isEqualTo("weekly@example.com");
         assertThat(message.subject()).contains("p").contains("2026-03-02");
     }

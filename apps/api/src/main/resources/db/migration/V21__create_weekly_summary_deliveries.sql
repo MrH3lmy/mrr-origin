@@ -17,7 +17,8 @@ CREATE TABLE weekly_summary_deliveries (
     recipient_subject_id VARCHAR(255) NOT NULL,
     recipient_email VARCHAR(320) NOT NULL,
     week_start DATE NOT NULL,
-    status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    -- 'PERMANENTLY_FAILED' is 19 characters -- VARCHAR(24) leaves headroom, not a tight fit.
+    status VARCHAR(24) NOT NULL DEFAULT 'PENDING',
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_attempted_at TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ NOT NULL,
