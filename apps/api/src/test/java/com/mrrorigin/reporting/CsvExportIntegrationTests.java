@@ -269,10 +269,10 @@ class CsvExportIntegrationTests {
             String source, String campaign, String landingPath) {
         movement(stripeCustomerId, currency, amountMinor, effectiveAt, "NEW");
         link(stripeCustomerId);
-        if (source != null) {
-            touchpoint(stripeCustomerId, OffsetDateTime.parse(effectiveAt).minusDays(1).toString(), source, campaign,
-                    "https://example.test" + landingPath);
-        }
+        // A linked, eligible direct touchpoint with null utm_source is STRONG attribution in the
+        // explicit NONE bucket; omitting the touchpoint entirely would instead be UNATTRIBUTED.
+        touchpoint(stripeCustomerId, OffsetDateTime.parse(effectiveAt).minusDays(1).toString(), source, campaign,
+                "https://example.test" + landingPath);
         attribution.recalculate(workspace, project, stripeCustomerId);
     }
 
@@ -292,6 +292,22 @@ class CsvExportIntegrationTests {
                 .param("type", movementType)
                 .param("at", OffsetDateTime.parse(effectiveAt))
                 .update();
+        if ("NEW".equals(movementType)) {
+            db.sql(
+                            """
+                            INSERT INTO customer_mrr_snapshots
+                                (id, workspace_id, stripe_customer_id, currency, amount_minor, effective_at,
+                                 calculation_version, supported, source_billing_references)
+                            VALUES (:id, :w, :c, :cur, :amt, :at, 'mrr-v1', TRUE, ARRAY['billing:test'])
+                            """)
+                    .param("id", UUID.randomUUID())
+                    .param("w", workspace)
+                    .param("c", stripeCustomerId)
+                    .param("cur", currency)
+                    .param("amt", amountMinor)
+                    .param("at", OffsetDateTime.parse(effectiveAt))
+                    .update();
+        }
     }
 
     private void link(String stripeCustomerId) {
