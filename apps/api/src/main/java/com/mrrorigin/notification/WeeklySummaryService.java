@@ -63,11 +63,34 @@ public class WeeklySummaryService {
         this.clock = clock;
     }
 
+    /**
+     * Authenticated-caller entry point (the {@code /reporting/weekly-summary} endpoint): resolves the
+     * project's timezone via {@link WorkspaceManagementService#projectTimezone}, which -- via {@link
+     * WorkspaceManagementService#getProject} -- both requires an authenticated {@code
+     * WorkspaceContext} and verifies {@code projectId} actually belongs to {@code workspaceId}. Never
+     * call this from a background/scheduled context; there is no authenticated caller to check
+     * against there. See {@link #summary(UUID, UUID, LocalDate, String)} for that case.
+     */
     public WeeklySummaryResponse summary(UUID workspaceId, UUID projectId, LocalDate weekStartOverride) {
         if (workspaceId == null || projectId == null) {
             throw new IllegalArgumentException("workspace and project are required");
         }
         String timezone = workspaceManagementService.projectTimezone(workspaceId, projectId);
+        return summary(workspaceId, projectId, weekStartOverride, timezone);
+    }
+
+    /**
+     * Scheduler entry point (#59's {@code WeeklySummaryDispatchService}): takes the project's
+     * timezone directly instead of resolving it via {@link WorkspaceManagementService#projectTimezone},
+     * which requires an authenticated {@code WorkspaceContext} that does not exist on a background
+     * thread. Safe here because the caller already obtained {@code (workspaceId, projectId, timezone)}
+     * from a trusted, system-level source ({@link WorkspaceManagementService#listAllProjectsForScheduling}),
+     * not from external input, so no additional authorization check is needed.
+     */
+    public WeeklySummaryResponse summary(UUID workspaceId, UUID projectId, LocalDate weekStartOverride, String timezone) {
+        if (workspaceId == null || projectId == null) {
+            throw new IllegalArgumentException("workspace and project are required");
+        }
         ZoneId zone = ZoneId.of(timezone);
 
         ZonedDateTime nowZoned = clock.instant().atZone(zone);

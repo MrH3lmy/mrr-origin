@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -151,6 +152,88 @@ public class WorkspaceManagementService {
      */
     public String projectTimezone(UUID workspaceId, UUID projectId) {
         return getProject(workspaceId, projectId).timezone();
+    }
+
+    /**
+     * Workspace members eligible by default to receive the weekly summary email (#59, per
+     * {@code docs/weekly-summary-delivery-plan.md} §2a/B2/B3): manage-level role (OWNER/ADMIN),
+     * regardless of whether they have a verified email captured yet. {@link WeeklySummaryRecipient#email()}
+     * is null for a member with no verified email (see {@link WorkspaceMember}'s {@code email} field)
+     * -- the caller (the dispatch scheduler) is responsible for recording that gap as an auditable
+     * {@code BLOCKED_MISSING_EMAIL} delivery rather than silently dropping the recipient. Unlike every
+     * other method here, this is called from the scheduler's own background thread, not a per-caller
+     * authenticated request, so it does not go through {@link WorkspaceContext}.
+     */
+    public List<WeeklySummaryRecipient> listWeeklySummaryRecipients(UUID workspaceId) {
+        return memberRepository.findAllByWorkspaceIdOrderByCreatedAtAsc(workspaceId).stream()
+                .filter(member -> member.role().canManage())
+                .map(member -> new WeeklySummaryRecipient(member.subjectId(), member.email()))
+                .toList();
+    }
+
+    /** {@link #email()} is null exactly when the member has no verified email captured yet (#59). */
+    public record WeeklySummaryRecipient(String subjectId, String email) {}
+
+    /**
+     * One member's currently stored (verified) email, for replaying a {@code BLOCKED_MISSING_EMAIL}
+     * delivery (#59, plan §4d) -- null if the member has none yet or is no longer a member. Like the
+     * other scheduler-facing lookups here, does not require an authenticated {@link WorkspaceContext}.
+     */
+    public String currentVerifiedEmail(UUID workspaceId, String subjectId) {
+        return memberRepository.findByWorkspaceIdAndSubjectId(workspaceId, subjectId).map(WorkspaceMember::email).orElse(null);
+    }
+
+    /**
+     * One keyset page of every project system-wide, ordered by id, for the weekly-summary scheduler's
+     * own tick (#59) -- which has no authenticated caller/workspace context to scope a membership
+     * check against, unlike every other method here. {@code afterProjectId} null means the first page;
+     * pass the last page's final {@link SchedulableProject#projectId()} to fetch the next one. Repeated
+     * calls within a single tick make every project eventually reachable, instead of a fixed cap that
+     * would otherwise starve projects beyond it (a real cursor, not a re-read of the same unpaged set).
+     * Returns a plain projection rather than the {@link Project} entity, whose accessors are
+     * package-private.
+     */
+    public List<SchedulableProject> listProjectsForSchedulingPage(UUID afterProjectId, int limit) {
+        UUID cursor = afterProjectId != null ? afterProjectId : new UUID(0, 0);
+        return projectRepository.findByIdGreaterThanOrderByIdAsc(cursor, PageRequest.of(0, limit)).stream()
+                .map(project -> new SchedulableProject(project.workspaceId(), project.id(), project.name(), project.timezone()))
+                .toList();
+    }
+
+    public record SchedulableProject(UUID workspaceId, UUID projectId, String projectName, String timezone) {}
+
+    /**
+     * Whether {@code subjectId} is currently (right now, not at some earlier row-creation time) an
+     * eligible weekly-summary recipient in {@code workspaceId} -- manage-level role, membership still
+     * present (#59, review fix: a retried delivery must revalidate role/removal immediately before
+     * sending, not only when the row was first created). Opt-out is a separate check
+     * ({@code WeeklySummaryOptOutService#isOptedOut}) -- this method only covers role/membership.
+     */
+    public boolean isCurrentWeeklySummaryRecipient(UUID workspaceId, String subjectId) {
+        return memberRepository
+                .findByWorkspaceIdAndSubjectId(workspaceId, subjectId)
+                .map(member -> member.role().canManage())
+                .orElse(false);
+    }
+
+    /**
+     * A single project's name, for the scheduler's rendered email subject (#59) -- unlike {@link
+     * #getProject}, does not require an authenticated {@link WorkspaceContext}, since the scheduler
+     * runs on a background thread with no caller. Falls back to a generic label rather than throwing
+     * if the project has since been deleted between claiming a delivery and sending it.
+     */
+    public String projectNameForScheduling(UUID workspaceId, UUID projectId) {
+        return projectRepository.findByIdAndWorkspaceId(projectId, workspaceId).map(Project::name).orElse("your project");
+    }
+
+    /**
+     * A single project's timezone, for {@code WeeklySummaryService}'s scheduler entry point (#59) --
+     * unlike {@link #projectTimezone}, does not require an authenticated {@link WorkspaceContext}.
+     * Falls back to UTC (matching {@link Project}'s own column default) rather than throwing if the
+     * project has since been deleted between claiming a delivery and rendering it.
+     */
+    public String projectTimezoneForScheduling(UUID workspaceId, UUID projectId) {
+        return projectRepository.findByIdAndWorkspaceId(projectId, workspaceId).map(Project::timezone).orElse("UTC");
     }
 
     private static String normalizeCurrency(String reportingCurrency) {

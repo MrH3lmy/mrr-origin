@@ -20,11 +20,13 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 public class WorkspaceContext {
 
     private final WorkspaceMemberRepository memberRepository;
+    private final WorkspaceMemberEmailCaptureService emailCaptureService;
     private final Map<UUID, WorkspaceMember> memberships = new HashMap<>();
     private String subjectId;
 
-    public WorkspaceContext(WorkspaceMemberRepository memberRepository) {
+    public WorkspaceContext(WorkspaceMemberRepository memberRepository, WorkspaceMemberEmailCaptureService emailCaptureService) {
         this.memberRepository = memberRepository;
+        this.emailCaptureService = emailCaptureService;
     }
 
     public String subjectId() {
@@ -45,9 +47,35 @@ public class WorkspaceContext {
     }
 
     public WorkspaceMember requireMembership(UUID workspaceId) {
-        return memberships.computeIfAbsent(workspaceId, id -> memberRepository
-                .findByWorkspaceIdAndSubjectId(id, subjectId())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Workspace not found")));
+        return memberships.computeIfAbsent(workspaceId, id -> {
+            WorkspaceMember member = memberRepository
+                    .findByWorkspaceIdAndSubjectId(id, subjectId())
+                    .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Workspace not found"));
+            captureEmailIfPresent(id, member);
+            return member;
+        });
+    }
+
+    /**
+     * Per #59 (accepted B3): captures/refreshes this caller's own email from their JWT on every
+     * authenticated request, but only from a claim the identity provider itself has verified --
+     * {@code email_verified=true}. An unverified or absent claim never seeds or overwrites the stored
+     * value, and a member whose verified address changes is picked up automatically (not just once).
+     */
+    private void captureEmailIfPresent(UUID workspaceId, WorkspaceMember member) {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (!(authentication instanceof JwtAuthenticationToken jwtAuthentication)) {
+            return;
+        }
+        Boolean verified = jwtAuthentication.getToken().getClaimAsBoolean("email_verified");
+        if (!Boolean.TRUE.equals(verified)) {
+            return;
+        }
+        String email = jwtAuthentication.getToken().getClaimAsString("email");
+        if (email == null || email.isBlank() || email.equals(member.email())) {
+            return;
+        }
+        emailCaptureService.captureOrRefresh(workspaceId, member.subjectId(), email);
     }
 
     public WorkspaceMember requireManager(UUID workspaceId) {

@@ -29,6 +29,17 @@ public class WorkspaceMember {
     @Column(nullable = false, length = 32)
     private WorkspaceRole role;
 
+    /**
+     * Nullable: captured/refreshed lazily from the member's own JWT {@code email} claim, but only when
+     * that claim's {@code email_verified} is {@code true} (see
+     * {@link WorkspaceContext#requireMembership}); never required at row-creation time, never sourced
+     * from an unverified claim or a manager-supplied value. Used only by weekly-summary recipient
+     * resolution (#59); a null value here is recorded as an auditable {@code BLOCKED_MISSING_EMAIL}
+     * delivery rather than a silent skip.
+     */
+    @Column(length = 320)
+    private String email;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
@@ -51,6 +62,16 @@ public class WorkspaceMember {
 
     WorkspaceRole role() {
         return role;
+    }
+
+    /** Nullable; see the field's own doc comment. */
+    String email() {
+        return email;
+    }
+
+    /** Best-effort capture of the member's own email from their JWT claim; see the field's doc comment. */
+    void captureEmail(String email) {
+        this.email = email;
     }
 
     OffsetDateTime createdAt() {

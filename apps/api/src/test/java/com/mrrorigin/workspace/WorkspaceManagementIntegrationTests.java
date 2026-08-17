@@ -7,8 +7,12 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import javax.sql.DataSource;
@@ -32,6 +36,8 @@ import org.testcontainers.utility.DockerImageName;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+import com.mrrorigin.workspace.WorkspaceManagementService.SchedulableProject;
+
 @Testcontainers
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -54,9 +60,63 @@ class WorkspaceManagementIntegrationTests {
     @Autowired
     private DataSource dataSource;
 
+    @Autowired
+    private WorkspaceManagementService workspaceManagementService;
+
     @BeforeEach
     void clearTenantData() {
         new JdbcTemplate(dataSource).execute("TRUNCATE TABLE projects, workspace_members, workspaces CASCADE");
+    }
+
+    /**
+     * Review fix: the weekly-summary scheduler's project cap used to re-read the same unpaged
+     * {@code findAll()} every tick, permanently starving every project beyond it. Exercises the
+     * keyset-pagination replacement with a small page size (the mechanism is identical regardless of
+     * the production 500-per-page constant, which would make an equivalent test needlessly slow).
+     */
+    @Test
+    void listProjectsForSchedulingPageWalksEveryProjectExactlyOnceAcrossPageBoundaries() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE, "Paging Workspace", "paging-workspace");
+        Set<UUID> expected = new LinkedHashSet<>();
+        for (int i = 0; i < 5; i++) {
+            expected.add(createProject(workspaceId, ALICE, "Project " + i, "p" + i + ".example.com", "UTC"));
+        }
+
+        Set<UUID> seen = new LinkedHashSet<>();
+        UUID afterId = null;
+        List<SchedulableProject> page;
+        int pages = 0;
+        do {
+            page = workspaceManagementService.listProjectsForSchedulingPage(afterId, 2);
+            for (SchedulableProject project : page) {
+                assertThat(seen.add(project.projectId())).as("no project repeated across pages").isTrue();
+                afterId = project.projectId();
+            }
+            pages++;
+            assertThat(pages).isLessThan(10); // guards against an infinite loop if pagination regresses
+        } while (page.size() == 2);
+
+        assertThat(seen).isEqualTo(expected);
+        assertThat(pages).isGreaterThan(1); // proves more than one page was actually walked
+    }
+
+    /**
+     * Review fix: a retried delivery must revalidate the recipient's current role/membership
+     * immediately before sending, not only at whatever earlier time the row was created.
+     */
+    @Test
+    void isCurrentWeeklySummaryRecipientReflectsRoleAndMembershipChanges() throws Exception {
+        UUID workspaceId = createWorkspace(ALICE, "Eligibility Workspace", "eligibility-workspace");
+        addMember(workspaceId, ALICE, BOB, "ADMIN");
+        assertThat(workspaceManagementService.isCurrentWeeklySummaryRecipient(workspaceId, BOB)).isTrue();
+
+        new JdbcTemplate(dataSource)
+                .update("UPDATE workspace_members SET role = 'MEMBER' WHERE workspace_id = ? AND subject_id = ?", workspaceId, BOB);
+        assertThat(workspaceManagementService.isCurrentWeeklySummaryRecipient(workspaceId, BOB)).isFalse();
+
+        new JdbcTemplate(dataSource)
+                .update("DELETE FROM workspace_members WHERE workspace_id = ? AND subject_id = ?", workspaceId, BOB);
+        assertThat(workspaceManagementService.isCurrentWeeklySummaryRecipient(workspaceId, BOB)).isFalse();
     }
 
     @Test

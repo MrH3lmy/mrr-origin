@@ -6,9 +6,17 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 import org.springframework.context.annotation.Bean;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
+/**
+ * {@code @EnableScheduling} drives #59's weekly-summary dispatch tick ({@code
+ * WeeklySummaryDispatchService}) -- the only in-process scheduled job in this codebase. Per
+ * ARCHITECTURE.md, horizontal safety across multiple instances comes from the DB-backed lease/
+ * idempotency design in that service's repository, not from anything scheduling-framework-level.
+ */
 @SpringBootApplication
 @ConfigurationPropertiesScan
+@EnableScheduling
 public class MrrOriginApplication {
 
     public static void main(String[] args) {

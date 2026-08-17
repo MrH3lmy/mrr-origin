@@ -19,6 +19,8 @@ import type {
 import { formatDateTime } from "@/lib/format";
 import { formatMoneyMinor } from "@/lib/format-currency";
 
+import { WeeklySummaryDeliveryStatusPanel } from "./WeeklySummaryDeliveryStatusPanel";
+import { WeeklySummaryOptOutToggle } from "./WeeklySummaryOptOutToggle";
 import styles from "./WeeklySummary.module.css";
 
 interface WeeklySummaryClientProps {
@@ -182,23 +184,55 @@ export function WeeklySummaryClient({
     };
   }, [workspaceId, projectId]);
 
+  const optOutToggle = (
+    <WeeklySummaryOptOutToggle
+      workspaceId={workspaceId}
+      projectId={projectId}
+    />
+  );
+  // Manager-only; hides itself on a 403 rather than needing a role prop here.
+  const deliveryStatusPanel = (
+    <WeeklySummaryDeliveryStatusPanel
+      workspaceId={workspaceId}
+      projectId={projectId}
+    />
+  );
+
   if (loading) {
-    return <SkeletonBlock label="Loading weekly summary" lines={6} />;
+    return (
+      <div style={{ display: "grid", gap: 20 }}>
+        {optOutToggle}
+        {deliveryStatusPanel}
+        <SkeletonBlock label="Loading weekly summary" lines={6} />
+      </div>
+    );
   }
   if (error) {
     return (
-      <ErrorState
-        title="Could not load the weekly summary"
-        description={error}
-      />
+      <div style={{ display: "grid", gap: 20 }}>
+        {optOutToggle}
+        {deliveryStatusPanel}
+        <ErrorState
+          title="Could not load the weekly summary"
+          description={error}
+        />
+      </div>
     );
   }
   if (!summary) {
-    return null;
+    return (
+      <div style={{ display: "grid", gap: 20 }}>
+        {optOutToggle}
+        {deliveryStatusPanel}
+      </div>
+    );
   }
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
+      {optOutToggle}
+      {deliveryStatusPanel}
+
       <p className={styles.periodLabel}>
         Week of {formatDateTime(summary.weekStart)} to{" "}
         {formatDateTime(summary.weekEnd)} ({summary.timezone}), compared with
