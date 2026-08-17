@@ -19,6 +19,7 @@ import type {
 import { formatDateTime } from "@/lib/format";
 import { formatMoneyMinor } from "@/lib/format-currency";
 
+import { WeeklySummaryDeliveryStatusPanel } from "./WeeklySummaryDeliveryStatusPanel";
 import { WeeklySummaryOptOutToggle } from "./WeeklySummaryOptOutToggle";
 import styles from "./WeeklySummary.module.css";
 
@@ -189,11 +190,19 @@ export function WeeklySummaryClient({
       projectId={projectId}
     />
   );
+  // Manager-only; hides itself on a 403 rather than needing a role prop here.
+  const deliveryStatusPanel = (
+    <WeeklySummaryDeliveryStatusPanel
+      workspaceId={workspaceId}
+      projectId={projectId}
+    />
+  );
 
   if (loading) {
     return (
       <div style={{ display: "grid", gap: 20 }}>
         {optOutToggle}
+        {deliveryStatusPanel}
         <SkeletonBlock label="Loading weekly summary" lines={6} />
       </div>
     );
@@ -202,6 +211,7 @@ export function WeeklySummaryClient({
     return (
       <div style={{ display: "grid", gap: 20 }}>
         {optOutToggle}
+        {deliveryStatusPanel}
         <ErrorState
           title="Could not load the weekly summary"
           description={error}
@@ -210,12 +220,18 @@ export function WeeklySummaryClient({
     );
   }
   if (!summary) {
-    return optOutToggle;
+    return (
+      <div style={{ display: "grid", gap: 20 }}>
+        {optOutToggle}
+        {deliveryStatusPanel}
+      </div>
+    );
   }
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
       {optOutToggle}
+      {deliveryStatusPanel}
 
       <p className={styles.periodLabel}>
         Week of {formatDateTime(summary.weekStart)} to{" "}

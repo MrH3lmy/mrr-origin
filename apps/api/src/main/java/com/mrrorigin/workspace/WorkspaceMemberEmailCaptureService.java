@@ -9,12 +9,13 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Best-effort capture of a member's email from their own JWT {@code email} claim (#59), called from
- * {@link WorkspaceContext} on every authenticated request whose cached {@link WorkspaceMember} has no
- * email yet. Runs in its own {@code REQUIRES_NEW} transaction so it always gets a writable connection
- * even when the calling request is inside a {@code readOnly = true} transaction (most reporting GETs
- * are) -- a read-only ambient transaction would otherwise silently reject this write. Failures here
- * are swallowed: this is profile enrichment, never a reason to fail the caller's actual request.
+ * Capture/refresh of a member's email from their own verified JWT {@code email} claim (#59), called
+ * from {@link WorkspaceContext} on every authenticated request whose token carries
+ * {@code email_verified=true} and a value that differs from what is stored. Runs in its own
+ * {@code REQUIRES_NEW} transaction so it always gets a writable connection even when the calling
+ * request is inside a {@code readOnly = true} transaction (most reporting GETs are) -- a read-only
+ * ambient transaction would otherwise silently reject this write. Failures here are swallowed: this
+ * is profile enrichment, never a reason to fail the caller's actual request.
  */
 @Service
 class WorkspaceMemberEmailCaptureService {
@@ -28,12 +29,12 @@ class WorkspaceMemberEmailCaptureService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    void captureIfAbsent(UUID workspaceId, String subjectId, String email) {
+    void captureOrRefresh(UUID workspaceId, String subjectId, String verifiedEmail) {
         try {
             memberRepository
                     .findByWorkspaceIdAndSubjectId(workspaceId, subjectId)
-                    .filter(member -> member.email() == null)
-                    .ifPresent(member -> member.captureEmail(email));
+                    .filter(member -> !verifiedEmail.equals(member.email()))
+                    .ifPresent(member -> member.captureEmail(verifiedEmail));
         } catch (RuntimeException failure) {
             log.warn("Could not capture email for workspace member (workspaceId={}): {}", workspaceId, failure.getMessage());
         }

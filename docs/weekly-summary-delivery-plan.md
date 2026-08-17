@@ -2,13 +2,16 @@
 
 ## Status
 
-**FROZEN — approved by the issue owner on 2026-08-17.** All decisions
-proposed below (B1-B7) are accepted as written and are now the authoritative
-contract for #59's implementation, per the same precedent
-`docs/weekly-summary-export-plan.md` set for #26. Section headings below are
-left as originally written (including the word "proposed") so the rationale
-stays attached to each decision; the "Blocking questions" section at the end
-records the accepted resolution for each one.
+**FROZEN — approved by the issue owner on 2026-08-17, corrected the same day.**
+The issue owner's second pass on B3, B5, B6, and the delivery-guarantee
+language changed the contract below; B1, B2, B4's core (authenticated-only
+opt-out), and B7's mechanism are otherwise unchanged from the first
+approval. Section headings below are left as originally written (including
+the word "proposed") so the rationale stays attached to each decision; the
+"Blocking questions" section at the end records the corrected, final
+resolution for each one. This is the authoritative contract for #59's
+implementation, per the same precedent `docs/weekly-summary-export-plan.md`
+set for #26.
 
 ## What this reuses (no new calculation or presentation rule)
 
@@ -149,18 +152,28 @@ options:
    fetch) sourced from the OIDC token claims at membership-creation time.
 2. Resolve email at send time from the IdP's userinfo/admin API.
 
-Proposed: **(1)** — store `email` on `WorkspaceMember`, populated from the
-JWT `email` claim when a member is added/first authenticates, since it
-avoids an IdP-API dependency on the hot send path and keeps delivery
-resolution a pure DB read (consistent with "no correctness-critical state
-only in process memory" plus keeping the send path free of a third external
-dependency beyond the email provider itself). Requires a migration adding
-a nullable `email` column plus backfill-on-next-auth for existing members;
-a member with no captured email yet is simply skipped as a recipient (never
-a failed delivery attempt) and this gap is visible in the audit table.
+**(1)**, corrected — store `email` on `WorkspaceMember`, sourced **only**
+from a JWT whose `email_verified` claim is `true`; an unverified or absent
+claim never overwrites or seeds the stored value. This avoids an IdP-API
+dependency on the hot send path and keeps delivery resolution a pure DB
+read, while never trusting an address the identity provider itself has not
+confirmed the member controls. The stored email is **refreshed** — not just
+captured once — every time that subject authenticates with a verified claim
+whose value differs from what is stored, so a member who changes their
+verified email address is picked up automatically. A manager-supplied
+address is never authoritative; there is no admin-editable email field.
 
-This is a proposed default depending on identity-provider integration
-specifics not fully defined elsewhere — see blocking question B3.
+A member with no verified email yet is **not** silently skipped: they are
+still an eligible recipient (§2a), and the scheduler records an auditable
+`BLOCKED_MISSING_EMAIL` delivery row for them instead of creating no row at
+all — visible to managers in the delivery-status view (§4d) exactly like
+any other non-`SENT` outcome. Once a verified email becomes available (next
+authentication), a manager can manually replay that row (§4c) to send the
+week's summary retroactively; nothing does this automatically, since replay
+requires a manager decision the same way any other terminal-state replay
+does.
+
+This is now a corrected, final decision — see blocking question B3.
 
 ## 3. Opt-out
 
@@ -197,17 +210,23 @@ every other project-scoped setting.
   own subscription; no manager privilege needed to opt out of email one
   receives). `GET` the same path returns current state. UI control lives in
   project settings, per DESIGN_SYSTEM.md's settings conventions.
-- **No unauthenticated one-click unsubscribe link in v1** — every mutation
-  in this codebase requires a validated JWT (`SecurityConfiguration`
+- **No unauthenticated one-click unsubscribe link in v1, confirmed** — every
+  mutation in this codebase requires a validated JWT (`SecurityConfiguration`
   permits only actuator health, public tracking ingestion, and the Stripe
   OAuth/webhook callbacks unauthenticated), and adding an unauthenticated
   mutation path is a security-boundary change `ARCHITECTURE.md` reserves
-  for an explicit decision. Most transactional-email regimes (CAN-SPAM,
-  GDPR) expect a functioning one-click unsubscribe even for a logged-out
-  recipient, so this gap is a real compliance question, not a minor UX
-  preference — see blocking question B4. If a token-based unsubscribe link
-  is required, it needs its own signed, single-purpose, non-JWT token
-  design (out of this section's proposed default).
+  for an explicit decision. Accepted for v1 on the condition that these
+  emails remain **strictly operational/reporting content** — no promotions,
+  advertisements, or upsell copy — which is the factor that made an
+  authenticated-only opt-out acceptable without a logged-out one-click path.
+  One-click unsubscribe (its own signed, single-purpose, non-JWT token
+  design) is tracked as a required follow-up **before** these emails ever
+  carry marketing content or become a broader subscription campaign — not
+  optional polish, a hard precondition on scope expansion.
+- **Every email must contain a direct link to the authenticated opt-out
+  setting** (this project's weekly-summary settings page, §5), so a
+  recipient who wants to stop receiving it never has to hunt for the
+  control — it just requires them to be signed in to use it.
 
 ## 4. Retry and terminal failure
 
@@ -224,13 +243,16 @@ CREATE TABLE weekly_summary_deliveries (
     workspace_id UUID NOT NULL,
     project_id UUID NOT NULL,
     recipient_subject_id VARCHAR(255) NOT NULL,
-    recipient_email VARCHAR(320) NOT NULL,
+    recipient_email VARCHAR(320),       -- null exactly while status = BLOCKED_MISSING_EMAIL
     week_start DATE NOT NULL,           -- project-timezone Monday, per #26's boundary
-    status VARCHAR(16) NOT NULL,        -- PENDING | SENDING | SENT | FAILED | PERMANENTLY_FAILED
+    status VARCHAR(24) NOT NULL,        -- PENDING | SENDING | SENT | FAILED | PERMANENTLY_FAILED | BLOCKED_MISSING_EMAIL
     attempt_count INTEGER NOT NULL DEFAULT 0,
-    last_attempted_at TIMESTAMPTZ,      -- lease stamp, same fencing role as stripe_webhook_events
+    last_attempted_at TIMESTAMPTZ,      -- informational; fencing uses lease_token, not this
+    lease_token UUID,                   -- random per claim, fences markSent/markFailed
+    lease_until TIMESTAMPTZ,            -- claim expiry; an expired SENDING lease is reclaimable
+    last_outcome_ambiguous BOOLEAN NOT NULL DEFAULT FALSE, -- true when a network failure left send status unknown
     next_attempt_at TIMESTAMPTZ NOT NULL,
-    last_error TEXT,
+    last_error TEXT,                    -- sanitized, length-bounded; never a credential/body/raw response
     provider_message_id VARCHAR(255),   -- set on SENT, for provider-side delivery tracing
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -239,63 +261,95 @@ CREATE TABLE weekly_summary_deliveries (
         REFERENCES projects (id, workspace_id) ON DELETE CASCADE,
     CONSTRAINT uq_weekly_summary_delivery UNIQUE (project_id, recipient_subject_id, week_start),
     CONSTRAINT chk_weekly_summary_delivery_status
-        CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED', 'PERMANENTLY_FAILED')),
-    CONSTRAINT chk_weekly_summary_delivery_attempt_count CHECK (attempt_count >= 0)
+        CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED', 'PERMANENTLY_FAILED', 'BLOCKED_MISSING_EMAIL')),
+    CONSTRAINT chk_weekly_summary_delivery_attempt_count CHECK (attempt_count >= 0),
+    CONSTRAINT chk_weekly_summary_delivery_email_presence
+        CHECK ((status = 'BLOCKED_MISSING_EMAIL') = (recipient_email IS NULL))
 );
 
 CREATE INDEX idx_weekly_summary_delivery_due
     ON weekly_summary_deliveries (status, next_attempt_at)
     WHERE status IN ('PENDING', 'FAILED');
+
+CREATE INDEX idx_weekly_summary_delivery_reclaim
+    ON weekly_summary_deliveries (lease_until)
+    WHERE status = 'SENDING';
 ```
 
 Row creation itself is the dedupe point: the scheduler's per-recipient
 `INSERT ... ON CONFLICT (project_id, recipient_subject_id, week_start) DO
 NOTHING` means a second tick, a manual trigger, or a retry sweep racing the
 first can never create a second row for the same project/recipient/week —
-mirrors `uq_stripe_webhook_events_mode_event_id`.
+mirrors `uq_stripe_webhook_events_mode_event_id`. This is an **internal**
+dedupe guarantee only — see "Delivery guarantee" below for what it does and
+does not promise about the provider side.
 
 ### 4b. Claim/send/lease
 
-Directly reuses `StripeWebhookNormalizationService`'s three-phase shape:
+Directly reuses `StripeWebhookNormalizationService`'s three-phase shape,
+corrected to use an explicit random lease token rather than a timestamp so
+an expired lease is unambiguously reclaimable:
 
 1. **Claim** (one short transaction): `SELECT ... FOR UPDATE SKIP LOCKED`
-   over `status IN ('PENDING','FAILED') AND next_attempt_at <= now`, `UPDATE
-... SET status='SENDING', last_attempted_at=now, attempt_count =
-attempt_count + 1` in the same statement — the lease.
+   over rows that are either due (`status IN ('PENDING','FAILED') AND
+next_attempt_at <= now`) or an **expired lease** (`status = 'SENDING' AND
+lease_until <= now` — a prior worker that claimed the row and then died,
+   restarted, or was killed before recording an outcome). `UPDATE ... SET
+status='SENDING', lease_token=<new random UUID>, lease_until=now +
+   <lease duration>, last_attempted_at=now, attempt_count = attempt_count +
+   1` in the same statement — the lease. `BLOCKED_MISSING_EMAIL` rows are
+   never claimable (no `recipient_email` to send to).
 2. **Send** (no open transaction): render (`WeeklySummaryRenderer`) and call
    the email provider client. Network call never happens inside a DB
-   transaction, matching `StripeBackfillClient`'s established rule.
-3. **Apply** (one short transaction, fenced by the claimed `last_attempted_at`
-   exactly like `StripeWebhookNormalizationService#applyAndMarkProcessed`):
-   on success, `status='SENT'`, store `provider_message_id`; on failure,
-   `status='FAILED'`, `last_error`, and `next_attempt_at` advanced per the
-   backoff schedule (§4c), or `status='PERMANENTLY_FAILED'` if attempts are
-   exhausted.
+   transaction, matching `StripeBackfillClient`'s established rule — this
+   was already true of the implementation and remains a hard rule under the
+   corrected lease design.
+3. **Apply** (one short transaction, fenced by `status = 'SENDING' AND
+lease_token = <the exact token claimed in step 1>` — a worker whose lease
+   was since reclaimed can never overwrite a newer outcome): on success,
+   `status='SENT'`, store `provider_message_id`, clear the lease; on
+   failure, `status='FAILED'`, sanitized/bounded `last_error`,
+   `last_outcome_ambiguous` set per the provider-failure classification (see
+   "Delivery guarantee" below), `next_attempt_at` advanced per the backoff
+   schedule (§4c), lease cleared, or `status='PERMANENTLY_FAILED'` if
+   attempts are exhausted or the failure was classified permanent.
 
-### 4c. Retry schedule and maximum attempts — proposed
+### 4c. Retry schedule and maximum attempts — corrected
 
-**Proposed: 5 attempts total, backoff 1m / 15m / 1h / 6h / 24h, terminal
-`PERMANENTLY_FAILED` after the 5th.** Rationale: covers both a transient
-provider blip (retried within the same delivery day) and a longer provider
-outage (final retry ~32h after first attempt, safely inside the following
-week's own send so failures don't stack), without retrying indefinitely
-against a permanently-invalid recipient address. `PERMANENTLY_FAILED` rows
-are never deleted or silently dropped (`ARCHITECTURE.md`: "dead records
-remain inspectable and replayable") and are replayable via the same manual
-manager-triggered endpoint pattern as
-`StripeWebhookReplayService#replayEvent`.
+**6 attempts total, backoff 1m / 15m / 1h / 6h / 24h between attempts 1-5,
+terminal `PERMANENTLY_FAILED` after the 6th.** (Corrected from the first
+approval's 5 attempts — the same 1m/15m/1h/6h/24h backoff shape, one more
+attempt appended at the end of the schedule rather than changing its
+cadence.) Rationale unchanged: covers both a transient provider blip and a
+longer provider outage without retrying indefinitely against a
+permanently-invalid recipient address. `PERMANENTLY_FAILED` rows are never
+deleted before the retention window (§6) and are replayable via a
+manager-triggered replay endpoint, the same shape as
+`StripeWebhookReplayService#replayEvent`. A provider response classified
+**permanent** (§5) short-circuits straight to `PERMANENTLY_FAILED`
+regardless of remaining attempt budget — retrying a hard-invalid address
+six times over 24h+ wastes attempts and cannot succeed.
 
-This specific schedule is a proposed default — see blocking question B5.
+This is now a corrected, final decision — see blocking question B5.
 
-### 4d. Permanent-failure behavior — proposed
+### 4d. Permanent-failure and blocked behavior — corrected
 
-On `PERMANENTLY_FAILED`: no further automatic retry; visible in a
-manager-facing delivery-status view (data-health-style list, per
-DESIGN_SYSTEM's "treat missing evidence honestly" principle applied to
-delivery instead of attribution); no end-user-facing alert in v1 beyond
-that view (no in-app notification system exists to page a founder about
-their own summary failing to send). A manager can manually replay via the
-send endpoint. Not silently retried forever, not silently dropped.
+On `PERMANENTLY_FAILED` or `BLOCKED_MISSING_EMAIL`: no further automatic
+retry; both are visible in a manager-facing delivery-status view
+(data-health-style list, per DESIGN_SYSTEM's "treat missing evidence
+honestly" principle applied to delivery instead of attribution); no
+end-user-facing alert in v1 beyond that view (no in-app notification system
+exists to page a founder about their own summary failing to send). A
+manager can manually replay either kind via the same replay endpoint:
+
+- Replaying a `PERMANENTLY_FAILED` row resets it to `PENDING` with a fresh
+  attempt budget and clears `last_error`/`last_outcome_ambiguous`.
+- Replaying a `BLOCKED_MISSING_EMAIL` row re-checks the member's currently
+  stored (verified) email; if one is now present, the row is populated with
+  it and moved to `PENDING`; if still absent, the replay is rejected with a
+  clear reason rather than silently no-op'ing.
+
+Not silently retried forever, not silently dropped.
 
 ## 5. Provider, sender, reply-to
 
@@ -303,9 +357,16 @@ Provider selection, rationale, configuration/secrets model, timeout/error
 behavior, and test strategy are in
 [ADR-0007](adr/0007-weekly-summary-email-provider.md).
 
-**Sender and reply-to addresses are not decided anywhere in this repo** (no
-domain, no support-mailbox convention exists in any doc) — blocking
-question B6.
+**Sender/reply-to naming convention, corrected**: `weekly-summary@<verified
+product domain>` (sender) and `support@<verified product domain>`
+(reply-to). The domain itself is never hardcoded — each deployment supplies
+its own verified domain via `WEEKLY_SUMMARY_SENDER_ADDRESS` /
+`WEEKLY_SUMMARY_REPLY_TO_ADDRESS` (unchanged mechanism from the first
+approval), this section only fixes the local-part convention operators
+should follow when they set those values. Tests use a reserved,
+non-deliverable domain (`weekly-summary@example.test`) per
+[RFC 2606](https://www.rfc-editor.org/rfc/rfc2606), never a real or
+plausible-looking address — blocking question B6.
 
 ## 6. Delivery audit and retention
 
@@ -315,13 +376,59 @@ provider's message id, without ever storing the rendered email body/subject
 (the content is always reproducible on demand from `WeeklySummaryService` +
 `WeeklySummaryRenderer` for the same `week_start`, so storing it again would
 duplicate data the export-audit precedent in V17/V18 already avoids for
-exported rows).
+exported rows). `last_error` is sanitized and length-bounded before storage
+(truncated, no credential/message-body/raw-provider-response content ever
+written to it — only our own classification text and Postmark's opaque
+numeric `ErrorCode`/short `Message` field).
 
-Retention: **proposed same as V17/V18 — retained for the lifetime of the
-workspace, deleted via the `ON DELETE CASCADE` from `projects`, no separate
-cleanup job.** If a fixed retention window shorter than "workspace lifetime"
-is required for compliance reasons, that needs its own decision — blocking
-question B7.
+Retention: **corrected — 400 days for terminal rows, not workspace
+lifetime.** A daily cleanup pass (reusing the same in-process `@Scheduled`
+mechanism as dispatch, §1a) deletes rows whose status is `SENT`,
+`PERMANENTLY_FAILED`, or `BLOCKED_MISSING_EMAIL` (a "superseded" blocked
+record — one that was never resolved before aging out) and whose
+`created_at` is older than 400 days. `PENDING`, `SENDING`, and retryable
+`FAILED` rows are **never** touched by retention cleanup regardless of age
+— those are active work, not audit history. The `ON DELETE CASCADE` from
+`projects` still applies (a deleted project's rows go with it immediately,
+unrelated to the 400-day window). `weekly_summary_opt_outs` rows are
+retained until the membership/project is removed or the member opts back
+in — opt-out is a standing preference, not a delivery-attempt record, so it
+is not subject to the same time-based cleanup.
+
+This is now a corrected, final decision — see blocking question B7.
+
+## Delivery guarantee — corrected, required
+
+**This system provides at-least-once delivery, not exactly-once.** The
+`uq_weekly_summary_delivery` constraint (§4a) prevents duplicate
+_scheduling_ and duplicate _concurrent internal sends_ for the same
+`(project, recipient, week)` — two ticks, a tick racing a manual trigger, or
+two claim attempts can never both send. It says nothing about the provider
+side: Postmark's public API does not document a request-idempotency key, so
+if Postmark accepts and queues a message but the HTTP response is lost
+(timeout, connection reset, proxy failure) before we record the outcome,
+our only safe action on retry is to send again — which means a rare
+provider-side duplicate is an accepted possibility, not a bug to be
+engineered away. Concretely:
+
+- **At-least-once delivery.** A recipient may, rarely, receive the same
+  week's summary twice after an ambiguous network outcome.
+- **Internal duplicate scheduling is prevented** by the database unique key
+  (§4a) — this part is a real, enforced guarantee.
+- **Rare provider-side duplicates are accepted** after ambiguous network
+  outcomes specifically (not after a definite success or a definite error
+  response, both of which are unambiguous).
+- Every send includes the delivery row's UUID in the Postmark request's
+  `Metadata` object and a custom `X-MRR-Origin-Delivery-Id` tracing header,
+  so any duplicate that does occur is traceable back to the exact delivery
+  attempt on both sides (our audit trail and Postmark's own dashboard/logs).
+- Ambiguous outcomes are recorded distinctly (`last_outcome_ambiguous`,
+  §4a) — never silently folded into an ordinary transient failure — and
+  every retry attempt remains in the same audit trail (§6) whether or not
+  it turns out to have been necessary.
+- **No documentation, code comment, or test in this codebase claims
+  exactly-once delivery or that duplicates are impossible.** Any future
+  wording implying otherwise is a defect against this contract.
 
 ## 7. Authorization
 
@@ -334,32 +441,59 @@ question B7.
 - No new public/unauthenticated endpoint (see §3b on the unsubscribe-link
   question).
 
-## Blocking questions — resolved 2026-08-17
+## Blocking questions — resolved 2026-08-17, corrected 2026-08-17
 
-All seven accepted as proposed:
-
-- **B1 (weekday/time/DST) — ACCEPTED**: Monday 08:00 project-local delivery
-  time (§1b), DST handled by recomputing from `ZoneId` each week (never a
-  stored UTC instant).
-- **B2 (default recipient roles) — ACCEPTED**: `OWNER`+`ADMIN` are the
-  default recipients, `MEMBER`/`VIEWER` excluded by default, no opt-in path
-  in v1 (§2a).
-- **B3 (recipient email source) — ACCEPTED**: `email` stored on
-  `WorkspaceMember`, sourced from the OIDC token's `email` claim (§2c).
-- **B4 (unsubscribe mechanism) — ACCEPTED**: authenticated-only opt-out for
-  v1; no unauthenticated one-click unsubscribe link (§3b).
-- **B5 (retry schedule) — ACCEPTED**: 5 attempts, 1m/15m/1h/6h/24h backoff,
-  then `PERMANENTLY_FAILED` (§4c).
-- **B6 (provider, sender, reply-to) — ACCEPTED**: Postmark per ADR-0007.
-  Sender and reply-to addresses remain purely operator-configured
-  (`WEEKLY_SUMMARY_SENDER_ADDRESS` / `WEEKLY_SUMMARY_REPLY_TO_ADDRESS`, no
-  value committed to the repo) — no concrete domain/mailbox was supplied
-  with this approval, so the API continues to start cleanly with these
-  blank and the scheduler skips dispatch with a one-time logged warning
-  until an operator sets them for a given deployment (§5, ADR-0007
-  "Migration and operational consequences").
-- **B7 (audit retention) — ACCEPTED**: workspace-lifetime retention for
-  `weekly_summary_deliveries`, cascade-deleted with the workspace (§6).
+- **B1 (weekday/time/DST) — ACCEPTED, unchanged**: Monday 08:00
+  project-local delivery time (§1b), recalculated every week via `ZoneId`
+  (never a stored UTC instant), covering the immediately preceding
+  completed Monday-to-Monday week.
+- **B2 (default recipient roles) — ACCEPTED, unchanged**: `OWNER`+`ADMIN`
+  are the default recipients, `MEMBER`/`VIEWER` excluded by default,
+  delivery per-project, opt-out per (workspace, project, member) (§2a).
+- **B3 (recipient email source) — ACCEPTED WITH REFINEMENT**: `email`
+  stored on `WorkspaceMember`, sourced only from a JWT with
+  `email_verified=true`, refreshed on every authentication where the
+  verified claim changes; never a manager-supplied address. A member
+  without a verified email is not silently ignored — an auditable,
+  manager-visible, manually-replayable `BLOCKED_MISSING_EMAIL` delivery
+  state is recorded instead (§2c, §4a, §4d).
+- **B4 (unsubscribe mechanism) — ACCEPTED, unchanged for v1**:
+  authenticated project-settings UI/API opt-out; every email must link
+  directly to it; content stays strictly operational/reporting (no
+  marketing); no unauthenticated one-click unsubscribe endpoint in v1,
+  tracked as a required follow-up before marketing content or a broader
+  campaign (§3b).
+- **B5 (retry schedule) — CORRECTED**: 6 total attempts, 1m/15m/1h/6h/24h
+  backoff between attempts 1-5, then `PERMANENTLY_FAILED`; permanent
+  provider/address failures short-circuit immediately; managers may replay
+  terminal failures; claiming uses an explicit random `lease_token` +
+  `lease_until` (reclaimable on expiry), fencing success/failure by the
+  exact lease token, never the provider network call inside a DB
+  transaction (§4b, §4c).
+- **B6 (provider, sender, reply-to) — ACCEPTED WITH NAMING CONVENTION**:
+  Postmark per ADR-0007, plain `RestClient`, no vendor SDK.
+  `weekly-summary@<verified-domain>` (sender) /
+  `support@<verified-domain>` (reply-to) is the naming convention; the
+  domain itself remains purely operator-configured
+  (`WEEKLY_SUMMARY_SENDER_ADDRESS` / `WEEKLY_SUMMARY_REPLY_TO_ADDRESS`), so
+  the API continues to start cleanly with these blank and the scheduler
+  skips dispatch with a one-time logged warning until an operator sets them
+  for a given deployment. Tests use reserved `example.test` addresses (§5,
+  ADR-0007 "Migration and operational consequences").
+- **B7 (audit retention) — CORRECTED**: 400-day retention for terminal
+  (`SENT`/`PERMANENTLY_FAILED`/`BLOCKED_MISSING_EMAIL`) rows via a daily
+  cleanup pass, not workspace lifetime; active (`PENDING`/`SENDING`/
+  retryable `FAILED`) rows are never touched by cleanup; no rendered
+  subject/body ever persisted; `last_error` sanitized and length-bounded;
+  opt-out rows retained until membership/project removal or opt-back-in
+  (§6).
+- **Delivery guarantee — CORRECTED, required**: at-least-once, not
+  exactly-once; internal duplicate scheduling prevented by the DB unique
+  key; rare provider-side duplicates accepted after ambiguous network
+  outcomes; delivery UUID carried in Postmark `Metadata` and a custom
+  tracing header; ambiguous outcomes and every retry recorded in the audit
+  trail; no documentation, code, or test may claim exactly-once delivery
+  (see "Delivery guarantee" above).
 
 ## Out-of-scope follow-ups (not blocking #59)
 

@@ -17,9 +17,9 @@ import com.mrrorigin.workspace.WorkspaceContext;
 import com.mrrorigin.workspace.WorkspaceManagementService;
 
 /**
- * Manager-only manual trigger and delivery-status visibility for #59 (plan §1a/§4d), matching the
- * authorization precedent of every other batch-trigger endpoint ({@code TrackingRetentionController
- * #run}, {@code ProjectDataDeletionController}).
+ * Manager-only manual trigger, replay, and delivery-status visibility for #59 (plan §1a/§4d),
+ * matching the authorization precedent of every other batch-trigger endpoint ({@code
+ * TrackingRetentionController#run}, {@code ProjectDataDeletionController}).
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/notifications/weekly-summary")
@@ -52,6 +52,19 @@ public class WeeklySummaryDeliveryController {
         return new SendResponse(OffsetDateTime.now());
     }
 
+    /**
+     * Manual replay of a terminal delivery (#59, accepted B3/B5 corrections, plan §4d):
+     * {@code PERMANENTLY_FAILED} gets a fresh attempt budget; {@code BLOCKED_MISSING_EMAIL} is
+     * replayed only if the member now has a verified email.
+     */
+    @PostMapping("/deliveries/{deliveryId}/replay")
+    public SendResponse replay(@PathVariable UUID workspaceId, @PathVariable UUID projectId, @PathVariable UUID deliveryId) {
+        workspaceContext.requireManager(workspaceId);
+        workspaceManagementService.getProject(workspaceId, projectId);
+        dispatchService.replay(workspaceId, projectId, deliveryId);
+        return new SendResponse(OffsetDateTime.now());
+    }
+
     @GetMapping("/deliveries")
     public List<DeliveryResponse> deliveries(
             @PathVariable UUID workspaceId, @PathVariable UUID projectId, @RequestParam(required = false) Integer limit) {
@@ -73,7 +86,7 @@ public class WeeklySummaryDeliveryController {
     private static DeliveryResponse toResponse(DeliveryStatusRow row) {
         return new DeliveryResponse(
                 row.id(), row.recipientEmail(), row.weekStart(), row.status(), row.attemptCount(), row.lastError(),
-                row.providerMessageId(), row.createdAt(), row.updatedAt());
+                row.lastOutcomeAmbiguous(), row.providerMessageId(), row.createdAt(), row.updatedAt());
     }
 
     public record SendResponse(OffsetDateTime triggeredAt) {}
@@ -85,6 +98,7 @@ public class WeeklySummaryDeliveryController {
             String status,
             int attemptCount,
             String lastError,
+            boolean lastOutcomeAmbiguous,
             String providerMessageId,
             OffsetDateTime createdAt,
             OffsetDateTime updatedAt) {}

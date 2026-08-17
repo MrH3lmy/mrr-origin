@@ -98,9 +98,11 @@ this decision is not assumed permanent.
 
 Sender and reply-to addresses remain purely operator-configured (per
 `docs/weekly-summary-delivery-plan.md` blocking question B6, accepted
-2026-08-17) — no value is fixed by this ADR or committed to the repo; each
-deployment supplies its own via `WEEKLY_SUMMARY_SENDER_ADDRESS` /
-`WEEKLY_SUMMARY_REPLY_TO_ADDRESS`.
+2026-08-17, naming convention corrected the same day) — no domain value is
+fixed by this ADR or committed to the repo; each deployment supplies its
+own via `WEEKLY_SUMMARY_SENDER_ADDRESS` / `WEEKLY_SUMMARY_REPLY_TO_ADDRESS`.
+The accepted local-part convention is `weekly-summary@<verified domain>`
+(sender) / `support@<verified domain>` (reply-to).
 
 ## Provider-neutral interface
 
@@ -116,14 +118,19 @@ interface EmailSender {
     record EmailMessage(
             String toAddress, String fromAddress, String replyToAddress,
             String subject, String textBody, String htmlBody,
-            String idempotencyKey) // maps to weekly_summary_deliveries.id — see below
+            String deliveryId) // weekly_summary_deliveries.id -- carried in Postmark Metadata + a
+                                // tracing header for cross-system tracing; see "Delivery guarantee"
     {}
 
     record EmailSendResult(String providerMessageId) {}
 
-    /** Thrown for any send failure; see the timeout/error-behavior section below for how callers classify it. */
+    /**
+     * Thrown for any send failure; see the timeout/error-behavior section below for how callers
+     * classify {@code permanent}. {@code ambiguous} is true when a network-level failure means we
+     * cannot tell whether Postmark ever received/queued the message -- see "Delivery guarantee".
+     */
     final class EmailSendException extends RuntimeException {
-        EmailSendException(String message, Throwable cause) { super(message, cause); }
+        EmailSendException(String message, boolean permanent, boolean ambiguous, Throwable cause) { super(message, cause); }
     }
 }
 ```
@@ -146,7 +153,8 @@ public record EmailProperties(
         String senderAddress,
         String replyToAddress,
         String messageStream,
-        Duration requestTimeout) {
+        Duration requestTimeout,
+        String webBaseUrl) { // builds the opt-out link every email must contain -- accepted B4
 
     public EmailProperties {
         messageStream = blankToDefault(messageStream, "outbound");
@@ -164,6 +172,7 @@ mrrorigin:
       reply-to-address: ${WEEKLY_SUMMARY_REPLY_TO_ADDRESS:}
       message-stream: ${POSTMARK_MESSAGE_STREAM:outbound}
       request-timeout: ${POSTMARK_REQUEST_TIMEOUT:PT10S}
+      web-base-url: ${WEB_APP_BASE_URL:}
 ```
 
 `POSTMARK_SERVER_TOKEN` is the only secret; it is never logged (matches
@@ -186,8 +195,21 @@ which Postmark does not.
 - Any non-2xx response or network failure (`ResourceAccessException`, same
   pattern as `StripeBackfillClient`) is wrapped in `EmailSendException` and
   surfaces to the delivery retry loop as an ordinary attempt failure —
-  recorded in `weekly_summary_deliveries.last_error`, advancing
-  `next_attempt_at` per the backoff schedule (delivery plan §4c).
+  recorded in `weekly_summary_deliveries.last_error` (sanitized,
+  length-bounded), advancing `next_attempt_at` per the backoff schedule
+  (delivery plan §4c).
+- **Ambiguous vs. definite classification** (corrected, required — see the
+  delivery plan's "Delivery guarantee"): a `ResourceAccessException` (the
+  request may or may not have reached Postmark — connection reset, read
+  timeout, proxy failure) is `ambiguous = true`; a non-2xx HTTP response is
+  `ambiguous = false` (Postmark definitely received the request and gave a
+  definite answer, success or error). `last_outcome_ambiguous` on the
+  delivery row is set accordingly. This never changes retry behavior itself
+  (an ambiguous transient failure still follows the normal backoff
+  schedule) — it exists purely so the audit trail can distinguish "we know
+  this attempt failed" from "we don't know if this attempt actually sent,"
+  which is what makes the resulting at-least-once (not exactly-once)
+  guarantee honest rather than silently swept under a generic error.
 - **Permanent vs. transient classification**: Postmark returns a structured
   `ErrorCode` in its JSON error body. Codes indicating the address itself is
   invalid or has been marked inactive/bounced by Postmark (e.g. `300`
@@ -242,12 +264,14 @@ which Postmark does not.
   proposed. All additive; no existing table is altered destructively.
 - New required production configuration: `POSTMARK_SERVER_TOKEN`,
   `WEEKLY_SUMMARY_SENDER_ADDRESS`, `WEEKLY_SUMMARY_REPLY_TO_ADDRESS`
-  (blocking question B6 in the delivery plan). The API must continue to
-  start cleanly with these blank (matching `StripeConnectProperties`'s
-  blank-safe pattern) — the scheduler simply skips dispatch and logs a
-  configuration warning once, rather than failing startup, so a local/dev
-  environment without Postmark configured is not blocked from running the
-  rest of the API.
+  (blocking question B6 in the delivery plan), and `WEB_APP_BASE_URL`
+  (accepted B4 — builds the opt-out link every email must contain). The API
+  must continue to start cleanly with all of these blank (matching
+  `StripeConnectProperties`'s blank-safe pattern) — the scheduler simply
+  skips dispatch and logs a configuration warning once, rather than failing
+  startup, so a local/dev environment without Postmark (or without a
+  deployed web app URL yet) is not blocked from running the rest of the
+  API.
 - Operational prerequisite before first production send: verify the sender
   domain with Postmark (SPF/DKIM DNS records) — a one-time setup step
   outside this repository, to be tracked as a deployment task rather than
@@ -260,6 +284,13 @@ which Postmark does not.
 
 ## Consequences
 
+- **Delivery is at-least-once, not exactly-once** (corrected, required —
+  see the delivery plan's "Delivery guarantee"). Postmark's API has no
+  documented request-idempotency key, so an ambiguous network outcome on
+  retry can rarely produce a provider-side duplicate; this is an accepted
+  tradeoff, traced via the delivery UUID carried in Postmark `Metadata` and
+  a custom `X-MRR-Origin-Delivery-Id` header, never claimed as impossible
+  in any doc, code comment, or test.
 - Adds exactly one new external dependency (Postmark API + one HTTPS
   client call), no SDK, no new infrastructure component.
 - `EmailSender` being provider-neutral means a future provider change is a

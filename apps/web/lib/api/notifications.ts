@@ -52,3 +52,19 @@ export function listWeeklySummaryDeliveries(
     `${base(workspaceId, projectId)}/deliveries`,
   );
 }
+
+/**
+ * Manual replay of a terminal delivery (#59, accepted B3/B5 corrections): a `PERMANENTLY_FAILED`
+ * row gets a fresh attempt budget; a `BLOCKED_MISSING_EMAIL` row is only replayed once the member
+ * has a verified email (a 409 response means it still doesn't).
+ */
+export function replayWeeklySummaryDelivery(
+  client: ApiClient,
+  workspaceId: string,
+  projectId: string,
+  deliveryId: string,
+): Promise<{ triggeredAt: string }> {
+  return client.post<{ triggeredAt: string }>(
+    `${base(workspaceId, projectId)}/deliveries/${deliveryId}/replay`,
+  );
+}

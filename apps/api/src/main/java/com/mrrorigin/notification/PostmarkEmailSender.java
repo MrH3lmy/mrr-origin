@@ -68,6 +68,11 @@ class PostmarkEmailSender implements EmailSender {
         body.put("TextBody", message.textBody());
         body.put("HtmlBody", message.htmlBody());
         body.put("MessageStream", properties.messageStream());
+        // Carries the delivery row's own id through to Postmark (Metadata + a tracing header) so a
+        // rare provider-side duplicate after an ambiguous network outcome is traceable on both sides --
+        // see ADR-0007 / the delivery plan's "Delivery guarantee" section. Never claims this makes
+        // duplicates impossible, only traceable.
+        body.putObject("Metadata").put("deliveryId", message.deliveryId());
 
         try {
             return restClient
@@ -76,6 +81,7 @@ class PostmarkEmailSender implements EmailSender {
                     .headers(headers -> {
                         headers.set("Accept", "application/json");
                         headers.set("X-Postmark-Server-Token", properties.postmarkServerToken());
+                        headers.set("X-MRR-Origin-Delivery-Id", message.deliveryId());
                     })
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(objectMapper.writeValueAsBytes(body))

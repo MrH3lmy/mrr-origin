@@ -23,9 +23,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * #59's best-effort email capture ({@link WorkspaceContext}/{@link WorkspaceMemberEmailCaptureService}):
- * a member's email is filled in from their own JWT {@code email} claim on their next authenticated
- * request, exactly once, and never required.
+ * #59's email capture ({@link WorkspaceContext}/{@link WorkspaceMemberEmailCaptureService}), accepted
+ * B3 correction: a member's email is filled in and kept refreshed from their own JWT {@code email}
+ * claim on every authenticated request, but only when that claim's {@code email_verified} is
+ * {@code true} -- an unverified or absent claim never seeds or overwrites the stored value, and it is
+ * never required.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -59,22 +61,43 @@ class WorkspaceMemberEmailCaptureIntegrationTests {
     }
 
     @Test
-    void capturesEmailFromJwtClaimOnFirstAuthenticatedRequest() throws Exception {
+    void capturesEmailFromAVerifiedJwtClaimOnFirstAuthenticatedRequest() throws Exception {
         assertThat(emailInDb()).isNull();
 
-        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "owner@example.com")))
+        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "owner@example.com", true)))
                 .andExpect(status().isOk());
 
         assertThat(emailInDb()).isEqualTo("owner@example.com");
     }
 
     @Test
-    void doesNotOverwriteAnAlreadyCapturedEmail() throws Exception {
-        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "first@example.com")))
+    void unverifiedEmailClaimNeverCapturesAnything() throws Exception {
+        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "owner@example.com", false)))
+                .andExpect(status().isOk());
+
+        assertThat(emailInDb()).isNull();
+    }
+
+    @Test
+    void refreshesToANewVerifiedEmailOnASubsequentAuthentication() throws Exception {
+        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "first@example.com", true)))
                 .andExpect(status().isOk());
         assertThat(emailInDb()).isEqualTo("first@example.com");
 
-        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "second@example.com")))
+        // Accepted B3 correction: a verified email is refreshed, not just captured once, when the
+        // subject re-authenticates with a different verified value.
+        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "second@example.com", true)))
+                .andExpect(status().isOk());
+
+        assertThat(emailInDb()).isEqualTo("second@example.com");
+    }
+
+    @Test
+    void anUnverifiedClaimNeverOverwritesAnAlreadyCapturedVerifiedEmail() throws Exception {
+        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "first@example.com", true)))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, "second@example.com", false)))
                 .andExpect(status().isOk());
 
         assertThat(emailInDb()).isEqualTo("first@example.com");
@@ -82,7 +105,7 @@ class WorkspaceMemberEmailCaptureIntegrationTests {
 
     @Test
     void missingEmailClaimLeavesEmailNull() throws Exception {
-        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, null)))
+        mockMvc.perform(get("/api/workspaces/{id}", workspace).with(token(SUBJECT, null, true)))
                 .andExpect(status().isOk());
 
         assertThat(emailInDb()).isNull();
@@ -96,13 +119,14 @@ class WorkspaceMemberEmailCaptureIntegrationTests {
                 .get(0);
     }
 
-    private RequestPostProcessor token(String subject, String email) {
+    private RequestPostProcessor token(String subject, String email, boolean emailVerified) {
         return jwt().jwt(jwt -> {
             jwt.subject(subject)
                     .issuer("http://localhost:8081/realms/mrr-origin")
                     .audience(List.of("mrr-origin-api"));
             if (email != null) {
                 jwt.claim("email", email);
+                jwt.claim("email_verified", emailVerified);
             }
         });
     }

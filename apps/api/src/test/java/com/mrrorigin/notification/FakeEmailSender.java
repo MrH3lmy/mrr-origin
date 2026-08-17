@@ -26,6 +26,7 @@ class FakeEmailSender implements EmailSender {
     private final AtomicInteger callCount = new AtomicInteger();
     private volatile int failNextCalls = 0;
     private volatile boolean failPermanently = false;
+    private volatile boolean failAmbiguously = false;
 
     @Override
     public synchronized EmailSendResult send(EmailMessage message) {
@@ -33,14 +34,20 @@ class FakeEmailSender implements EmailSender {
         sent.add(message);
         if (failNextCalls > 0) {
             failNextCalls--;
-            throw new EmailSendException("simulated failure", failPermanently);
+            throw new EmailSendException("simulated failure", failPermanently, failAmbiguously);
         }
         return new EmailSendResult("fake-message-" + callCount.get());
     }
 
     void failNextCalls(int count, boolean permanent) {
+        failNextCalls(count, permanent, false);
+    }
+
+    /** {@code ambiguous} simulates a network-level failure whose outcome on the provider side is unknown (#59). */
+    void failNextCalls(int count, boolean permanent, boolean ambiguous) {
         this.failNextCalls = count;
         this.failPermanently = permanent;
+        this.failAmbiguously = ambiguous;
     }
 
     int callCount() {
@@ -56,5 +63,6 @@ class FakeEmailSender implements EmailSender {
         callCount.set(0);
         failNextCalls = 0;
         failPermanently = false;
+        failAmbiguously = false;
     }
 }

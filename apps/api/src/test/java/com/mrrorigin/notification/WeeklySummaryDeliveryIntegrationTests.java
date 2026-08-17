@@ -60,7 +60,8 @@ class WeeklySummaryDeliveryIntegrationTests {
         registry.add("spring.datasource.username", DB::getUsername);
         registry.add("spring.datasource.password", DB::getPassword);
         registry.add("mrrorigin.notification.email.postmark-server-token", () -> "test-token");
-        registry.add("mrrorigin.notification.email.sender-address", () -> "weekly@example.com");
+        registry.add("mrrorigin.notification.email.sender-address", () -> "weekly-summary@example.test");
+        registry.add("mrrorigin.notification.email.web-base-url", () -> "https://app.example.test");
         // Effectively disables the real scheduled tick during this test class's run (it would
         // otherwise race the test's own direct dispatchDue()/dispatchProjectNow() calls); nothing
         // here tests the @Scheduled wiring itself, only the dispatch/retry logic it calls into.
@@ -112,6 +113,13 @@ class WeeklySummaryDeliveryIntegrationTests {
                 .update();
     }
 
+    private void insertMemberWithNoEmail(String subject, String role) {
+        db.sql("INSERT INTO workspace_members (workspace_id, subject_id, role, email) "
+                        + "VALUES (:w, :s, :r, NULL)")
+                .param("w", workspace).param("s", subject).param("r", role)
+                .update();
+    }
+
     // -- Recipient resolution, opt-out, and duplicate-send idempotency --
 
     @Test
@@ -134,7 +142,7 @@ class WeeklySummaryDeliveryIntegrationTests {
     }
 
     @Test
-    void renderedEmailUsesConfiguredSenderAndSubjectNamesTheProject() {
+    void renderedEmailUsesConfiguredSenderSubjectAndContainsTheOptOutLinkAndDeliveryId() {
         dispatchService.dispatchDue();
 
         // Both OWNER and ADMIN are eligible and not opted out here, so both receive a message; this
@@ -144,8 +152,16 @@ class WeeklySummaryDeliveryIntegrationTests {
                 .filter(sent -> sent.toAddress().equals("owner@example.com"))
                 .findFirst()
                 .orElseThrow();
-        assertThat(message.fromAddress()).isEqualTo("weekly@example.com");
+        assertThat(message.fromAddress()).isEqualTo("weekly-summary@example.test");
         assertThat(message.subject()).contains("p").contains("2026-03-02");
+
+        // Accepted B4: every email must link directly to the authenticated opt-out setting.
+        String expectedLink = "https://app.example.test/app/" + workspace + "/projects/" + project + "/weekly-summary";
+        assertThat(message.textBody()).contains(expectedLink);
+        assertThat(message.htmlBody()).contains(expectedLink);
+
+        // Delivery guarantee: the delivery id is threaded through for Postmark metadata/tracing.
+        assertThat(message.deliveryId()).isEqualTo(deliveryIdFor(OWNER).toString());
     }
 
     // -- Tenant isolation --
@@ -219,8 +235,9 @@ class WeeklySummaryDeliveryIntegrationTests {
 
         ClaimedDelivery claim1 = deliveryRepository.claimBatch(10, now).get(0);
         assertThat(claim1.attemptCount()).isEqualTo(1);
-        deliveryRepository.markFailed(claim1.id(), claim1.lastAttemptedAt(), "transient error 1", false, claim1.attemptCount(), now);
+        deliveryRepository.markFailed(claim1.id(), claim1.leaseToken(), "transient error 1", false, false, claim1.attemptCount(), now);
         assertThat(statusFor(OWNER)).isEqualTo("FAILED");
+        assertThat(ambiguousFor(OWNER)).isFalse();
         OffsetDateTime nextAttemptAfterFirst = nextAttemptAtFor(OWNER);
         assertThat(nextAttemptAfterFirst).isEqualTo(now.plusMinutes(1));
 
@@ -230,27 +247,50 @@ class WeeklySummaryDeliveryIntegrationTests {
         OffsetDateTime secondAttemptNow = now.plusMinutes(1);
         ClaimedDelivery claim2 = deliveryRepository.claimBatch(10, secondAttemptNow).get(0);
         assertThat(claim2.attemptCount()).isEqualTo(2);
-        boolean marked = deliveryRepository.markSent(claim2.id(), claim2.lastAttemptedAt(), "provider-msg-1", secondAttemptNow);
+        boolean marked = deliveryRepository.markSent(claim2.id(), claim2.leaseToken(), "provider-msg-1", secondAttemptNow);
         assertThat(marked).isTrue();
         assertThat(statusFor(OWNER)).isEqualTo("SENT");
     }
 
     @Test
-    void exhaustingAllAttemptsReachesPermanentlyFailed() {
+    void ambiguousNetworkFailureIsRecordedDistinctlyInTheAuditTrail() {
+        // Delivery guarantee (corrected, required): an ambiguous outcome (we don't know if Postmark
+        // ever received the request) must be recorded distinctly, never folded into an ordinary
+        // transient failure.
         OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
         deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+
+        ClaimedDelivery claim = deliveryRepository.claimBatch(10, now).get(0);
+        deliveryRepository.markFailed(claim.id(), claim.leaseToken(), "connection reset", false, true, claim.attemptCount(), now);
+
+        assertThat(statusFor(OWNER)).isEqualTo("FAILED");
+        assertThat(ambiguousFor(OWNER)).isTrue();
+    }
+
+    @Test
+    void exhaustingAllSixAttemptsReachesPermanentlyFailed() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+        assertThat(WeeklySummaryDeliveryRepository.MAX_ATTEMPTS).isEqualTo(6); // accepted B5 correction
 
         OffsetDateTime attemptNow = now;
         for (int attempt = 1; attempt <= WeeklySummaryDeliveryRepository.MAX_ATTEMPTS; attempt++) {
             ClaimedDelivery claim = deliveryRepository.claimBatch(10, attemptNow).get(0);
             assertThat(claim.attemptCount()).isEqualTo(attempt);
-            deliveryRepository.markFailed(claim.id(), claim.lastAttemptedAt(), "still failing", false, claim.attemptCount(), attemptNow);
+            deliveryRepository.markFailed(claim.id(), claim.leaseToken(), "still failing", false, false, claim.attemptCount(), attemptNow);
             attemptNow = nextAttemptAtFor(OWNER) != null ? nextAttemptAtFor(OWNER) : attemptNow;
         }
 
         assertThat(statusFor(OWNER)).isEqualTo("PERMANENTLY_FAILED");
         // A terminal row is never picked up again, at any future time.
         assertThat(deliveryRepository.claimBatch(10, attemptNow.plusDays(30))).isEmpty();
+
+        // Accepted B5: a manager can replay a terminal failure with a fresh attempt budget.
+        boolean replayed = deliveryRepository.resetPermanentlyFailedForReplay(deliveryIdFor(OWNER), attemptNow);
+        assertThat(replayed).isTrue();
+        assertThat(statusFor(OWNER)).isEqualTo("PENDING");
+        ClaimedDelivery replayedClaim = deliveryRepository.claimBatch(10, attemptNow).get(0);
+        assertThat(replayedClaim.attemptCount()).isEqualTo(1);
     }
 
     @Test
@@ -259,9 +299,65 @@ class WeeklySummaryDeliveryIntegrationTests {
         deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
 
         ClaimedDelivery claim = deliveryRepository.claimBatch(10, now).get(0);
-        deliveryRepository.markFailed(claim.id(), claim.lastAttemptedAt(), "invalid recipient", true, claim.attemptCount(), now);
+        deliveryRepository.markFailed(claim.id(), claim.leaseToken(), "invalid recipient", true, false, claim.attemptCount(), now);
 
         assertThat(statusFor(OWNER)).isEqualTo("PERMANENTLY_FAILED");
+    }
+
+    // -- Missing verified email (accepted B3 correction) --
+
+    @Test
+    void recipientWithNoVerifiedEmailGetsAnAuditableBlockedRowInsteadOfBeingSkipped() {
+        insertMemberWithNoEmail("user-no-email", "ADMIN");
+
+        dispatchService.dispatchDue();
+
+        assertThat(rowCount("user-no-email")).isEqualTo(1);
+        assertThat(statusFor("user-no-email")).isEqualTo("BLOCKED_MISSING_EMAIL");
+        // Never claimable -- it has no email to send to.
+        assertThat(emailSender.sent().stream().anyMatch(sent -> sent.toAddress() == null)).isFalse();
+    }
+
+    @Test
+    void replayEndpointRejectsBlockedMissingEmailUntilAVerifiedEmailIsCaptured() throws Exception {
+        insertMemberWithNoEmail("user-no-email", "ADMIN");
+        dispatchService.dispatchDue();
+        UUID deliveryId = deliveryIdFor("user-no-email");
+        assertThat(statusFor("user-no-email")).isEqualTo("BLOCKED_MISSING_EMAIL");
+
+        mockMvc.perform(post(replayPath(deliveryId)).with(token(OWNER))).andExpect(status().isConflict());
+
+        db.sql("UPDATE workspace_members SET email = :e WHERE workspace_id = :w AND subject_id = :s")
+                .param("e", "now-verified@example.com").param("w", workspace).param("s", "user-no-email")
+                .update();
+
+        mockMvc.perform(post(replayPath(deliveryId)).with(token(OWNER))).andExpect(status().isOk());
+        assertThat(statusFor("user-no-email")).isEqualTo("PENDING");
+        assertThat(db.sql("SELECT recipient_email FROM weekly_summary_deliveries WHERE id = :id")
+                        .param("id", deliveryId).query(String.class).single())
+                .isEqualTo("now-verified@example.com");
+    }
+
+    // -- Retention cleanup (accepted B7 correction: 400 days, terminal rows only) --
+
+    @Test
+    void retentionCleanupDeletesOldTerminalRowsButNeverActiveOnes() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+        deliveryRepository.createIfAbsent(workspace, project, ADMIN, "admin@example.com", DUE_WEEK_START, now);
+        ClaimedDelivery ownerClaim = deliveryRepository.claimBatch(10, now).get(0);
+        deliveryRepository.markSent(ownerClaim.id(), ownerClaim.leaseToken(), "msg-1", now);
+        // ADMIN's row stays PENDING (never claimed) -- an old-but-active row.
+
+        OffsetDateTime old = now.minusDays(401);
+        db.sql("UPDATE weekly_summary_deliveries SET created_at = :old WHERE project_id = :p")
+                .param("old", old).param("p", project).update();
+
+        int deleted = deliveryRepository.deleteExpiredTerminal(now.minusDays(400));
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(rowCount(OWNER)).isZero(); // SENT + old: deleted
+        assertThat(rowCount(ADMIN)).isEqualTo(1); // PENDING, however old: never touched
     }
 
     // -- Concurrency / lease fencing (mirrors BillingLedgerConcurrencyAndIsolationIntegrationTests) --
@@ -272,14 +368,40 @@ class WeeklySummaryDeliveryIntegrationTests {
         deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
 
         ClaimedDelivery staleClaim = deliveryRepository.claimBatch(10, now).get(0);
-        // A second worker's claim window; simulate it by directly advancing the lease as a fresh claim
-        // would (this row is SENDING, so a real second claimBatch call would correctly find nothing --
-        // this directly proves the fencing that guarantee rests on).
-        db.sql("UPDATE weekly_summary_deliveries SET last_attempted_at = :now2 WHERE id = :id")
-                .param("now2", now.plusMinutes(1)).param("id", staleClaim.id()).update();
+        // A second worker reclaiming this row's lease directly (a real second claimBatch call would
+        // correctly find nothing while lease_until is unexpired -- this directly proves the token
+        // fencing that guarantee rests on).
+        db.sql("UPDATE weekly_summary_deliveries SET lease_token = :newToken WHERE id = :id")
+                .param("newToken", UUID.randomUUID()).param("id", staleClaim.id()).update();
 
-        boolean staleMarkSent = deliveryRepository.markSent(staleClaim.id(), staleClaim.lastAttemptedAt(), "stale-msg", now);
+        boolean staleMarkSent = deliveryRepository.markSent(staleClaim.id(), staleClaim.leaseToken(), "stale-msg", now);
         assertThat(staleMarkSent).isFalse();
+    }
+
+    @Test
+    void expiredLeaseIsReclaimedByASubsequentClaim() {
+        // A worker that claimed a row and then died/restarted before recording an outcome must not
+        // hold the row forever -- an expired SENDING lease is itself reclaimable (accepted B5).
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+
+        ClaimedDelivery deadWorkerClaim = deliveryRepository.claimBatch(10, now).get(0);
+        assertThat(deadWorkerClaim.attemptCount()).isEqualTo(1);
+
+        // Still within the lease window: not reclaimable yet.
+        assertThat(deliveryRepository.claimBatch(10, now.plusMinutes(1))).isEmpty();
+
+        // Well past any reasonable lease duration: reclaimable, and this is a fresh attempt.
+        OffsetDateTime muchLater = now.plusMinutes(30);
+        ClaimedDelivery reclaimed = deliveryRepository.claimBatch(10, muchLater).get(0);
+        assertThat(reclaimed.id()).isEqualTo(deadWorkerClaim.id());
+        assertThat(reclaimed.attemptCount()).isEqualTo(2);
+        assertThat(reclaimed.leaseToken()).isNotEqualTo(deadWorkerClaim.leaseToken());
+
+        // The dead worker's stale token can no longer conclude this delivery.
+        assertThat(deliveryRepository.markSent(deadWorkerClaim.id(), deadWorkerClaim.leaseToken(), "stale", muchLater)).isFalse();
+        assertThat(deliveryRepository.markSent(reclaimed.id(), reclaimed.leaseToken(), "fresh", muchLater)).isTrue();
+        assertThat(statusFor(OWNER)).isEqualTo("SENT");
     }
 
     // -- Authorization --
@@ -344,6 +466,20 @@ class WeeklySummaryDeliveryIntegrationTests {
                 .query(String.class).single();
     }
 
+    private UUID deliveryIdFor(String subject) {
+        return db.sql("SELECT id FROM weekly_summary_deliveries WHERE project_id = :p AND recipient_subject_id = :s")
+                .param("p", project).param("s", subject)
+                .query((rs, rowNum) -> UUID.fromString(rs.getString("id")))
+                .list()
+                .get(0);
+    }
+
+    private boolean ambiguousFor(String subject) {
+        return db.sql("SELECT last_outcome_ambiguous FROM weekly_summary_deliveries WHERE project_id = :p AND recipient_subject_id = :s")
+                .param("p", project).param("s", subject)
+                .query(Boolean.class).single();
+    }
+
     private OffsetDateTime nextAttemptAtFor(String subject) {
         return db.sql("SELECT next_attempt_at FROM weekly_summary_deliveries WHERE project_id = :p AND recipient_subject_id = :s")
                 .param("p", project).param("s", subject)
@@ -360,6 +496,11 @@ class WeeklySummaryDeliveryIntegrationTests {
 
     private String deliveriesPath() {
         return "/api/workspaces/" + workspace + "/projects/" + project + "/notifications/weekly-summary/deliveries";
+    }
+
+    private String replayPath(UUID deliveryId) {
+        return "/api/workspaces/" + workspace + "/projects/" + project + "/notifications/weekly-summary/deliveries/" + deliveryId
+                + "/replay";
     }
 
     private RequestPostProcessor token(String subject) {

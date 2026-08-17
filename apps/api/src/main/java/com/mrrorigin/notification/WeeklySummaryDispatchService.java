@@ -1,5 +1,8 @@
 package com.mrrorigin.notification;
 
+import static org.springframework.http.HttpStatus.CONFLICT;
+import static org.springframework.http.HttpStatus.NOT_FOUND;
+
 import java.time.Clock;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
@@ -16,11 +19,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 import com.mrrorigin.notification.EmailSender.EmailMessage;
 import com.mrrorigin.notification.EmailSender.EmailSendException;
 import com.mrrorigin.notification.EmailSender.EmailSendResult;
 import com.mrrorigin.notification.WeeklySummaryDeliveryRepository.ClaimedDelivery;
+import com.mrrorigin.notification.WeeklySummaryDeliveryRepository.DeliveryRef;
 import com.mrrorigin.notification.WeeklySummaryService.WeeklySummaryResponse;
 import com.mrrorigin.workspace.WorkspaceManagementService;
 import com.mrrorigin.workspace.WorkspaceManagementService.SchedulableProject;
@@ -33,11 +38,14 @@ import com.mrrorigin.workspace.WorkspaceManagementService.WeeklySummaryRecipient
  * makes is a conditional, uniquely-constrained INSERT/UPDATE that only one instance's statement can
  * win, exactly as {@code ARCHITECTURE.md}'s reliability rules prescribe.
  *
- * <p>Each tick does two independent things: (1) for every project whose accepted delivery instant
- * (Monday 08:00 project-local, recomputed fresh from the project's IANA zone every tick -- never a
- * stored UTC instant, so DST is handled automatically) has passed for the most recently completed
- * week, idempotently create one PENDING delivery row per eligible, non-opted-out recipient; (2) claim
- * and send a bounded batch of due (PENDING/FAILED, past their backoff) deliveries.
+ * <p>Each dispatch tick does two independent things: (1) for every project whose accepted delivery
+ * instant (Monday 08:00 project-local, recomputed fresh from the project's IANA zone every tick --
+ * never a stored UTC instant, so DST is handled automatically) has passed for the most recently
+ * completed week, idempotently create one delivery row per eligible recipient -- {@code PENDING} with
+ * their verified email, or an auditable {@code BLOCKED_MISSING_EMAIL} row if they don't have one yet
+ * (accepted B3); (2) claim and send a bounded batch of due (PENDING/FAILED past backoff, or an
+ * expired SENDING lease) deliveries. A separate daily tick enforces the 400-day terminal-row
+ * retention window (accepted B7).
  */
 @Service
 class WeeklySummaryDispatchService {
@@ -45,6 +53,9 @@ class WeeklySummaryDispatchService {
     private static final Logger log = LoggerFactory.getLogger(WeeklySummaryDispatchService.class);
     private static final int MAX_PROJECTS_PER_TICK = 500;
     private static final int MAX_SEND_BATCH_SIZE = 50;
+
+    /** Accepted B7 correction: terminal delivery rows are retained 400 days, not for workspace lifetime. */
+    private static final long RETENTION_DAYS = 400;
 
     private final WorkspaceManagementService workspaceManagementService;
     private final WeeklySummaryOptOutService optOutService;
@@ -78,12 +89,27 @@ class WeeklySummaryDispatchService {
     void tick() {
         if (!emailProperties.isConfigured()) {
             if (warnedNotConfigured.compareAndSet(false, true)) {
-                log.warn("Weekly summary email is not configured (POSTMARK_SERVER_TOKEN/WEEKLY_SUMMARY_SENDER_ADDRESS); "
-                        + "dispatch is skipped until configured.");
+                log.warn("Weekly summary email is not configured (POSTMARK_SERVER_TOKEN/WEEKLY_SUMMARY_SENDER_ADDRESS/"
+                        + "WEB_APP_BASE_URL); dispatch is skipped until configured.");
             }
             return;
         }
         dispatchDue();
+    }
+
+    /**
+     * Daily terminal-row retention sweep (#59, accepted B7 correction, plan §6) -- independent of
+     * whether email sending itself is configured, since it cleans up historic rows regardless.
+     */
+    @Scheduled(
+            fixedDelayString = "${mrrorigin.notification.retention.fixed-delay:P1D}",
+            initialDelayString = "${mrrorigin.notification.retention.initial-delay:PT10M}")
+    void retentionTick() {
+        OffsetDateTime cutoff = OffsetDateTime.now(clock).minusDays(RETENTION_DAYS);
+        int deleted = deliveryRepository.deleteExpiredTerminal(cutoff);
+        if (deleted > 0) {
+            log.info("Deleted {} weekly summary delivery record(s) older than {} days.", deleted, RETENTION_DAYS);
+        }
     }
 
     /** Package-visible so the manual send endpoint (#59, manager-triggered) and tests can call it directly. */
@@ -133,6 +159,8 @@ class WeeklySummaryDispatchService {
             if (optedOut.contains(recipient.subjectId())) {
                 continue;
             }
+            // recipient.email() may be null here -- accepted B3: recorded as an auditable
+            // BLOCKED_MISSING_EMAIL row rather than silently skipped (see createIfAbsent).
             deliveryRepository.createIfAbsent(workspaceId, projectId, recipient.subjectId(), recipient.email(), weekStart, now);
         }
     }
@@ -164,24 +192,56 @@ class WeeklySummaryDispatchService {
         }
     }
 
+    /**
+     * Manager-triggered replay of a terminal delivery (#59, accepted B3/B5 corrections, plan §4d):
+     * {@code PERMANENTLY_FAILED} gets a fresh attempt budget; {@code BLOCKED_MISSING_EMAIL} is
+     * re-checked against the member's currently stored verified email and only replayed if one now
+     * exists. Any other status is rejected -- replay is only meaningful for a terminal outcome.
+     */
+    void replay(UUID workspaceId, UUID projectId, UUID deliveryId) {
+        DeliveryRef ref = deliveryRepository
+                .findForReplay(workspaceId, projectId, deliveryId)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Delivery not found"));
+        OffsetDateTime now = OffsetDateTime.now(clock);
+        boolean replayed =
+                switch (ref.status()) {
+                    case "PERMANENTLY_FAILED" -> deliveryRepository.resetPermanentlyFailedForReplay(deliveryId, now);
+                    case "BLOCKED_MISSING_EMAIL" -> replayBlockedMissingEmail(ref, now);
+                    default -> throw new ResponseStatusException(
+                            CONFLICT, "Only a PERMANENTLY_FAILED or BLOCKED_MISSING_EMAIL delivery can be replayed");
+                };
+        if (!replayed) {
+            throw new ResponseStatusException(CONFLICT, "Delivery could not be replayed; its state changed concurrently");
+        }
+    }
+
+    private boolean replayBlockedMissingEmail(DeliveryRef ref, OffsetDateTime now) {
+        String email = workspaceManagementService.currentVerifiedEmail(ref.workspaceId(), ref.recipientSubjectId());
+        if (email == null || email.isBlank()) {
+            throw new ResponseStatusException(CONFLICT, "This member still has no verified email captured");
+        }
+        return deliveryRepository.resolveBlockedMissingEmailForReplay(ref.id(), email, now);
+    }
+
     private void sendOne(ClaimedDelivery delivery, OffsetDateTime now) {
         try {
             EmailMessage message = renderMessage(delivery);
             EmailSendResult result = emailSender.send(message);
             OffsetDateTime completedAt = OffsetDateTime.now(clock);
-            if (!deliveryRepository.markSent(delivery.id(), delivery.lastAttemptedAt(), result.providerMessageId(), completedAt)) {
+            if (!deliveryRepository.markSent(delivery.id(), delivery.leaseToken(), result.providerMessageId(), completedAt)) {
                 log.warn("Weekly summary delivery {} lease was lost before it could be marked SENT.", delivery.id());
             }
         } catch (EmailSendException sendFailure) {
             OffsetDateTime completedAt = OffsetDateTime.now(clock);
             deliveryRepository.markFailed(
-                    delivery.id(), delivery.lastAttemptedAt(), sendFailure.getMessage(), sendFailure.permanent(),
-                    delivery.attemptCount(), completedAt);
+                    delivery.id(), delivery.leaseToken(), sendFailure.getMessage(), sendFailure.permanent(),
+                    sendFailure.ambiguous(), delivery.attemptCount(), completedAt);
         } catch (RuntimeException unexpected) {
             log.error("Unexpected failure rendering/sending weekly summary delivery {}", delivery.id(), unexpected);
             OffsetDateTime completedAt = OffsetDateTime.now(clock);
             deliveryRepository.markFailed(
-                    delivery.id(), delivery.lastAttemptedAt(), unexpected.getMessage(), false, delivery.attemptCount(), completedAt);
+                    delivery.id(), delivery.leaseToken(), unexpected.getMessage(), false, false, delivery.attemptCount(),
+                    completedAt);
         }
     }
 
@@ -191,12 +251,35 @@ class WeeklySummaryDispatchService {
                 weeklySummaryService.summary(delivery.workspaceId(), delivery.projectId(), delivery.weekStart(), timezone);
         String projectName = workspaceManagementService.projectNameForScheduling(delivery.workspaceId(), delivery.projectId());
         String subject = "Weekly summary for " + projectName + " -- week of " + delivery.weekStart();
+        String optOutUrl = optOutUrl(delivery.workspaceId(), delivery.projectId());
+        String textBody = WeeklySummaryRenderer.renderText(summary) + "\n\n" + optOutText(optOutUrl);
+        String htmlBody = WeeklySummaryRenderer.renderHtml(summary) + optOutHtml(optOutUrl);
         return new EmailMessage(
                 delivery.recipientEmail(),
                 emailProperties.senderAddress(),
                 emailProperties.replyToAddress(),
                 subject,
-                WeeklySummaryRenderer.renderText(summary),
-                WeeklySummaryRenderer.renderHtml(summary));
+                textBody,
+                htmlBody,
+                delivery.id().toString());
+    }
+
+    /**
+     * Accepted B4: every email must contain a direct link to the authenticated opt-out setting for
+     * this project. Authenticated-only in v1 -- the link itself requires the recipient to be signed
+     * in to act on it, per the accepted contract (no unauthenticated one-click unsubscribe).
+     */
+    private String optOutUrl(UUID workspaceId, UUID projectId) {
+        return emailProperties.webBaseUrl() + "/app/" + workspaceId + "/projects/" + projectId + "/weekly-summary";
+    }
+
+    private static String optOutText(String optOutUrl) {
+        return "To stop receiving this weekly summary for this project, sign in and update your "
+                + "subscription: " + optOutUrl;
+    }
+
+    private static String optOutHtml(String optOutUrl) {
+        return "<p>To stop receiving this weekly summary for this project, "
+                + "<a href=\"" + optOutUrl + "\">sign in and update your subscription</a>.</p>";
     }
 }

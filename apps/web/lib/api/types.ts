@@ -633,15 +633,23 @@ export type WeeklySummaryDeliveryStatus =
   | "SENDING"
   | "SENT"
   | "FAILED"
-  | "PERMANENTLY_FAILED";
+  | "PERMANENTLY_FAILED"
+  | "BLOCKED_MISSING_EMAIL";
 
+/**
+ * `recipientEmail` is null exactly when `status` is `BLOCKED_MISSING_EMAIL` (accepted B3
+ * correction: the member has no verified email yet). `lastOutcomeAmbiguous` is true when the last
+ * failed attempt was a network-level failure whose outcome on the provider side is unknown (the
+ * delivery plan's "Delivery guarantee" -- at-least-once, not exactly-once).
+ */
 export interface WeeklySummaryDelivery {
   id: string;
-  recipientEmail: string;
+  recipientEmail: string | null;
   weekStart: string;
   status: WeeklySummaryDeliveryStatus;
   attemptCount: number;
   lastError: string | null;
+  lastOutcomeAmbiguous: boolean;
   providerMessageId: string | null;
   createdAt: string;
   updatedAt: string;

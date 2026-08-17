@@ -42,14 +42,18 @@ mrrorigin:
       state-ttl: ${STRIPE_CONNECT_STATE_TTL:PT15M}
   notification:
     email:
-      # Per #59/ADR-0007: Postmark is the only supported provider. Sender/reply-to are intentionally
-      # blank by default (no domain/mailbox convention exists in this repo) -- the scheduler skips
-      # dispatch with a logged warning until an operator configures these for a given deployment.
+      # Per #59/ADR-0007: Postmark is the only supported provider. Sender/reply-to/web-base-url are
+      # intentionally blank by default (no domain/deployment-URL convention exists in this repo) --
+      # the scheduler skips dispatch with a logged warning until an operator configures all of them
+      # for a given deployment (a compliant email needs a real sender AND a real opt-out link).
       postmark-server-token: ${POSTMARK_SERVER_TOKEN:}
       sender-address: ${WEEKLY_SUMMARY_SENDER_ADDRESS:}
       reply-to-address: ${WEEKLY_SUMMARY_REPLY_TO_ADDRESS:}
       message-stream: ${POSTMARK_MESSAGE_STREAM:outbound}
       request-timeout: ${POSTMARK_REQUEST_TIMEOUT:PT10S}
+      # Base URL of the web app, used to build the authenticated opt-out link every weekly summary
+      # email must contain (accepted B4). No trailing slash, e.g. https://app.example.com.
+      web-base-url: ${WEB_APP_BASE_URL:}
 
 server:
   port: ${PORT:8080}

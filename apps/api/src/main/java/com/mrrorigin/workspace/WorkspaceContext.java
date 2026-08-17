@@ -56,20 +56,26 @@ public class WorkspaceContext {
         });
     }
 
-    /** Per #59: best-effort, lazy capture of this caller's own email from their JWT, at most once per member. */
+    /**
+     * Per #59 (accepted B3): captures/refreshes this caller's own email from their JWT on every
+     * authenticated request, but only from a claim the identity provider itself has verified --
+     * {@code email_verified=true}. An unverified or absent claim never seeds or overwrites the stored
+     * value, and a member whose verified address changes is picked up automatically (not just once).
+     */
     private void captureEmailIfPresent(UUID workspaceId, WorkspaceMember member) {
-        if (member.email() != null) {
-            return;
-        }
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (!(authentication instanceof JwtAuthenticationToken jwtAuthentication)) {
             return;
         }
-        String email = jwtAuthentication.getToken().getClaimAsString("email");
-        if (email == null || email.isBlank()) {
+        Boolean verified = jwtAuthentication.getToken().getClaimAsBoolean("email_verified");
+        if (!Boolean.TRUE.equals(verified)) {
             return;
         }
-        emailCaptureService.captureIfAbsent(workspaceId, member.subjectId(), email);
+        String email = jwtAuthentication.getToken().getClaimAsString("email");
+        if (email == null || email.isBlank() || email.equals(member.email())) {
+            return;
+        }
+        emailCaptureService.captureOrRefresh(workspaceId, member.subjectId(), email);
     }
 
     public WorkspaceMember requireManager(UUID workspaceId) {

@@ -30,10 +30,12 @@ public class WorkspaceMember {
     private WorkspaceRole role;
 
     /**
-     * Best-effort, nullable: captured lazily from the member's own JWT {@code email} claim (see
-     * {@link WorkspaceContext#requireMembership}), never required at row-creation time. Used only by
-     * weekly-summary recipient resolution (#59); a null value simply excludes the member from that
-     * resolution rather than failing anything.
+     * Nullable: captured/refreshed lazily from the member's own JWT {@code email} claim, but only when
+     * that claim's {@code email_verified} is {@code true} (see
+     * {@link WorkspaceContext#requireMembership}); never required at row-creation time, never sourced
+     * from an unverified claim or a manager-supplied value. Used only by weekly-summary recipient
+     * resolution (#59); a null value here is recorded as an auditable {@code BLOCKED_MISSING_EMAIL}
+     * delivery rather than a silent skip.
      */
     @Column(length = 320)
     private String email;
