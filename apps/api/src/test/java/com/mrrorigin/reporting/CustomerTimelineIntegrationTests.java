@@ -118,7 +118,7 @@ class CustomerTimelineIntegrationTests {
     }
 
     @Test
-    void customerRelinkingMovesTheCompleteTimelineToTheCorrectOwningProject() throws Exception {
+    void crossProjectRepairCannotMoveOrLeakTheCustomerTimeline() throws Exception {
         insertBillingCustomer("cus_movable", "2026-01-01T00:00:00Z");
         movement("cus_movable", "USD", 1_000, "NEW", "2026-01-01T00:00:00Z");
         String subscriptionId = subscription("cus_movable", "active", "USD");
@@ -143,28 +143,29 @@ class CustomerTimelineIntegrationTests {
                 .param("p", otherProject).param("w", workspace).param("k", "pk-" + otherProject).update();
         identify(otherProject, "user_movable_2");
 
-        mockMvc.perform(repair(OWNER, otherProject, "user_movable_2", "cus_movable")).andExpect(status().isOk());
+        mockMvc.perform(repair(OWNER, otherProject, "user_movable_2", "cus_movable"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("stripe_customer_linked_in_different_project"));
 
-        // Old project no longer owns this customer at all.
-        mockMvc.perform(timeline(OWNER, "cus_movable", null, null)).andExpect(status().isNotFound());
-
-        // The new project sees the full, non-project-scoped billing/revenue history plus its own
-        // identity link -- never the old project's superseded link.
-        String newProjectTimeline = mockMvc.perform(get(
-                                "/api/workspaces/{workspaceId}/projects/{projectId}/customers/{customerId}/timeline",
-                                workspace, otherProject, "cus_movable")
-                        .with(token(OWNER)))
+        // The rejected repair leaves ownership and the complete billing/revenue timeline unchanged.
+        String stillOwnedTimeline = mockMvc.perform(timeline(OWNER, "cus_movable", null, null))
                 .andExpect(status().isOk())
                 .andReturn()
                 .getResponse()
                 .getContentAsString();
-        org.assertj.core.api.Assertions.assertThat(entriesOfType(newProjectTimeline, "MRR_MOVEMENT")).hasSize(1);
-        org.assertj.core.api.Assertions.assertThat(entriesOfType(newProjectTimeline, "SUBSCRIPTION_STATUS_CHANGED"))
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(stillOwnedTimeline, "MRR_MOVEMENT")).hasSize(1);
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(stillOwnedTimeline, "SUBSCRIPTION_STATUS_CHANGED"))
                 .hasSize(1);
-        List<JsonNode> links = entriesOfType(newProjectTimeline, "IDENTITY_LINK_CREATED");
+        List<JsonNode> links = entriesOfType(stillOwnedTimeline, "IDENTITY_LINK_CREATED");
         org.assertj.core.api.Assertions.assertThat(links).hasSize(1);
         org.assertj.core.api.Assertions.assertThat(links.getFirst().get("externalUserId").asText())
-                .isEqualTo("user_movable_2");
+                .isEqualTo("user_movable");
+
+        mockMvc.perform(get(
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/customers/{customerId}/timeline",
+                                workspace, otherProject, "cus_movable")
+                        .with(token(OWNER)))
+                .andExpect(status().isNotFound());
     }
 
     @Test
