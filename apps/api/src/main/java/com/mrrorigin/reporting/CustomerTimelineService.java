@@ -118,9 +118,15 @@ public class CustomerTimelineService {
         ActiveLink activeLink = links.stream()
                 .filter(l -> l.supersededAt() == null)
                 .findFirst()
-                .map(l -> new ActiveLink(l.id(), l.externalUserId(), l.evidenceSource(), l.linkedBySubjectId(), l.createdAt()))
+                .map(l -> new ActiveLink(
+                        l.id(),
+                        canViewSensitiveIdentity ? l.externalUserId() : null,
+                        l.evidenceSource(),
+                        canViewSensitiveIdentity ? l.linkedBySubjectId() : null,
+                        l.createdAt()))
                 .orElse(null);
-        RepairCapability repairCapability = repairCapability(workspaceId);
+        boolean canViewSensitiveIdentity = workspaceContext.canManage(workspaceId);
+        RepairCapability repairCapability = repairCapability(canViewSensitiveIdentity);
 
         CustomerDetail detail = new CustomerDetail(
                 stripeCustomerId,
@@ -138,15 +144,21 @@ public class CustomerTimelineService {
                     "IDENTITY_LINK_CREATED",
                     link.createdAt(),
                     link.id(),
-                    "Linked to application user " + link.externalUserId() + " (" + link.evidenceSource() + ").",
-                    null, null, null, null, null, null, null, null, null, null, null, null, link.externalUserId()));
+                    canViewSensitiveIdentity
+                            ? "Linked to application user " + link.externalUserId() + " (" + link.evidenceSource() + ")."
+                            : "Linked to an application user (" + link.evidenceSource() + ").",
+                    null, null, null, null, null, null, null, null, null, null, null, null,
+                    canViewSensitiveIdentity ? link.externalUserId() : null));
             if (link.supersededAt() != null) {
                 entries.add(new TimelineEntry(
                         "IDENTITY_LINK_SUPERSEDED",
                         link.supersededAt(),
                         link.id(),
-                        "Link to " + link.externalUserId() + " was replaced by a repair.",
-                        null, null, null, null, null, null, null, null, null, null, null, null, link.externalUserId()));
+                        canViewSensitiveIdentity
+                                ? "Link to " + link.externalUserId() + " was replaced by a repair."
+                                : "The previous application-user link was replaced by a repair.",
+                        null, null, null, null, null, null, null, null, null, null, null, null,
+                        canViewSensitiveIdentity ? link.externalUserId() : null));
             }
         }
         entries.addAll(touchpointEntries(acquisitionExplanation.orElse(null), touchpointOccurredAt));
@@ -186,9 +198,9 @@ public class CustomerTimelineService {
                     "REPAIR_AUDIT",
                     repair.createdAt(),
                     repair.id(),
-                    repairExplanation(repair, stripeCustomerId),
+                    repairExplanation(repair, stripeCustomerId, canViewSensitiveIdentity),
                     null, null, null, null, null, null, null, null, null, null, null,
-                    repair.actionType(), repair.externalUserId()));
+                    repair.actionType(), canViewSensitiveIdentity ? repair.externalUserId() : null));
         }
 
         entries.sort(Comparator.comparing(TimelineEntry::at, Comparator.nullsLast(Comparator.naturalOrder()))
@@ -234,13 +246,20 @@ public class CustomerTimelineService {
         };
     }
 
-    private static String repairExplanation(CustomerLinkRepairAuditService.AuditEntry repair, String stripeCustomerId) {
+    private static String repairExplanation(
+            CustomerLinkRepairAuditService.AuditEntry repair,
+            String stripeCustomerId,
+            boolean canViewSensitiveIdentity) {
         if (stripeCustomerId.equals(repair.displacedCustomerId())) {
-            return "Lost its identity link when " + repair.stripeCustomerId() + " was linked to "
-                    + repair.externalUserId() + " instead.";
+            return canViewSensitiveIdentity
+                    ? "Lost its identity link when " + repair.stripeCustomerId() + " was linked to "
+                            + repair.externalUserId() + " instead."
+                    : "Lost its identity link when another customer was linked to an application user instead.";
         }
-        return ("CREATED".equals(repair.actionType()) ? "Manually linked to " : "Manually corrected to link to ")
-                + repair.externalUserId() + ".";
+        String action = "CREATED".equals(repair.actionType())
+                ? "Manually linked to "
+                : "Manually corrected to link to ";
+        return action + (canViewSensitiveIdentity ? repair.externalUserId() : "an application user") + ".";
     }
 
     private AcquisitionSummary acquisitionSummary(
@@ -360,8 +379,7 @@ public class CustomerTimelineService {
         return sb.toString();
     }
 
-    private RepairCapability repairCapability(UUID workspaceId) {
-        boolean canManage = workspaceContext.canManage(workspaceId);
+    private static RepairCapability repairCapability(boolean canManage) {
         return canManage
                 ? new RepairCapability(true, null)
                 : new RepairCapability(false, "WORKSPACE_ROLE_INSUFFICIENT");
@@ -411,7 +429,7 @@ public class CustomerTimelineService {
                         FROM customer_mrr_snapshots
                         WHERE workspace_id = :w AND stripe_customer_id = :c AND calculation_version = :cv
                           AND supported = TRUE
-                        ORDER BY currency, effective_at DESC
+                        ORDER BY currency, effective_at DESC, id DESC
                         """)
                 .param("w", workspaceId)
                 .param("c", stripeCustomerId)
@@ -428,7 +446,7 @@ public class CustomerTimelineService {
                           cancel_at_period_end, cancel_at, canceled_at, trial_start, trial_end
                         FROM billing_subscriptions
                         WHERE workspace_id = :w AND stripe_customer_id = :c
-                        ORDER BY created_at
+                        ORDER BY created_at, id
                         """)
                 .param("w", workspaceId)
                 .param("c", stripeCustomerId)
@@ -455,7 +473,7 @@ public class CustomerTimelineService {
                         JOIN external_identities i
                           ON i.id = l.external_identity_id AND i.workspace_id = l.workspace_id AND i.project_id = l.project_id
                         WHERE l.workspace_id = :w AND l.project_id = :p AND l.stripe_customer_id = :c
-                        ORDER BY l.created_at
+                        ORDER BY l.created_at, l.id
                         """)
                 .param("w", workspaceId)
                 .param("p", projectId)
@@ -477,7 +495,7 @@ public class CustomerTimelineService {
                         FROM billing_subscription_status_events e
                         JOIN billing_subscriptions s ON s.workspace_id = e.workspace_id AND s.id = e.subscription_id
                         WHERE e.workspace_id = :w AND s.stripe_customer_id = :c
-                        ORDER BY e.created_at
+                        ORDER BY e.created_at, e.id
                         """)
                 .param("w", workspaceId)
                 .param("c", stripeCustomerId)
@@ -586,6 +604,11 @@ public class CustomerTimelineService {
 
     public record TouchSummary(UUID touchpointId, OffsetDateTime occurredAt, String source, String campaign, String landingPage) {}
 
+    /**
+     * Raw application-user and actor subject IDs are available only to workspace managers. The
+     * identity-link existence, evidence source, stable link ID, and timestamp remain visible to
+     * read-only members so attribution evidence stays auditable without exposing those identifiers.
+     */
     public record ActiveLink(
             UUID id, String externalUserId, String evidenceSource, String linkedBySubjectId, OffsetDateTime createdAt) {}
 
