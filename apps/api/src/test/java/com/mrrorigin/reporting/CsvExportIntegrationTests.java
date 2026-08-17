@@ -160,6 +160,7 @@ class CsvExportIntegrationTests {
         // CHURN row but deliberately has no April acquisition cohort to join.
         acquireAndAttribute("cus_churn_only", "USD", 1000, "2026-03-15T00:00:00Z", "google", "old", "/old");
         movement("cus_churn_only", "USD", 700, "2026-04-05T00:00:00Z", "CHURN");
+        attribution.recalculate(workspace, project, "cus_churn_only");
 
         String csv = mockMvc.perform(comparisonExport(OWNER, "SOURCE"))
                 .andExpect(status().isOk())
