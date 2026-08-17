@@ -5,6 +5,7 @@ import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
@@ -69,6 +70,7 @@ public class WeeklySummaryService {
         String timezone = workspaceManagementService.projectTimezone(workspaceId, projectId);
         ZoneId zone = ZoneId.of(timezone);
 
+        ZonedDateTime nowZoned = clock.instant().atZone(zone);
         ZonedDateTime weekStartZoned;
         if (weekStartOverride != null) {
             if (weekStartOverride.getDayOfWeek() != DayOfWeek.MONDAY) {
@@ -79,14 +81,17 @@ public class WeeklySummaryService {
             // The most recently started project-timezone week is never itself complete yet (its end
             // boundary, one week later, cannot have passed if its start is the most recent Monday not
             // after now) -- so "last completed week" is always exactly one week before it.
-            ZonedDateTime nowZoned = OffsetDateTime.now(clock).toInstant().atZone(zone);
             LocalDate mondayThisWeek =
                     nowZoned.toLocalDate().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
             weekStartZoned = mondayThisWeek.atStartOfDay(zone).minusWeeks(1);
         }
-        OffsetDateTime weekStart = weekStartZoned.toOffsetDateTime();
-        OffsetDateTime weekEnd = weekStartZoned.plusWeeks(1).toOffsetDateTime();
-        OffsetDateTime priorWeekStart = weekStartZoned.minusWeeks(1).toOffsetDateTime();
+        ZonedDateTime weekEndZoned = weekStartZoned.plusWeeks(1);
+        if (weekEndZoned.isAfter(nowZoned)) {
+            throw new IllegalArgumentException("weekStart must identify a completed week");
+        }
+        OffsetDateTime weekStart = weekStartZoned.toInstant().atOffset(ZoneOffset.UTC);
+        OffsetDateTime weekEnd = weekEndZoned.toInstant().atOffset(ZoneOffset.UTC);
+        OffsetDateTime priorWeekStart = weekStartZoned.minusWeeks(1).toInstant().atOffset(ZoneOffset.UTC);
         OffsetDateTime priorWeekEnd = weekStart;
 
         List<Insight> all = new ArrayList<>();
@@ -135,7 +140,7 @@ public class WeeklySummaryService {
 
         return new WeeklySummaryResponse(
                 workspaceId, projectId, timezone, weekStart, weekEnd, priorWeekStart, priorWeekEnd,
-                OffsetDateTime.now(clock), sections);
+                clock.instant().atOffset(ZoneOffset.UTC), sections);
     }
 
     private List<Insight> compareBothPeriods(
