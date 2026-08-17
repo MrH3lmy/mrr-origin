@@ -377,7 +377,9 @@ exists to page a founder about their own summary failing to send). A
 manager can manually replay either kind via the same replay endpoint:
 
 - Replaying a `PERMANENTLY_FAILED` row resets it to `PENDING` with a fresh
-  attempt budget and clears `last_error`/`last_outcome_ambiguous`.
+  attempt budget and clears `last_error`, while preserving
+  `last_outcome_ambiguous` because it is cumulative across the delivery
+  row's full lifetime and replay must not erase earlier ambiguity.
 - Replaying a `BLOCKED_MISSING_EMAIL` row re-checks the member's currently
   stored (verified) email; if one is now present, the row is populated with
   it and moved to `PENDING`; if still absent, the replay is rejected with a
