@@ -350,9 +350,19 @@ Ordered columns:
     blank regardless of role when the customer has no active identity link
 13. `evidence_link` — path to this customer's timeline view
 
-Row order: `currency ASC NULLS LAST`, then `provider_created_at DESC`, then
-`stripe_customer_id DESC` — matches `CustomerDirectoryService`'s own listing
-order.
+**Row order (implementation note, deviates from the original draft above)**:
+`provider_created_at DESC, stripe_customer_id DESC` is the primary order --
+matching `CustomerDirectoryService`'s own cursor order -- with `currency ASC
+NULLS LAST` only as a tiebreak among one customer's own (typically one or
+two) currency rows. This is the one export whose row count isn't bounded by
+a small dimension cardinality, so it's also the one that must stream
+page-by-page from the database rather than materialize a full list first;
+sorting by currency globally would require buffering every customer before
+writing the first row, which directly conflicts with "stream large exports,
+never build an unbounded in-memory CSV." Ordering is still fully
+deterministic, just not currency-primary the way `comparison-v1` and
+`retention-cohorts-v1` are (both genuinely bounded by dimension
+cardinality, so currency-primary ordering there costs nothing).
 
 #### Export audit
 

@@ -144,6 +144,15 @@ public class WorkspaceManagementService {
                 .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Project not found"));
     }
 
+    /**
+     * The project's configured IANA timezone id, for callers outside this package that need it for
+     * presentation/reporting boundaries (#26's weekly summary) without reaching into {@link Project}'s
+     * package-private fields directly.
+     */
+    public String projectTimezone(UUID workspaceId, UUID projectId) {
+        return getProject(workspaceId, projectId).timezone();
+    }
+
     private static String normalizeCurrency(String reportingCurrency) {
         String currency = reportingCurrency == null || reportingCurrency.isBlank()
                 ? "USD"

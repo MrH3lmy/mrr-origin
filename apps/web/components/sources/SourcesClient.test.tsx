@@ -8,7 +8,7 @@ import type {
   SourceComparison,
 } from "@/lib/api/types";
 
-import { SourcesClient } from "./SourcesClient";
+import { resolveSourcesDeepLink, SourcesClient } from "./SourcesClient";
 
 const { getSourceComparison, listMrrMovements, getAttributionCoverage } =
   vi.hoisted(() => ({
@@ -17,11 +17,15 @@ const { getSourceComparison, listMrrMovements, getAttributionCoverage } =
     getAttributionCoverage: vi.fn(),
   }));
 
-vi.mock("@/lib/api/reporting", () => ({
-  getSourceComparison,
-  listMrrMovements,
-  getAttributionCoverage,
-}));
+vi.mock("@/lib/api/reporting", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api/reporting")>();
+  return {
+    ...actual,
+    getSourceComparison,
+    listMrrMovements,
+    getAttributionCoverage,
+  };
+});
 vi.mock("@/lib/api/client", () => ({ createBrowserClient: () => ({}) }));
 
 const fullCoverage: AttributionCoverage = {
@@ -365,5 +369,96 @@ describe("SourcesClient", () => {
         sourceMissing: true,
       }),
     );
+  });
+});
+
+describe("resolveSourcesDeepLink", () => {
+  it("resolves to the root path with no selection when no source is present", () => {
+    expect(resolveSourcesDeepLink({})).toEqual({
+      path: { source: null, campaign: null, campaignMissing: false },
+      selectedMetric: null,
+    });
+  });
+
+  it("resolves a SOURCE-level real value, distinguishing it from sourceMissing/sourceUnattributed", () => {
+    expect(
+      resolveSourcesDeepLink({
+        source: "google",
+        movementType: "NEW",
+        currency: "USD",
+      }),
+    ).toEqual({
+      path: { source: null, campaign: null, campaignMissing: false },
+      selectedMetric: {
+        dimensionValue: "google",
+        attributed: true,
+        movementType: "NEW",
+        currency: "USD",
+      },
+    });
+  });
+
+  it("resolves the SOURCE-level Unattributed bucket via the explicit boolean, not a sentinel value", () => {
+    expect(
+      resolveSourcesDeepLink({
+        sourceUnattributed: true,
+        movementType: "CHURN",
+        currency: "USD",
+      }),
+    ).toEqual({
+      path: { source: null, campaign: null, campaignMissing: false },
+      selectedMetric: {
+        dimensionValue: null,
+        attributed: false,
+        movementType: "CHURN",
+        currency: "USD",
+      },
+    });
+  });
+
+  it("resolves a CAMPAIGN-level deep link, scoping the drill path to the parent source", () => {
+    expect(
+      resolveSourcesDeepLink({
+        source: "google",
+        campaign: "spring_sale",
+        movementType: "NEW",
+        currency: "USD",
+      }),
+    ).toEqual({
+      path: { source: "google", campaign: null, campaignMissing: false },
+      selectedMetric: {
+        dimensionValue: "spring_sale",
+        attributed: true,
+        movementType: "NEW",
+        currency: "USD",
+      },
+    });
+  });
+
+  it("resolves a LANDING_PAGE-level deep link within the no-campaign-captured bucket", () => {
+    expect(
+      resolveSourcesDeepLink({
+        source: "google",
+        campaignMissing: true,
+        landingPage: "/pricing",
+        movementType: "NEW",
+        currency: "EUR",
+      }),
+    ).toEqual({
+      path: { source: "google", campaign: null, campaignMissing: true },
+      selectedMetric: {
+        dimensionValue: "/pricing",
+        attributed: true,
+        movementType: "NEW",
+        currency: "EUR",
+      },
+    });
+  });
+
+  it("resolves a drill path with no metric selection when movementType/currency are absent", () => {
+    expect(resolveSourcesDeepLink({ source: "google" })).toEqual({
+      path: { source: null, campaign: null, campaignMissing: false },
+      selectedMetric: null,
+    });
   });
 });

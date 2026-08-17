@@ -553,3 +553,71 @@ export interface StripeBillingHealthReport {
   reconciliationMismatches: ReconciliationMismatch[];
   computedAt: string;
 }
+
+// -- Weekly action summary (#26) --
+
+export interface WeeklySummaryEvidenceFilters {
+  from: string;
+  to: string;
+  movementType: MrrMovementType | null;
+  currency: string | null;
+  source: string | null;
+  sourceUnattributed: boolean;
+  sourceMissing: boolean;
+  campaign: string | null;
+  campaignMissing: boolean;
+  landingPage: string | null;
+  landingPageMissing: boolean;
+}
+
+export type WeeklySummaryInsightStatus =
+  | "MATERIAL_CHANGE"
+  | "NEWLY_APPEARED"
+  | "DISAPPEARED"
+  | "INSUFFICIENT_SAMPLE"
+  | "STABLE";
+
+/**
+ * One New/Churned MRR week-over-week comparison for a `(dimension, bucket, currency)`. `dimensionBucket`
+ * follows the same three-state contract as `ComparisonRow`: `null` with a real `dimensionValue`,
+ * `"NONE"` (evidence exists, this field wasn't captured), or `"UNATTRIBUTED"` (SOURCE only, no
+ * evidence at all) -- the two are never coalesced. `percentageChange` is null exactly when
+ * `priorAmountMinor` is 0 (undefined ratio, `status: "NEWLY_APPEARED"`); a zero *current* amount
+ * against a nonzero prior is `-1.0`, not null (`status: "DISAPPEARED"`). `applicableCustomerCount` is
+ * the exact count #26's low-volume/material-change gate used, so a client never has to re-derive it.
+ */
+export interface WeeklySummaryInsight {
+  dimension: ComparisonDimension;
+  dimensionValue: string | null;
+  dimensionBucket: "NONE" | "UNATTRIBUTED" | null;
+  movementType: "NEW" | "CHURN";
+  currentAmountMinor: number;
+  currentCustomerCount: number;
+  priorAmountMinor: number;
+  priorCustomerCount: number;
+  percentageChange: number | null;
+  applicableCustomerCount: number;
+  status: WeeklySummaryInsightStatus;
+  currentEvidenceFilters: WeeklySummaryEvidenceFilters;
+  priorEvidenceFilters: WeeklySummaryEvidenceFilters;
+  currentEvidenceLink: string;
+  priorEvidenceLink: string;
+}
+
+export interface WeeklySummaryCurrencySection {
+  currency: string;
+  insights: WeeklySummaryInsight[];
+}
+
+export interface WeeklySummary {
+  workspaceId: string;
+  projectId: string;
+  /** IANA zone id (`Project.timezone`) the week boundaries below are computed in. */
+  timezone: string;
+  weekStart: string;
+  weekEnd: string;
+  priorWeekStart: string;
+  priorWeekEnd: string;
+  generatedAt: string;
+  currencySections: WeeklySummaryCurrencySection[];
+}
