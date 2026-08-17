@@ -1,10 +1,12 @@
 package com.mrrorigin.notification;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 
 import com.mrrorigin.notification.WeeklySummaryService.CurrencySection;
 import com.mrrorigin.notification.WeeklySummaryService.Insight;
 import com.mrrorigin.notification.WeeklySummaryService.WeeklySummaryResponse;
+import com.mrrorigin.reporting.EvidenceLink;
 
 /**
  * Pure text/HTML rendering of {@link WeeklySummaryResponse}, per #26's contract: one section per
@@ -29,11 +31,22 @@ final class WeeklySummaryRenderer {
             text.append("\n").append(section.currency()).append(":\n");
             List<Insight> actionable = actionable(section);
             for (Insight insight : actionable) {
-                text.append("  - ").append(line(insight)).append("\n");
+                text.append("  - ")
+                        .append(line(insight))
+                        .append(" [this week: ").append(insight.currentEvidenceLink()).append("]")
+                        .append(" [prior week: ").append(insight.priorEvidenceLink()).append("]\n");
             }
             long stableCount = section.insights().size() - actionable.size();
             if (stableCount > 0) {
-                text.append("  ").append(stableCount).append(" other comparison signals were stable this week.\n");
+                text.append("  ")
+                        .append(stableCount)
+                        .append(" other comparison signals were stable this week.")
+                        .append(" [this week: ")
+                        .append(fullEvidenceLink(summary, section.currency(), summary.weekStart(), summary.weekEnd()))
+                        .append("] [prior week: ")
+                        .append(fullEvidenceLink(
+                                summary, section.currency(), summary.priorWeekStart(), summary.priorWeekEnd()))
+                        .append("]\n");
             }
         }
         return text.toString();
@@ -61,12 +74,28 @@ final class WeeklySummaryRenderer {
             html.append("</ul>");
             long stableCount = section.insights().size() - actionable.size();
             if (stableCount > 0) {
-                html.append("<p>").append(stableCount).append(" other comparison signals were stable this week.</p>");
+                html.append("<p>")
+                        .append(stableCount)
+                        .append(" other comparison signals were stable this week. ")
+                        .append("<a href=\"")
+                        .append(esc(fullEvidenceLink(
+                                summary, section.currency(), summary.weekStart(), summary.weekEnd())))
+                        .append("\">this week</a> / <a href=\"")
+                        .append(esc(fullEvidenceLink(
+                                summary, section.currency(), summary.priorWeekStart(), summary.priorWeekEnd())))
+                        .append("\">prior week</a></p>");
             }
             html.append("</section>");
         }
         html.append("</div>");
         return html.toString();
+    }
+
+    private static String fullEvidenceLink(
+            WeeklySummaryResponse summary, String currency, OffsetDateTime from, OffsetDateTime to) {
+        return EvidenceLink.path(
+                summary.workspaceId(), summary.projectId(), from, to, null, currency,
+                null, false, false, null, false, null, false);
     }
 
     private static List<Insight> actionable(CurrencySection section) {
