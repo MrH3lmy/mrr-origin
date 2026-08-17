@@ -142,6 +142,26 @@ class PostmarkEmailSenderTests {
     }
 
     @Test
+    void classifiesRedirectAsPermanent() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        RestClient restClient = builder.build();
+        server.expect(requestTo("https://api.postmarkapp.com/email"))
+                .andRespond(withStatus(HttpStatus.FOUND)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"ErrorCode\":0,\"Message\":\"Unexpected redirect\"}"));
+
+        PostmarkEmailSender sender = new PostmarkEmailSender(restClient, properties, objectMapper);
+
+        assertThatThrownBy(() -> sender.send(message))
+                .isInstanceOf(EmailSendException.class)
+                .satisfies(exception -> {
+                    assertThat(((EmailSendException) exception).permanent()).isTrue();
+                    assertThat(((EmailSendException) exception).ambiguous()).isFalse();
+                });
+    }
+
+    @Test
     void classifiesNetworkFailureAsTransientAndAmbiguous() {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
