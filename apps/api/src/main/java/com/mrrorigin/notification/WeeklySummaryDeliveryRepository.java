@@ -242,10 +242,18 @@ class WeeklySummaryDeliveryRepository {
      * check returns), so the delivery guarantee explicitly admits the residual possibility rather than
      * claiming two internal claim attempts can never both send.
      */
-    boolean isLeaseCurrent(UUID id, UUID leaseToken) {
-        return jdbc.sql("SELECT 1 FROM weekly_summary_deliveries WHERE id = :id AND status = 'SENDING' AND lease_token = :leaseToken")
+    boolean isLeaseCurrent(UUID id, UUID leaseToken, OffsetDateTime now) {
+        return jdbc.sql(
+                        """
+                        SELECT 1 FROM weekly_summary_deliveries
+                        WHERE id = :id
+                          AND status = 'SENDING'
+                          AND lease_token = :leaseToken
+                          AND lease_until > :now
+                        """)
                 .param("id", id)
                 .param("leaseToken", leaseToken)
+                .param("now", now)
                 .query(Integer.class)
                 .optional()
                 .isPresent();
@@ -281,14 +289,17 @@ class WeeklySummaryDeliveryRepository {
                 .findFirst();
     }
 
-    /** Replays a terminal {@code PERMANENTLY_FAILED} row: fresh attempt budget, cleared error/lease. */
+    /**
+     * Replays a terminal {@code PERMANENTLY_FAILED} row with a fresh attempt budget and cleared
+     * error/lease. The cumulative ambiguity bit is deliberately preserved: replaying the same audit
+     * row must not erase evidence that an earlier provider outcome may have been ambiguous.
+     */
     boolean resetPermanentlyFailedForReplay(UUID id, OffsetDateTime now) {
         return jdbc.sql(
                         """
                         UPDATE weekly_summary_deliveries
                         SET status = 'PENDING', attempt_count = 0, next_attempt_at = :now,
-                            last_error = NULL, last_outcome_ambiguous = FALSE,
-                            lease_token = NULL, lease_until = NULL, updated_at = :now
+                            last_error = NULL, lease_token = NULL, lease_until = NULL, updated_at = :now
                         WHERE id = :id AND status = 'PERMANENTLY_FAILED'
                         """)
                 .param("id", id)
