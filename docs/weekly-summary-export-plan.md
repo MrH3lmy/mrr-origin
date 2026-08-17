@@ -35,7 +35,7 @@ contract review before implementation code begins.
 - Fixed threshold: **5 customers** per dimension bucket and currency.
 - Exports and drill-downs always show exact totals — the threshold never
   removes or merges a bucket, and never affects CSV row content.
-- Only the weekly-summary *insight text* is affected: below threshold, the
+- Only the weekly-summary _insight text_ is affected: below threshold, the
   insight's `status` is `INSUFFICIENT_SAMPLE` and comparative/ranking
   language ("up 32%", "your best source") is suppressed in favor of a plain
   factual statement ("New MRR from X: $Y, 3 customers — too few to compare
@@ -48,7 +48,7 @@ contract review before implementation code begins.
   (project-timezone Monday 00:00, see Weekly boundary below) has passed at
   generation time.
 - Applies only to **New MRR** and **Churned MRR** per `(dimension, bucket,
-  currency)` — the two movement-based metrics that don't require cohort
+currency)` — the two movement-based metrics that don't require cohort
   maturity. Retained MRR / NRR are exposed in the retention-cohorts export
   but are not part of week-over-week delta language, since a one-week-old
   cohort cannot be 30 days mature.
@@ -84,6 +84,81 @@ contract review before implementation code begins.
   either amend #26's acceptance criteria to descope delivery/opt-out to #59,
   or keep #26 open until both PRs land; this doc doesn't decide that call.
 
+#### 3a. `WeeklySummary` DTO and endpoint contract
+
+`GET /api/workspaces/{workspaceId}/projects/{projectId}/reporting/weekly-summary`
+(optional `weekStart` query param, an ISO date in the project's timezone,
+defaulting to the last completed week per the Weekly boundary section below).
+Requires `WorkspaceContext#requireMembership`, same as every other reporting
+endpoint. Response:
+
+```
+WeeklySummaryResponse {
+  workspaceId, projectId
+  timezone                 // Project.timezone, IANA zone id, echoed verbatim
+  weekStart, weekEnd        // UTC instants for the completed week, [weekStart, weekEnd)
+  priorWeekStart, priorWeekEnd
+  generatedAt               // server clock, injected Clock (RetentionCohortService's pattern)
+  currencySections: [ CurrencySection ]   // one per currency with any NEW/CHURN
+                                            // movement in either week; ordered currency ASC
+}
+
+CurrencySection {
+  currency
+  insights: [ Insight ]     // ordered dimension ASC, dimension_value ASC (real
+                             // values before NONE before UNATTRIBUTED), movementType
+                             // (NEW before CHURN) -- deterministic, matches CSV row order
+}
+
+Insight {
+  dimension                 // SOURCE | CAMPAIGN | LANDING_PAGE
+  dimensionValue            // null when bucketed
+  dimensionBucket           // NONE | UNATTRIBUTED | null (same three-state contract as the CSV)
+  movementType               // NEW | CHURN
+  currentAmountMinor, currentCustomerCount
+  priorAmountMinor, priorCustomerCount
+  percentageChange           // nullable Double (ratio, e.g. 0.30); null exactly when priorAmountMinor
+                              // = 0 (mathematically undefined) -- both NEWLY_APPEARED and DISAPPEARED
+                              // always carry percentageChange = null
+  applicableCustomerCount    // the count actually used for the §2 threshold gate --
+                              // min(currentCustomerCount, priorCustomerCount) except
+                              // NEWLY_APPEARED (= currentCustomerCount) and
+                              // DISAPPEARED (= priorCustomerCount) -- exposed so tests
+                              // and clients don't have to re-derive the gating rule
+  status                     // MATERIAL_CHANGE | NEWLY_APPEARED | DISAPPEARED |
+                              // INSUFFICIENT_SAMPLE | STABLE
+  evidenceLink                // dashboard path, see below
+}
+```
+
+One `Insight` per `(dimension, dimensionValue-or-bucket, movementType)` that
+has a nonzero amount in the current week, the prior week, or both -- the same
+population `comparison-v1`'s pivoted rows would cover for New/Churned MRR, so
+the DTO and the CSV export reconcile against the same underlying query. No
+insight is dropped for being `STABLE` or `INSUFFICIENT_SAMPLE`: every
+qualifying bucket gets a statement, per the issue's "every summary statement
+links to a dashboard view" requirement -- suppression per §1 changes an
+insight's _language_, never its presence.
+
+`evidenceLink` is a relative path into the existing Sources screen (#23),
+carrying the exact filters that reconcile to the insight:
+`/app/{workspaceId}/projects/{projectId}/sources?dimension={dimension}&value={dimensionValue|bucket}&from={weekStart}&to={weekEnd}&currency={currency}`.
+Exact query parameter names are finalized against `SourcesClient.tsx`'s
+current `searchParams` contract during implementation, not invented here;
+the path target and filter set are what's fixed by this contract.
+
+**Text/HTML rendering contract**: both are pure functions over
+`WeeklySummaryResponse`, one section per currency, one line per insight
+_except_ `STABLE` insights, which are omitted from the rendered narrative
+(they remain in the DTO/JSON for reconciliation) and rolled up into a single
+trailing line per currency section ("N other sources were stable this week")
+linking to the full `comparison-v1`/Sources view for that period and
+currency. Line copy follows §1/§2's wording rules verbatim (no "anomaly"
+language, `INSUFFICIENT_SAMPLE` insights use the flat factual phrasing from
+§1, never comparative language). HTML output is the same line structure
+wrapped in the existing `apps/web` component styling conventions, not a
+separate copy deck.
+
 ### 4. Opt-out
 
 - No opt-out/unsubscribe persistence, UI, or API is added in this PR — there
@@ -114,7 +189,14 @@ Shared conventions across all three:
     plain blank cell.
 - Unavailable retained MRR / retention % / NRR: an `..._available` boolean
   column plus the value column left **blank** (never `0`), plus
-  `unavailable_reason` (currently only `MATURITY_PENDING`).
+  `unavailable_reason` naming which of the two stable reasons applies --
+  `MATURITY_PENDING` (a cohort exists but hasn't reached the requested age,
+  per `RetentionCohortService.REASON_MATURITY_PENDING`) or
+  `NO_ACQUISITION_COHORT` (no retention row exists for this key at all, per
+  `RevenueOverviewController#unavailableMetrics`'s identical reason code).
+  Both leave every numeric field of the row's retained-MRR/retention-
+  percentage/NRR blank with `..._available = false` -- the two reasons only
+  differ in _why_, never in the shape of the unavailable value.
 - Every row carries an `evidence_link`: a relative dashboard path (workspace/
   project/period/dimension/currency filter) that reconciles to that exact
   row, reusing the same filter parameters the row was queried with.
@@ -150,7 +232,8 @@ Ordered columns:
 14. `retention_percentage` — ratio (e.g. `0.85`), blank when unavailable
 15. `nrr_available`
 16. `nrr` — ratio, blank when unavailable
-17. `unavailable_reason` — `MATURITY_PENDING` \| blank
+17. `unavailable_reason` — `MATURITY_PENDING` \| `NO_ACQUISITION_COHORT` \|
+    blank
 18. `evidence_link`
 
 Row order: `currency ASC`, then `dimension_value ASC` (real values before
@@ -215,11 +298,14 @@ Ordered columns:
 2. `deleted`
 3. `provider_created_at`
 4. `acquisition_effective_at` — blank if no `NEW` movement yet
-5. `acquisition_confidence` — `VERIFIED` \| `STRONG` \| `MODERATE` \|
-   `UNATTRIBUTED` \| blank (blank only when there is no acquisition movement
-   yet, or attribution hasn't been (re)calculated under the current model
-   version — an operational gap per `CustomerDirectoryService.Entry`'s own
-   doc comment, never a fabricated result)
+5. `acquisition_confidence` — `STRONG` \| `UNATTRIBUTED` \| blank. These are
+   the only two values `AttributionApplicationService` (the authoritative
+   attribution model) actually emits today; `VERIFIED`/`MODERATE` are not
+   produced and are not promised by this v1 schema. Blank means there is no
+   acquisition movement yet, or attribution hasn't been (re)calculated under
+   the current model version — an operational gap per
+   `CustomerDirectoryService.Entry`'s own doc comment, never a fabricated
+   result.
 6. `unattributed_reason` — blank when not applicable
 7. `first_source`
 8. `first_source_bucket` — `NONE` \| `UNATTRIBUTED` \| blank (blank exactly
@@ -261,7 +347,7 @@ without a separate cleanup job.
 
 - "Week" = Monday 00:00 (project timezone, `Project.timezone`, IANA zone id)
   through the following Monday 00:00, exclusive — i.e. `[weekStart,
-  weekStart + 7 days)` in the project's zone, converted to UTC instants for
+weekStart + 7 days)` in the project's zone, converted to UTC instants for
   querying `effective_at` exactly like every existing reporting service's
   `[from, to)` convention.
 - "Last completed week" is the most recent such window whose end boundary is
@@ -271,7 +357,7 @@ without a separate cleanup job.
 ## Authorization
 
 - Export endpoints require workspace membership (`WorkspaceContext
-  #requireMembership`), matching every other reporting read endpoint —
+#requireMembership`), matching every other reporting read endpoint —
   tenant/project-scoped like the rest of `reporting`.
 - `external_user_id` in the customers export additionally requires
   `#canManage` (OWNER/ADMIN), per PR #57's redaction rule; VIEWER/MEMBER
