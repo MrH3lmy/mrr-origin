@@ -2,6 +2,7 @@ package com.mrrorigin.notification;
 
 import static org.springframework.http.HttpStatus.CONFLICT;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
+import static org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE;
 
 import java.time.Clock;
 import java.time.DayOfWeek;
@@ -51,7 +52,7 @@ import com.mrrorigin.workspace.WorkspaceManagementService.WeeklySummaryRecipient
 class WeeklySummaryDispatchService {
 
     private static final Logger log = LoggerFactory.getLogger(WeeklySummaryDispatchService.class);
-    private static final int MAX_PROJECTS_PER_TICK = 500;
+    private static final int PROJECT_PAGE_SIZE = 500;
     private static final int MAX_SEND_BATCH_SIZE = 50;
 
     /** Accepted B7 correction: terminal delivery rows are retained 400 days, not for workspace lifetime. */
@@ -119,16 +120,21 @@ class WeeklySummaryDispatchService {
         sendBatch(now);
     }
 
+    /**
+     * Walks every project via real keyset pagination (#59, review fix) -- unlike a fixed-count cap
+     * over an always-unpaged {@code findAll()}, this reaches every project within the tick regardless
+     * of how many exist, so nothing beyond an arbitrary count is ever permanently starved.
+     */
     private void createDueDeliveries(OffsetDateTime now) {
-        List<SchedulableProject> projects = workspaceManagementService.listAllProjectsForScheduling();
-        int count = 0;
-        for (SchedulableProject project : projects) {
-            if (++count > MAX_PROJECTS_PER_TICK) {
-                log.warn("More than {} projects; remaining projects will be picked up on the next tick.", MAX_PROJECTS_PER_TICK);
-                break;
+        UUID afterProjectId = null;
+        List<SchedulableProject> page;
+        do {
+            page = workspaceManagementService.listProjectsForSchedulingPage(afterProjectId, PROJECT_PAGE_SIZE);
+            for (SchedulableProject project : page) {
+                createDueDeliveriesForProject(project, now);
+                afterProjectId = project.projectId();
             }
-            createDueDeliveriesForProject(project, now);
-        }
+        } while (page.size() == PROJECT_PAGE_SIZE);
     }
 
     private void createDueDeliveriesForProject(SchedulableProject project, OffsetDateTime now) {
@@ -179,6 +185,12 @@ class WeeklySummaryDispatchService {
      * week). Only sends this project's own deliveries, never touching other projects' due batch.
      */
     void dispatchProjectNow(UUID workspaceId, UUID projectId, String timezone) {
+        if (!emailProperties.isConfigured()) {
+            // Review fix: this path used to bypass tick()'s isConfigured() guard entirely, so a blank
+            // token/sender/base-URL deployment could still create and claim rows (and record
+            // failures) while returning HTTP 200. Reject before any work is created/claimed.
+            throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Weekly summary email is not configured");
+        }
         OffsetDateTime now = OffsetDateTime.now(clock);
         ZoneId zone = ZoneId.of(timezone);
         ZonedDateTime nowZoned = now.atZoneSameInstant(zone);
@@ -224,6 +236,22 @@ class WeeklySummaryDispatchService {
     }
 
     private void sendOne(ClaimedDelivery delivery, OffsetDateTime now) {
+        // Review fix: eligibility (opt-out, manager role) was previously only checked at row-creation
+        // time -- a member who opts out, or is demoted/removed, while a row sits FAILED in backoff
+        // would still receive later retries. Revalidate immediately before sending and cancel instead.
+        if (!stillEligible(delivery)) {
+            deliveryRepository.markCancelled(
+                    delivery.id(), delivery.leaseToken(), "Recipient opted out or is no longer an eligible manager", now);
+            return;
+        }
+        // Review fix: narrows (but, for a worker merely paused rather than dead, cannot fully close)
+        // the window where an expired-lease reclaim races a still-running send from the original
+        // worker -- see the delivery plan's "Delivery guarantee" for the corrected, honest scope of
+        // this mitigation. Never claims two internal claim attempts can never both send.
+        if (!deliveryRepository.isLeaseCurrent(delivery.id(), delivery.leaseToken())) {
+            log.warn("Weekly summary delivery {} lease was already reclaimed; not sending from this worker.", delivery.id());
+            return;
+        }
         try {
             EmailMessage message = renderMessage(delivery);
             EmailSendResult result = emailSender.send(message);
@@ -243,6 +271,14 @@ class WeeklySummaryDispatchService {
                     delivery.id(), delivery.leaseToken(), unexpected.getMessage(), false, false, delivery.attemptCount(),
                     completedAt);
         }
+    }
+
+    /** Re-checks opt-out and manager role right now, not at whatever earlier time this row was created (#59, review fix). */
+    private boolean stillEligible(ClaimedDelivery delivery) {
+        if (optOutService.isOptedOut(delivery.workspaceId(), delivery.projectId(), delivery.recipientSubjectId())) {
+            return false;
+        }
+        return workspaceManagementService.isCurrentWeeklySummaryRecipient(delivery.workspaceId(), delivery.recipientSubjectId());
     }
 
     private EmailMessage renderMessage(ClaimedDelivery delivery) {

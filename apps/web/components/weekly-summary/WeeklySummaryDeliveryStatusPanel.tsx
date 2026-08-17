@@ -21,11 +21,17 @@ import type {
 
 import styles from "./WeeklySummary.module.css";
 
-/** `weekStart` is a plain date (no time component) -- dateStyle only, unlike the shared formatDateTime. */
+/**
+ * `weekStart` is a plain date (no time component, e.g. "2026-03-02") -- `new Date(iso)` parses that as
+ * UTC midnight, and formatting it in the viewer's local zone can shift the displayed day backward for
+ * anyone west of UTC. Force `timeZone: "UTC"` so the calendar date rendered always matches the date
+ * string received, regardless of the viewer's own timezone.
+ */
 function formatWeekStart(iso: string): string {
-  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
-    new Date(iso),
-  );
+  return new Intl.DateTimeFormat("en-US", {
+    dateStyle: "medium",
+    timeZone: "UTC",
+  }).format(new Date(iso));
 }
 
 interface WeeklySummaryDeliveryStatusPanelProps {

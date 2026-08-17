@@ -2,7 +2,6 @@ package com.mrrorigin.notification;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.Set;
 
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatusCode;
@@ -23,18 +22,18 @@ import com.mrrorigin.notification.EmailSender.EmailSendResult;
 /**
  * Postmark {@code POST /email} adapter (#59, ADR-0007). Plain {@link RestClient} call, the same
  * pattern {@code StripeBackfillClient} already establishes for external provider integration in this
- * codebase -- no vendor SDK dependency. {@code PostmarkErrorCode}s that mean the address itself is
- * permanently invalid/inactive short-circuit to {@link EmailSendException#permanent()}; every other
- * failure (network error, timeout, 5xx, rate limit) is transient, per ADR-0007's "Timeout and error
- * behavior" section.
+ * codebase -- no vendor SDK dependency. Permanent-vs-transient classification is primarily by HTTP
+ * status (review fix, correcting an earlier version that trusted a small, incomplete allowlist of
+ * Postmark {@code ErrorCode}s and left every other non-2xx status -- including ordinary permanent
+ * request/configuration errors like 400/402/403/409 -- classified transient, wasting the full retry
+ * budget on something that could never succeed): {@code 429} and {@code 5xx} are transient (rate
+ * limit, provider-side trouble); every other non-2xx status is permanent (bad request, auth,
+ * configuration, or an address Postmark has rejected) -- see ADR-0007's "Timeout and error behavior".
  */
 @Component
 class PostmarkEmailSender implements EmailSender {
 
     private static final String API_URL = "https://api.postmarkapp.com/email";
-
-    /** Postmark ErrorCodes meaning the recipient address itself will never accept mail; see ADR-0007. */
-    private static final Set<Integer> PERMANENT_ERROR_CODES = Set.of(300, 406, 401);
 
     private final RestClient restClient;
     private final EmailProperties properties;
@@ -96,7 +95,7 @@ class PostmarkEmailSender implements EmailSender {
                         throw new EmailSendException(
                                 "Postmark rejected the send (status=" + status.value() + ", errorCode=" + errorCode + "): "
                                         + errorMessage,
-                                PERMANENT_ERROR_CODES.contains(errorCode));
+                                isPermanent(status));
                     });
         } catch (ResourceAccessException networkFailure) {
             throw new EmailSendException("Postmark could not be reached: " + networkFailure.getMessage(), false, networkFailure);
@@ -123,6 +122,19 @@ class PostmarkEmailSender implements EmailSender {
         } catch (RuntimeException malformed) {
             throw new EmailSendException("Postmark response could not be parsed", false, malformed);
         }
+    }
+
+    /**
+     * {@code 429} (rate limit) and {@code 5xx} (provider-side trouble) are transient -- everything
+     * else non-2xx is treated as permanent, since it means the request itself, our configuration, or
+     * the recipient address was rejected in a way a bare retry cannot fix (review fix -- see class doc).
+     */
+    private static boolean isPermanent(HttpStatusCode status) {
+        int code = status.value();
+        if (code == 429 || code >= 500) {
+            return false;
+        }
+        return code >= 400;
     }
 
     private static String textField(JsonNode node, String field) {

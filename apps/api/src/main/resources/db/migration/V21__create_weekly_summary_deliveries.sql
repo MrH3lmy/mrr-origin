@@ -9,13 +9,23 @@
 -- Claiming is fenced by an explicit random lease_token + lease_until, not a timestamp: claim sets
 -- status='SENDING', a fresh lease_token, and lease_until in the same statement; apply/fail are
 -- fenced by that exact claimed token so a stale worker whose lease already expired can never
--- overwrite a newer outcome, and an expired SENDING row (worker died/restarted mid-attempt) is
--- unambiguously reclaimable by lease_until <= now. last_attempted_at remains informational only.
--- next_attempt_at drives the backoff schedule (§4c) independently of the lease itself.
+-- overwrite a newer outcome in the database, and an expired SENDING row (worker died/restarted
+-- mid-attempt) is reclaimable by lease_until <= now. This fences the database apply, not the
+-- outbound provider call itself: a merely-paused (not dead) worker can still resume and send after
+-- its lease was reclaimed -- an additional, rare at-least-once duplicate source alongside ambiguous
+-- network outcomes (see docs/weekly-summary-delivery-plan.md "Delivery guarantee"). last_attempted_at
+-- remains informational only. next_attempt_at drives the backoff schedule (§4c) independently of the
+-- lease itself. last_outcome_ambiguous accumulates (OR) across attempts rather than reflecting only
+-- the most recent one, so an earlier ambiguous attempt is never erased by a later definite outcome.
 --
 -- recipient_email is nullable: a BLOCKED_MISSING_EMAIL row records an eligible recipient who has no
 -- verified email yet (accepted B3 correction) -- an auditable, manager-visible, replayable gap,
 -- never a silently-skipped recipient and never a row with no email under any other status.
+--
+-- CANCELLED (review fix): a claimed row whose recipient turned out, revalidated immediately before
+-- send, to no longer be eligible (opted out, or lost/removed manager role) during backoff -- the
+-- provider is never called for it. Terminal, not replayable (the recipient's current state is by
+-- definition not eligible when this status is set); a future week creates its own fresh row as usual.
 CREATE TABLE weekly_summary_deliveries (
     id UUID PRIMARY KEY,
     workspace_id UUID NOT NULL,
@@ -40,7 +50,7 @@ CREATE TABLE weekly_summary_deliveries (
         REFERENCES projects (id, workspace_id) ON DELETE CASCADE,
     CONSTRAINT uq_weekly_summary_delivery UNIQUE (project_id, recipient_subject_id, week_start),
     CONSTRAINT chk_weekly_summary_delivery_status
-        CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED', 'PERMANENTLY_FAILED', 'BLOCKED_MISSING_EMAIL')),
+        CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED', 'PERMANENTLY_FAILED', 'BLOCKED_MISSING_EMAIL', 'CANCELLED')),
     CONSTRAINT chk_weekly_summary_delivery_attempt_count CHECK (attempt_count >= 0),
     CONSTRAINT chk_weekly_summary_delivery_email_presence
         CHECK ((status = 'BLOCKED_MISSING_EMAIL') = (recipient_email IS NULL))

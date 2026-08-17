@@ -19,8 +19,18 @@ import org.springframework.transaction.support.TransactionTemplate;
  * single {@code SELECT ... FOR UPDATE SKIP LOCKED} + {@code UPDATE} transaction that stamps a fresh
  * lease ({@code lease_token}/{@code lease_until}), and {@link #markSent}/{@link #markFailed} are each
  * fenced by that exact claimed token so a worker whose lease has since been reclaimed can never
- * overwrite a newer outcome. An expired {@code SENDING} lease (worker died/restarted mid-attempt) is
- * itself reclaimable by {@link #claimBatch} once {@code lease_until} has passed.
+ * overwrite a newer outcome <em>in the database</em>. An expired {@code SENDING} lease (worker
+ * died/restarted mid-attempt) is itself reclaimable by {@link #claimBatch} once {@code lease_until}
+ * has passed.
+ *
+ * <p><strong>What this fencing does not guarantee</strong> (review-corrected, honest scope): if the
+ * original worker was merely paused rather than dead, it can resume and call the email provider after
+ * its lease was already reclaimed and resent by a second worker -- the token only fences the database
+ * apply, not the outbound network call, which cannot be preempted from here. {@link #isLeaseCurrent}
+ * narrows this window with a pre-send freshness check but cannot fully close it. This is an additional
+ * (rare) source of at-least-once duplicates, alongside ambiguous network outcomes -- see the delivery
+ * plan's "Delivery guarantee". Two *database* claims can never both apply an outcome; two *sends* can,
+ * in this specific paused-worker scenario.
  */
 @Repository
 class WeeklySummaryDeliveryRepository {
@@ -146,12 +156,19 @@ class WeeklySummaryDeliveryRepository {
         return claimed == null ? List.of() : claimed;
     }
 
+    /**
+     * {@code last_outcome_ambiguous} is deliberately not cleared here (review fix): it means "at least
+     * one attempt across this delivery's lifetime had an ambiguous, network-level outcome," not "the
+     * most recent attempt was ambiguous." An earlier ambiguous attempt followed by a later definite
+     * success must still show in the audit trail that a provider-side duplicate is possible -- clearing
+     * it on success would silently erase that history. See the delivery plan's "Delivery guarantee".
+     */
     boolean markSent(UUID id, UUID leaseToken, String providerMessageId, OffsetDateTime now) {
         return jdbc.sql(
                         """
                         UPDATE weekly_summary_deliveries
                         SET status = 'SENT', provider_message_id = :providerMessageId, last_error = NULL,
-                            last_outcome_ambiguous = FALSE, lease_token = NULL, lease_until = NULL, updated_at = :now
+                            lease_token = NULL, lease_until = NULL, updated_at = :now
                         WHERE id = :id AND status = 'SENDING' AND lease_token = :leaseToken
                         """)
                 .param("id", id)
@@ -162,7 +179,11 @@ class WeeklySummaryDeliveryRepository {
                 == 1;
     }
 
-    /** {@code attemptCount} is the post-claim count (already incremented by {@link #claimBatch}). */
+    /**
+     * {@code attemptCount} is the post-claim count (already incremented by {@link #claimBatch}).
+     * {@code ambiguous} is OR'd into the existing {@code last_outcome_ambiguous} value (review fix),
+     * never overwritten -- see {@link #markSent}'s note on why this must accumulate, not reset.
+     */
     boolean markFailed(
             UUID id,
             UUID leaseToken,
@@ -177,7 +198,8 @@ class WeeklySummaryDeliveryRepository {
         return jdbc.sql(
                         """
                         UPDATE weekly_summary_deliveries
-                        SET status = :nextStatus, last_error = :error, last_outcome_ambiguous = :ambiguous,
+                        SET status = :nextStatus, last_error = :error,
+                            last_outcome_ambiguous = (last_outcome_ambiguous OR :ambiguous),
                             next_attempt_at = :nextAttemptAt, lease_token = NULL, lease_until = NULL, updated_at = :now
                         WHERE id = :id AND status = 'SENDING' AND lease_token = :leaseToken
                         """)
@@ -190,6 +212,43 @@ class WeeklySummaryDeliveryRepository {
                 .param("now", now)
                 .update()
                 == 1;
+    }
+
+    /**
+     * Cancels a claimed row whose recipient turned out, right before send, to no longer be eligible
+     * (opted out, or lost/removed manager role) -- the provider is never called for a cancelled row
+     * (#59, review fix: a retry must revalidate eligibility, not just at row-creation time).
+     */
+    boolean markCancelled(UUID id, UUID leaseToken, String reason, OffsetDateTime now) {
+        return jdbc.sql(
+                        """
+                        UPDATE weekly_summary_deliveries
+                        SET status = 'CANCELLED', last_error = :reason, lease_token = NULL, lease_until = NULL, updated_at = :now
+                        WHERE id = :id AND status = 'SENDING' AND lease_token = :leaseToken
+                        """)
+                .param("id", id)
+                .param("leaseToken", leaseToken)
+                .param("reason", sanitize(reason))
+                .param("now", now)
+                .update()
+                == 1;
+    }
+
+    /**
+     * Re-checks, immediately before the outbound provider call, that this worker's lease is still the
+     * current one (#59, review fix). Narrows the window where a claim that was reclaimed after
+     * expiring (worker merely paused, not dead) could otherwise race a still-in-flight send from the
+     * original worker -- it cannot fully close that window (the actual network call happens after this
+     * check returns), so the delivery guarantee explicitly admits the residual possibility rather than
+     * claiming two internal claim attempts can never both send.
+     */
+    boolean isLeaseCurrent(UUID id, UUID leaseToken) {
+        return jdbc.sql("SELECT 1 FROM weekly_summary_deliveries WHERE id = :id AND status = 'SENDING' AND lease_token = :leaseToken")
+                .param("id", id)
+                .param("leaseToken", leaseToken)
+                .query(Integer.class)
+                .optional()
+                .isPresent();
     }
 
     private static String sanitize(String error) {
@@ -255,14 +314,15 @@ class WeeklySummaryDeliveryRepository {
 
     /**
      * 400-day terminal-row retention cleanup (#59, accepted B7 correction, plan §6): deletes {@code
-     * SENT}/{@code PERMANENTLY_FAILED}/{@code BLOCKED_MISSING_EMAIL} rows older than {@code cutoff}.
-     * Never touches {@code PENDING}/{@code SENDING}/retryable {@code FAILED} rows regardless of age.
+     * SENT}/{@code PERMANENTLY_FAILED}/{@code BLOCKED_MISSING_EMAIL}/{@code CANCELLED} rows older than
+     * {@code cutoff}. Never touches {@code PENDING}/{@code SENDING}/retryable {@code FAILED} rows
+     * regardless of age.
      */
     int deleteExpiredTerminal(OffsetDateTime cutoff) {
         return jdbc.sql(
                         """
                         DELETE FROM weekly_summary_deliveries
-                        WHERE status IN ('SENT', 'PERMANENTLY_FAILED', 'BLOCKED_MISSING_EMAIL')
+                        WHERE status IN ('SENT', 'PERMANENTLY_FAILED', 'BLOCKED_MISSING_EMAIL', 'CANCELLED')
                           AND created_at < :cutoff
                         """)
                 .param("cutoff", cutoff)

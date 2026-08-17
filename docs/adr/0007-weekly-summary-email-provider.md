@@ -210,18 +210,22 @@ which Postmark does not.
   this attempt failed" from "we don't know if this attempt actually sent,"
   which is what makes the resulting at-least-once (not exactly-once)
   guarantee honest rather than silently swept under a generic error.
-- **Permanent vs. transient classification**: Postmark returns a structured
-  `ErrorCode` in its JSON error body. Codes indicating the address itself is
-  invalid or has been marked inactive/bounced by Postmark (e.g. `300`
-  invalid email request, `406` inactive recipient) are classified
-  **permanent** and short-circuit straight to `PERMANENTLY_FAILED` without
-  consuming the remaining retry budget — retrying a hard-invalid address
-  five times over 24h wastes attempts and cannot succeed. Every other
-  failure (5xx, timeout, network error, rate limit `429`) is **transient**
-  and follows the normal backoff schedule. This mirrors
-  `StripeWebhookFailureKind.classify`'s existing transient/permanent split
-  for webhook normalization failures — the same classification shape, a new
-  provider-specific mapping.
+- **Permanent vs. transient classification (review-corrected)**: classified
+  primarily by HTTP status, not Postmark's JSON `ErrorCode` — an earlier
+  version trusted a small allowlist of `ErrorCode`s (`300`, `406`, `401`) as
+  the only permanent cases and treated every other non-2xx status,
+  including ordinary permanent request/configuration errors (`400`, `402`,
+  `403`, `409`, and most other non-`429` `4xx` responses), as transient —
+  silently consuming the entire retry budget on something a retry could
+  never fix. The corrected rule: `429` (rate limit) and `5xx` (provider-side
+  trouble) are **transient** and follow the normal backoff schedule; every
+  other non-2xx status is **permanent** and short-circuits straight to
+  `PERMANENTLY_FAILED` without consuming the remaining retry budget. This
+  mirrors `StripeWebhookFailureKind.classify`'s existing transient/permanent
+  split for webhook normalization failures — the same classification shape,
+  a new provider-specific mapping, now keyed off the status code Postmark
+  actually documents its error taxonomy against rather than an incomplete
+  guess at which `ErrorCode`s exist.
 - Credentials, full request/response bodies, and recipient email addresses
   are never logged; only the delivery id, status, error classification, and
   Postmark's own opaque `ErrorCode` integer are safe to log, matching

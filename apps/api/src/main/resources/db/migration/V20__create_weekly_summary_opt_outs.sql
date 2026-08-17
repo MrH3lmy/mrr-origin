@@ -3,6 +3,11 @@
 -- if otherwise eligible per §2a's role gate). A row here means this member does not want the weekly
 -- summary for this specific project; granularity is per-project, not per-workspace, because delivery
 -- itself is per-project (§1c) and a member on multiple projects may want to silence only one.
+--
+-- Two FKs, both ON DELETE CASCADE, per the accepted contract ("opt-out rows retained until the
+-- membership/project is removed"): project removal cascades (fk_weekly_summary_opt_out_project), and
+-- so does membership removal (fk_weekly_summary_opt_out_member) -- without the latter, a removed and
+-- later re-added subject would silently inherit a stale opt-out from their prior membership.
 CREATE TABLE weekly_summary_opt_outs (
     workspace_id UUID NOT NULL,
     project_id UUID NOT NULL,
@@ -11,7 +16,10 @@ CREATE TABLE weekly_summary_opt_outs (
     PRIMARY KEY (project_id, subject_id),
     CONSTRAINT fk_weekly_summary_opt_out_project
         FOREIGN KEY (project_id, workspace_id)
-        REFERENCES projects (id, workspace_id) ON DELETE CASCADE
+        REFERENCES projects (id, workspace_id) ON DELETE CASCADE,
+    CONSTRAINT fk_weekly_summary_opt_out_member
+        FOREIGN KEY (workspace_id, subject_id)
+        REFERENCES workspace_members (workspace_id, subject_id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_weekly_summary_opt_out_workspace ON weekly_summary_opt_outs (workspace_id);

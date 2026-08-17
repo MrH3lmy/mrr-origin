@@ -2,11 +2,22 @@
 
 ## Status
 
-**FROZEN — approved by the issue owner on 2026-08-17, corrected the same day.**
+**FROZEN — approved by the issue owner on 2026-08-17, corrected the same
+day, and further review-corrected on the implementation PR the same day.**
 The issue owner's second pass on B3, B5, B6, and the delivery-guarantee
 language changed the contract below; B1, B2, B4's core (authenticated-only
 opt-out), and B7's mechanism are otherwise unchanged from the first
-approval. Section headings below are left as originally written (including
+approval. A subsequent blocking code review on PR #60 found the _initial
+implementation_ of the corrected contract did not fully match it in eight
+places (opt-out/role not revalidated before a retry send, an overstated
+"claims can never both send" guarantee, ambiguous-outcome tracking cleared
+by a later success, a project-scheduling cap that permanently starved
+projects beyond it, a manual-send path that bypassed the
+unconfigured-provider gate, an incomplete Postmark permanent/transient
+classifier, a missing membership-removal cascade on opt-outs, and a
+timezone-sensitive date display) — those are now fixed in both code and in
+this document (§1a, §4b, §4d, §5, "Delivery guarantee", and the `CANCELLED`
+status). Section headings below are left as originally written (including
 the word "proposed") so the rationale stays attached to each decision; the
 "Blocking questions" section at the end records the corrected, final
 resolution for each one. This is the authoritative contract for #59's
@@ -77,11 +88,21 @@ with both, and requiring no new infrastructure or ADR-level decision:
   passed that instant and no `weekly_summary_deliveries` row exists yet for
   `(project, week_start)`, create one PENDING delivery row per eligible
   recipient (§3) and hand due/retry-eligible rows to the same claim-lease-send
-  loop used for retries (§4).
+  loop used for retries (§4). Projects are walked via real keyset pagination
+  (ordered by id, page-by-page within the tick), not a fixed count-and-stop
+  cap over an always-unpaged read — a prior version capped at 500 projects
+  per tick while re-reading the same unpaged set every time, which
+  permanently starved every project beyond the cap rather than picking them
+  up "next tick" as its own log message claimed (review-corrected).
 - A manual `POST /api/workspaces/{workspaceId}/projects/{projectId}/notifications/weekly-summary/send`
   (manager-only) triggers immediate dispatch for that project's current
   completed week, for support/debugging — reusing the same idempotency key,
-  so it can never double-send against a tick that already ran.
+  so it can never double-send against a tick that already ran. Rejects with
+  `503` before creating or claiming any work if email sending is not
+  configured (review-corrected — a prior version bypassed the same
+  `isConfigured()` gate the scheduled tick honors, so a blank
+  token/sender/base-URL deployment could still create rows, claim them, and
+  record failures while returning `200`).
 
 ### 1b. Weekday, local time, and DST — proposed default
 
@@ -245,12 +266,12 @@ CREATE TABLE weekly_summary_deliveries (
     recipient_subject_id VARCHAR(255) NOT NULL,
     recipient_email VARCHAR(320),       -- null exactly while status = BLOCKED_MISSING_EMAIL
     week_start DATE NOT NULL,           -- project-timezone Monday, per #26's boundary
-    status VARCHAR(24) NOT NULL,        -- PENDING | SENDING | SENT | FAILED | PERMANENTLY_FAILED | BLOCKED_MISSING_EMAIL
+    status VARCHAR(24) NOT NULL,        -- PENDING | SENDING | SENT | FAILED | PERMANENTLY_FAILED | BLOCKED_MISSING_EMAIL | CANCELLED
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_attempted_at TIMESTAMPTZ,      -- informational; fencing uses lease_token, not this
     lease_token UUID,                   -- random per claim, fences markSent/markFailed
     lease_until TIMESTAMPTZ,            -- claim expiry; an expired SENDING lease is reclaimable
-    last_outcome_ambiguous BOOLEAN NOT NULL DEFAULT FALSE, -- true when a network failure left send status unknown
+    last_outcome_ambiguous BOOLEAN NOT NULL DEFAULT FALSE, -- accumulates (OR) across attempts, never reset by a later definite outcome
     next_attempt_at TIMESTAMPTZ NOT NULL,
     last_error TEXT,                    -- sanitized, length-bounded; never a credential/body/raw response
     provider_message_id VARCHAR(255),   -- set on SENT, for provider-side delivery tracing
@@ -261,7 +282,7 @@ CREATE TABLE weekly_summary_deliveries (
         REFERENCES projects (id, workspace_id) ON DELETE CASCADE,
     CONSTRAINT uq_weekly_summary_delivery UNIQUE (project_id, recipient_subject_id, week_start),
     CONSTRAINT chk_weekly_summary_delivery_status
-        CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED', 'PERMANENTLY_FAILED', 'BLOCKED_MISSING_EMAIL')),
+        CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED', 'PERMANENTLY_FAILED', 'BLOCKED_MISSING_EMAIL', 'CANCELLED')),
     CONSTRAINT chk_weekly_summary_delivery_attempt_count CHECK (attempt_count >= 0),
     CONSTRAINT chk_weekly_summary_delivery_email_presence
         CHECK ((status = 'BLOCKED_MISSING_EMAIL') = (recipient_email IS NULL))
@@ -299,20 +320,33 @@ status='SENDING', lease_token=<new random UUID>, lease_until=now +
    <lease duration>, last_attempted_at=now, attempt_count = attempt_count +
    1` in the same statement — the lease. `BLOCKED_MISSING_EMAIL` rows are
    never claimable (no `recipient_email` to send to).
-2. **Send** (no open transaction): render (`WeeklySummaryRenderer`) and call
-   the email provider client. Network call never happens inside a DB
-   transaction, matching `StripeBackfillClient`'s established rule — this
-   was already true of the implementation and remains a hard rule under the
-   corrected lease design.
+2. **Revalidate, then send** (no open transaction): immediately before
+   rendering/sending, re-check the recipient is still not opted out and
+   still holds a manage-level role right now — not only at whatever earlier
+   time this row was created (review-corrected: a member who opts out, or
+   is demoted/removed, while a row sits `FAILED` in backoff must not still
+   receive a later retry). If no longer eligible, the row is fenced
+   straight to `CANCELLED` (§4a's status list) and the provider is never
+   called. Otherwise, re-check the claimed `lease_token` is still current
+   (a cheap pre-send freshness read) before calling the provider — this
+   narrows, but for a merely-paused (not dead) original worker cannot fully
+   close, the window described in the delivery guarantee below. Render
+   (`WeeklySummaryRenderer`) and call the email provider client; the
+   network call never happens inside a DB transaction, matching
+   `StripeBackfillClient`'s established rule.
 3. **Apply** (one short transaction, fenced by `status = 'SENDING' AND
 lease_token = <the exact token claimed in step 1>` — a worker whose lease
-   was since reclaimed can never overwrite a newer outcome): on success,
-   `status='SENT'`, store `provider_message_id`, clear the lease; on
-   failure, `status='FAILED'`, sanitized/bounded `last_error`,
-   `last_outcome_ambiguous` set per the provider-failure classification (see
-   "Delivery guarantee" below), `next_attempt_at` advanced per the backoff
-   schedule (§4c), lease cleared, or `status='PERMANENTLY_FAILED'` if
-   attempts are exhausted or the failure was classified permanent.
+   was since reclaimed can never overwrite a newer outcome _in the
+   database_, though it may still have made its own outbound provider call;
+   see the delivery guarantee below): on success, `status='SENT'`, store
+   `provider_message_id`, clear the lease, and leave `last_outcome_ambiguous`
+   untouched (it accumulates across attempts, see below — never reset by a
+   later success); on failure, `status='FAILED'`, sanitized/bounded
+   `last_error`, `last_outcome_ambiguous` OR'd with this attempt's
+   provider-failure classification (see "Delivery guarantee" below),
+   `next_attempt_at` advanced per the backoff schedule (§4c), lease
+   cleared, or `status='PERMANENTLY_FAILED'` if attempts are exhausted or
+   the failure was classified permanent.
 
 ### 4c. Retry schedule and maximum attempts — corrected
 
@@ -332,7 +366,7 @@ six times over 24h+ wastes attempts and cannot succeed.
 
 This is now a corrected, final decision — see blocking question B5.
 
-### 4d. Permanent-failure and blocked behavior — corrected
+### 4d. Permanent-failure, blocked, and cancelled behavior — corrected
 
 On `PERMANENTLY_FAILED` or `BLOCKED_MISSING_EMAIL`: no further automatic
 retry; both are visible in a manager-facing delivery-status view
@@ -348,6 +382,19 @@ manager can manually replay either kind via the same replay endpoint:
   stored (verified) email; if one is now present, the row is populated with
   it and moved to `PENDING`; if still absent, the replay is rejected with a
   clear reason rather than silently no-op'ing.
+
+**`CANCELLED` (review-corrected addition)**: a claimed row whose recipient
+is revalidated — right before send, not only at row-creation time — to no
+longer be eligible (opted out, or lost/removed their manage-level role)
+while it sat `FAILED` in backoff. The provider is never called for a
+cancelled row. Terminal and **not** replayable: the recipient's current
+state is by definition ineligible at the moment this status is set, so
+replaying it would contradict their own opt-out or role change; the
+following week creates its own fresh row as usual once/if they become
+eligible again. Without this, a member who opts out mid-retry (or is
+demoted/removed) could still receive a stale summary from an in-flight
+backoff cycle that predates their change — a real gap in an earlier
+version, not a hypothetical.
 
 Not silently retried forever, not silently dropped.
 
@@ -384,10 +431,11 @@ numeric `ErrorCode`/short `Message` field).
 Retention: **corrected — 400 days for terminal rows, not workspace
 lifetime.** A daily cleanup pass (reusing the same in-process `@Scheduled`
 mechanism as dispatch, §1a) deletes rows whose status is `SENT`,
-`PERMANENTLY_FAILED`, or `BLOCKED_MISSING_EMAIL` (a "superseded" blocked
-record — one that was never resolved before aging out) and whose
-`created_at` is older than 400 days. `PENDING`, `SENDING`, and retryable
-`FAILED` rows are **never** touched by retention cleanup regardless of age
+`PERMANENTLY_FAILED`, `BLOCKED_MISSING_EMAIL` (a "superseded" blocked
+record — one that was never resolved before aging out), or `CANCELLED`
+(§4d) and whose `created_at` is older than 400 days. `PENDING`, `SENDING`,
+and retryable `FAILED` rows are **never** touched by retention cleanup
+regardless of age
 — those are active work, not audit history. The `ON DELETE CASCADE` from
 `projects` still applies (a deleted project's rows go with it immediately,
 unrelated to the 400-day window). `weekly_summary_opt_outs` rows are
@@ -399,36 +447,55 @@ This is now a corrected, final decision — see blocking question B7.
 
 ## Delivery guarantee — corrected, required
 
-**This system provides at-least-once delivery, not exactly-once.** The
+**This system provides at-least-once delivery, not exactly-once, and it
+does not claim two internal claim attempts can never both send** (an
+earlier version of this section overstated that — review-corrected). The
 `uq_weekly_summary_delivery` constraint (§4a) prevents duplicate
-_scheduling_ and duplicate _concurrent internal sends_ for the same
-`(project, recipient, week)` — two ticks, a tick racing a manual trigger, or
-two claim attempts can never both send. It says nothing about the provider
-side: Postmark's public API does not document a request-idempotency key, so
-if Postmark accepts and queues a message but the HTTP response is lost
-(timeout, connection reset, proxy failure) before we record the outcome,
-our only safe action on retry is to send again — which means a rare
-provider-side duplicate is an accepted possibility, not a bug to be
-engineered away. Concretely:
+_scheduling_: two ticks, a tick racing a manual trigger, or two claim
+attempts can never both create a row or both _apply_ an outcome to the same
+row in the database. It does not, by itself, prevent two _sends_ to the
+provider — there are two distinct, independent reasons a duplicate send can
+still rarely happen, and both are accepted possibilities, not bugs to be
+engineered away:
+
+1. **Ambiguous network outcomes.** Postmark's public API does not document
+   a request-idempotency key, so if Postmark accepts and queues a message
+   but the HTTP response is lost (timeout, connection reset, proxy failure)
+   before we record the outcome, our only safe action on retry is to send
+   again.
+2. **Lease-reclaim racing a merely-paused worker (§4b, review-corrected).**
+   An expired `SENDING` lease is reclaimed on the assumption the original
+   worker died. If it was instead only paused (GC, scheduler preemption,
+   a slow thread) and later resumes, it can still complete its own
+   provider call after a second worker has already claimed and sent the
+   same row — the `lease_token` fences the database apply, not the
+   in-flight outbound HTTP call, which cannot be preempted from the
+   database side. A pre-send freshness check (§4b) narrows this window but
+   cannot fully close it for a worker that resumes between that check and
+   its actual network call.
+
+Concretely:
 
 - **At-least-once delivery.** A recipient may, rarely, receive the same
-  week's summary twice after an ambiguous network outcome.
-- **Internal duplicate scheduling is prevented** by the database unique key
-  (§4a) — this part is a real, enforced guarantee.
-- **Rare provider-side duplicates are accepted** after ambiguous network
-  outcomes specifically (not after a definite success or a definite error
-  response, both of which are unambiguous).
+  week's summary twice, from either source above.
+- **Internal duplicate scheduling and duplicate database outcomes are
+  prevented** by the unique key and lease-token fencing (§4a/§4b) — this
+  part is a real, enforced guarantee. Duplicate _provider calls_ are not
+  fully prevented, for the two reasons above.
 - Every send includes the delivery row's UUID in the Postmark request's
   `Metadata` object and a custom `X-MRR-Origin-Delivery-Id` tracing header,
   so any duplicate that does occur is traceable back to the exact delivery
   attempt on both sides (our audit trail and Postmark's own dashboard/logs).
-- Ambiguous outcomes are recorded distinctly (`last_outcome_ambiguous`,
-  §4a) — never silently folded into an ordinary transient failure — and
-  every retry attempt remains in the same audit trail (§6) whether or not
-  it turns out to have been necessary.
+- Ambiguous outcomes are recorded distinctly and **cumulatively**
+  (`last_outcome_ambiguous`, §4a) — true if _any_ attempt across this
+  delivery's lifetime was ambiguous, never reset to false by a later
+  definite success or failure (review-corrected: an earlier version cleared
+  it on success, silently erasing the evidence that a duplicate was
+  possible) — and every retry attempt remains in the same audit trail (§6)
+  whether or not it turns out to have been necessary.
 - **No documentation, code comment, or test in this codebase claims
-  exactly-once delivery or that duplicates are impossible.** Any future
-  wording implying otherwise is a defect against this contract.
+  exactly-once delivery, or that duplicate provider calls are impossible.**
+  Any future wording implying otherwise is a defect against this contract.
 
 ## 7. Authorization
 

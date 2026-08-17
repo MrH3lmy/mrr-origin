@@ -268,6 +268,46 @@ class WeeklySummaryDeliveryIntegrationTests {
     }
 
     @Test
+    void ambiguousOutcomeSurvivesALaterDefiniteSuccess() {
+        // Review fix: last_outcome_ambiguous must accumulate across attempts of the same delivery, not
+        // be erased by a later success -- otherwise the audit trail would silently lose the evidence
+        // that an earlier ambiguous attempt might have already sent a duplicate.
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+
+        ClaimedDelivery firstAttempt = deliveryRepository.claimBatch(10, now).get(0);
+        deliveryRepository.markFailed(
+                firstAttempt.id(), firstAttempt.leaseToken(), "connection reset", false, true, firstAttempt.attemptCount(), now);
+        assertThat(ambiguousFor(OWNER)).isTrue();
+
+        OffsetDateTime secondAttemptNow = now.plusMinutes(1);
+        ClaimedDelivery secondAttempt = deliveryRepository.claimBatch(10, secondAttemptNow).get(0);
+        boolean marked = deliveryRepository.markSent(secondAttempt.id(), secondAttempt.leaseToken(), "provider-msg-2", secondAttemptNow);
+
+        assertThat(marked).isTrue();
+        assertThat(statusFor(OWNER)).isEqualTo("SENT");
+        assertThat(ambiguousFor(OWNER)).isTrue(); // still true -- the earlier ambiguous attempt is not erased
+    }
+
+    @Test
+    void isLeaseCurrentDetectsAReclaimedLease() {
+        // Backs the pre-send freshness check (#59, review fix): narrows, though it cannot fully close,
+        // the window where a merely-paused (not dead) worker could otherwise resume its own send after
+        // a second worker already reclaimed and completed the same row.
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+
+        ClaimedDelivery original = deliveryRepository.claimBatch(10, now).get(0);
+        assertThat(deliveryRepository.isLeaseCurrent(original.id(), original.leaseToken())).isTrue();
+
+        OffsetDateTime muchLater = now.plusMinutes(30);
+        ClaimedDelivery reclaimed = deliveryRepository.claimBatch(10, muchLater).get(0);
+
+        assertThat(deliveryRepository.isLeaseCurrent(original.id(), original.leaseToken())).isFalse();
+        assertThat(deliveryRepository.isLeaseCurrent(reclaimed.id(), reclaimed.leaseToken())).isTrue();
+    }
+
+    @Test
     void exhaustingAllSixAttemptsReachesPermanentlyFailed() {
         OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
         deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
@@ -302,6 +342,63 @@ class WeeklySummaryDeliveryIntegrationTests {
         deliveryRepository.markFailed(claim.id(), claim.leaseToken(), "invalid recipient", true, false, claim.attemptCount(), now);
 
         assertThat(statusFor(OWNER)).isEqualTo("PERMANENTLY_FAILED");
+    }
+
+    // -- Eligibility revalidation before send (#59, review fix) --
+
+    @Test
+    void optOutDuringBackoffCancelsTheRetryInsteadOfSendingAStaleEmail() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+        ClaimedDelivery claim = deliveryRepository.claimBatch(10, now).get(0);
+        deliveryRepository.markFailed(claim.id(), claim.leaseToken(), "transient", false, false, claim.attemptCount(), now);
+        assertThat(statusFor(OWNER)).isEqualTo("FAILED");
+
+        optOutService.setOptedOut(workspace, project, OWNER, true);
+
+        OffsetDateTime retryNow = now.plusMinutes(1);
+        clock.setInstant(retryNow.toInstant());
+        dispatchService.dispatchDue();
+
+        assertThat(statusFor(OWNER)).isEqualTo("CANCELLED");
+        assertThat(emailSender.sent().stream().noneMatch(sent -> "owner@example.com".equals(sent.toAddress()))).isTrue();
+    }
+
+    @Test
+    void roleDowngradeDuringBackoffCancelsTheRetryInsteadOfSendingAStaleEmail() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+        ClaimedDelivery claim = deliveryRepository.claimBatch(10, now).get(0);
+        deliveryRepository.markFailed(claim.id(), claim.leaseToken(), "transient", false, false, claim.attemptCount(), now);
+        assertThat(statusFor(OWNER)).isEqualTo("FAILED");
+
+        // The workspace still needs an OWNER, so demote via a second owner rather than deleting the row.
+        insertMember("user-second-owner", "OWNER", "second-owner@example.com");
+        db.sql("UPDATE workspace_members SET role = 'MEMBER' WHERE workspace_id = :w AND subject_id = :s")
+                .param("w", workspace).param("s", OWNER).update();
+
+        OffsetDateTime retryNow = now.plusMinutes(1);
+        clock.setInstant(retryNow.toInstant());
+        dispatchService.dispatchDue();
+
+        assertThat(statusFor(OWNER)).isEqualTo("CANCELLED");
+        assertThat(emailSender.sent().stream().noneMatch(sent -> "owner@example.com".equals(sent.toAddress()))).isTrue();
+    }
+
+    // -- Opt-out cascade on membership removal (#59, review fix) --
+
+    @Test
+    void removingAMembershipCascadesTheirOptOutRow() {
+        optOutService.setOptedOut(workspace, project, ADMIN, true);
+        assertThat(optOutService.isOptedOut(workspace, project, ADMIN)).isTrue();
+
+        db.sql("DELETE FROM workspace_members WHERE workspace_id = :w AND subject_id = :s")
+                .param("w", workspace).param("s", ADMIN).update();
+
+        Long remaining = db.sql("SELECT COUNT(*) FROM weekly_summary_opt_outs WHERE workspace_id = :w AND subject_id = :s")
+                .param("w", workspace).param("s", ADMIN)
+                .query(Long.class).single();
+        assertThat(remaining).isZero();
     }
 
     // -- Missing verified email (accepted B3 correction) --

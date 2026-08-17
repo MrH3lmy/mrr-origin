@@ -102,6 +102,46 @@ class PostmarkEmailSenderTests {
     }
 
     @Test
+    void classifiesRateLimitAsTransient() {
+        // Review fix: classification is primarily by HTTP status now, not a small ErrorCode allowlist
+        // that left ordinary permanent request/configuration errors classified transient.
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        RestClient restClient = builder.build();
+        server.expect(requestTo("https://api.postmarkapp.com/email"))
+                .andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"ErrorCode\":0,\"Message\":\"Too many requests\"}"));
+
+        PostmarkEmailSender sender = new PostmarkEmailSender(restClient, properties, objectMapper);
+
+        assertThatThrownBy(() -> sender.send(message))
+                .isInstanceOf(EmailSendException.class)
+                .satisfies(exception -> assertThat(((EmailSendException) exception).permanent()).isFalse());
+    }
+
+    @Test
+    void classifiesAnOrdinaryBadRequestAsPermanentEvenWithoutAKnownErrorCode() {
+        // Review fix: an earlier version only treated ErrorCodes {300, 406, 401} as permanent and
+        // classified every other non-2xx status -- including ordinary 400/402/403/409-style
+        // configuration/request errors -- as transient, wasting the entire retry budget on something a
+        // retry could never fix.
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        RestClient restClient = builder.build();
+        server.expect(requestTo("https://api.postmarkapp.com/email"))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"ErrorCode\":1101,\"Message\":\"Invalid request\"}"));
+
+        PostmarkEmailSender sender = new PostmarkEmailSender(restClient, properties, objectMapper);
+
+        assertThatThrownBy(() -> sender.send(message))
+                .isInstanceOf(EmailSendException.class)
+                .satisfies(exception -> assertThat(((EmailSendException) exception).permanent()).isTrue());
+    }
+
+    @Test
     void classifiesNetworkFailureAsTransientAndAmbiguous() {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
