@@ -118,7 +118,8 @@ class WeeklySummaryIntegrationTests {
                 .andExpect(jsonPath(insightPath("google") + ".percentageChange").value(0.3))
                 .andExpect(jsonPath(insightPath("google") + ".applicableCustomerCount").value(8))
                 .andExpect(insight("bing", "NEWLY_APPEARED"))
-                .andExpect(jsonPath(insightPath("bing") + ".percentageChange").doesNotExist())
+                .andExpect(jsonPath(insightPath("bing") + ".percentageChange")
+                        .value(org.hamcrest.Matchers.nullValue()))
                 .andExpect(jsonPath(insightPath("bing") + ".priorAmountMinor").value(0))
                 .andExpect(insight("reddit", "DISAPPEARED"))
                 .andExpect(jsonPath(insightPath("reddit") + ".percentageChange").value(-1.0))
@@ -157,8 +158,8 @@ class WeeklySummaryIntegrationTests {
                 // Two genuinely distinct buckets, never coalesced into one "unknown" row.
                 .andExpect(jsonPath(
                                 "$.currencySections[?(@.currency=='USD')].insights"
-                                        + "[?(@.dimension=='SOURCE' && @.dimensionValue==null)].length()")
-                        .value(2));
+                                        + "[?(@.dimension=='SOURCE' && @.dimensionValue==null)].dimensionBucket")
+                        .value(org.hamcrest.Matchers.containsInAnyOrder("NONE", "UNATTRIBUTED")));
     }
 
     @Test
@@ -182,7 +183,8 @@ class WeeklySummaryIntegrationTests {
         // The exact path EvidenceLink.path() builds for this insight's current-week filters -- proves
         // the JSON response carries this precise, decodable filter set rather than an opaque summary.
         String expectedLink = "/app/" + workspace + "/projects/" + project + "/sources?"
-                + "from=" + enc(CURRENT_FROM) + "&to=" + enc(CURRENT_TO)
+                + "from=" + enc(OffsetDateTime.parse(CURRENT_FROM).toString())
+                + "&to=" + enc(OffsetDateTime.parse(CURRENT_TO).toString())
                 + "&movementType=NEW&currency=USD&source=google";
 
         mockMvc.perform(weeklySummary(OWNER))
@@ -218,6 +220,17 @@ class WeeklySummaryIntegrationTests {
                 // Monday 00:00 IST = the preceding Sunday 18:30 UTC.
                 .andExpect(jsonPath("$.weekStart").value("2026-03-01T18:30:00Z"))
                 .andExpect(jsonPath("$.weekEnd").value("2026-03-08T18:30:00Z"));
+    }
+
+    @Test
+    void rejectsAWeekThatHasNotCompletedInTheProjectTimezone() throws Exception {
+        mockMvc.perform(get(
+                                "/api/workspaces/{workspaceId}/projects/{projectId}/reporting/weekly-summary",
+                                workspace, project)
+                        .queryParam("weekStart", "2026-03-09")
+                        .with(token(OWNER)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("weekStart must identify a completed week"));
     }
 
     @Test
@@ -266,6 +279,8 @@ class WeeklySummaryIntegrationTests {
                 .getResponse()
                 .getContentAsString();
         org.junit.jupiter.api.Assertions.assertTrue(text.contains("bing"));
+        org.junit.jupiter.api.Assertions.assertTrue(text.contains("[this week: /app/"));
+        org.junit.jupiter.api.Assertions.assertTrue(text.contains("[prior week: /app/"));
         org.junit.jupiter.api.Assertions.assertFalse(text.contains("linkedin"));
         org.junit.jupiter.api.Assertions.assertFalse(text.toLowerCase(java.util.Locale.ROOT).contains("anomaly"));
         org.junit.jupiter.api.Assertions.assertTrue(text.contains("stable"));
