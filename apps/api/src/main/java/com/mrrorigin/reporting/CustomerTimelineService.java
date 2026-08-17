@@ -115,6 +115,7 @@ public class CustomerTimelineService {
                 touchpointOccurredAt(workspaceId, projectId, acquisitionExplanation.orElse(null));
         AcquisitionSummary acquisitionSummary =
                 acquisitionSummary(movements, acquisitionExplanation, touchpointOccurredAt);
+        boolean canViewSensitiveIdentity = workspaceContext.canManage(workspaceId);
         ActiveLink activeLink = links.stream()
                 .filter(l -> l.supersededAt() == null)
                 .findFirst()
@@ -125,7 +126,6 @@ public class CustomerTimelineService {
                         canViewSensitiveIdentity ? l.linkedBySubjectId() : null,
                         l.createdAt()))
                 .orElse(null);
-        boolean canViewSensitiveIdentity = workspaceContext.canManage(workspaceId);
         RepairCapability repairCapability = repairCapability(canViewSensitiveIdentity);
 
         CustomerDetail detail = new CustomerDetail(
