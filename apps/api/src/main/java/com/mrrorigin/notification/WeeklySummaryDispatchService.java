@@ -248,8 +248,9 @@ class WeeklySummaryDispatchService {
         // the window where an expired-lease reclaim races a still-running send from the original
         // worker -- see the delivery plan's "Delivery guarantee" for the corrected, honest scope of
         // this mitigation. Never claims two internal claim attempts can never both send.
-        if (!deliveryRepository.isLeaseCurrent(delivery.id(), delivery.leaseToken())) {
-            log.warn("Weekly summary delivery {} lease was already reclaimed; not sending from this worker.", delivery.id());
+        OffsetDateTime leaseCheckAt = OffsetDateTime.now(clock);
+        if (!deliveryRepository.isLeaseCurrent(delivery.id(), delivery.leaseToken(), leaseCheckAt)) {
+            log.warn("Weekly summary delivery {} lease is expired or was already reclaimed; not sending from this worker.", delivery.id());
             return;
         }
         try {
