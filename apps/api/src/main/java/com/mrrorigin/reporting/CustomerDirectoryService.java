@@ -130,7 +130,7 @@ public class CustomerDirectoryService {
                         FROM customer_mrr_snapshots
                         WHERE workspace_id = :w AND stripe_customer_id = ANY(:ids) AND calculation_version = :cv
                           AND supported = TRUE
-                        ORDER BY stripe_customer_id, currency, effective_at DESC
+                        ORDER BY stripe_customer_id, currency, effective_at DESC, id DESC
                         """)
                 .param("w", workspaceId)
                 .param("ids", customerIds.toArray(String[]::new))
@@ -152,7 +152,7 @@ public class CustomerDirectoryService {
         Map<String, List<String>> byCustomer = new HashMap<>();
         db.sql(
                         """
-                        SELECT stripe_customer_id, status
+                        SELECT DISTINCT stripe_customer_id, status
                         FROM billing_subscriptions
                         WHERE workspace_id = :w AND stripe_customer_id = ANY(:ids)
                         ORDER BY stripe_customer_id, status
