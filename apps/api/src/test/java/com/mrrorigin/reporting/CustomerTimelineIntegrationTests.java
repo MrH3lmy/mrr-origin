@@ -30,6 +30,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import com.mrrorigin.attribution.AttributionApplicationService;
 import com.mrrorigin.attribution.AttributionV1Engine;
 
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -126,11 +127,16 @@ class CustomerTimelineIntegrationTests {
 
         mockMvc.perform(repair(OWNER, project, "user_movable", "cus_movable")).andExpect(status().isOk());
 
-        mockMvc.perform(timeline(OWNER, "cus_movable", null, null))
+        String originalProjectTimeline = mockMvc.perform(timeline(OWNER, "cus_movable", null, null))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.entries[?(@.eventType=='MRR_MOVEMENT')].length()").value(1))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='SUBSCRIPTION_STATUS_CHANGED')].length()").value(1))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='IDENTITY_LINK_CREATED')].length()").value(1));
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(originalProjectTimeline, "MRR_MOVEMENT")).hasSize(1);
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(originalProjectTimeline, "SUBSCRIPTION_STATUS_CHANGED"))
+                .hasSize(1);
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(originalProjectTimeline, "IDENTITY_LINK_CREATED"))
+                .hasSize(1);
 
         UUID otherProject = UUID.randomUUID();
         db.sql("INSERT INTO projects (id, workspace_id, name, domain, public_key) VALUES (:p, :w, 'p2', 'two.example', :k)")
@@ -144,16 +150,21 @@ class CustomerTimelineIntegrationTests {
 
         // The new project sees the full, non-project-scoped billing/revenue history plus its own
         // identity link -- never the old project's superseded link.
-        mockMvc.perform(get(
+        String newProjectTimeline = mockMvc.perform(get(
                                 "/api/workspaces/{workspaceId}/projects/{projectId}/customers/{customerId}/timeline",
                                 workspace, otherProject, "cus_movable")
                         .with(token(OWNER)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.entries[?(@.eventType=='MRR_MOVEMENT')].length()").value(1))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='SUBSCRIPTION_STATUS_CHANGED')].length()").value(1))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='IDENTITY_LINK_CREATED')].length()").value(1))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='IDENTITY_LINK_CREATED')].externalUserId")
-                        .value(List.of("user_movable_2")));
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(newProjectTimeline, "MRR_MOVEMENT")).hasSize(1);
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(newProjectTimeline, "SUBSCRIPTION_STATUS_CHANGED"))
+                .hasSize(1);
+        List<JsonNode> links = entriesOfType(newProjectTimeline, "IDENTITY_LINK_CREATED");
+        org.assertj.core.api.Assertions.assertThat(links).hasSize(1);
+        org.assertj.core.api.Assertions.assertThat(links.getFirst().get("externalUserId").asText())
+                .isEqualTo("user_movable_2");
     }
 
     @Test
@@ -193,19 +204,33 @@ class CustomerTimelineIntegrationTests {
                         OffsetDateTime.parse("2026-03-01T00:00:00Z"), null, null, false, false, null, false, null,
                         false, null, null, null);
 
-        mockMvc.perform(timeline(OWNER, "cus_movements", null, null))
+        String timelineResponse = mockMvc.perform(timeline(OWNER, "cus_movements", null, null))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.entries[?(@.eventType=='MRR_MOVEMENT' && @.movementType=='NEW')].amountMinor")
-                        .value(List.of(2000)))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='MRR_MOVEMENT' && @.movementType=='EXPANSION')].amountMinor")
-                        .value(List.of(3000)))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='MRR_MOVEMENT')].confidence")
-                        .value(List.of("STRONG", "STRONG")));
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
 
-        org.assertj.core.api.Assertions.assertThat(drilldown.entries()).hasSize(2);
+        List<JsonNode> timelineMovements = entriesOfType(timelineResponse, "MRR_MOVEMENT");
+        org.assertj.core.api.Assertions.assertThat(timelineMovements).hasSize(2);
         org.assertj.core.api.Assertions.assertThat(
-                        drilldown.entries().stream().mapToLong(RevenueMovementsService.Entry::amountMinor).sum())
-                .isEqualTo(5000);
+                        timelineMovements.stream().map(node -> node.get("referenceId").asText()).toList())
+                .containsExactlyElementsOf(
+                        drilldown.entries().stream().map(entry -> entry.movementId().toString()).toList());
+        org.assertj.core.api.Assertions.assertThat(
+                        timelineMovements.stream().map(node -> node.get("currency").asText()).toList())
+                .containsExactlyElementsOf(
+                        drilldown.entries().stream().map(RevenueMovementsService.Entry::currency).toList());
+        org.assertj.core.api.Assertions.assertThat(
+                        timelineMovements.stream().map(node -> node.get("amountMinor").asLong()).toList())
+                .containsExactlyElementsOf(
+                        drilldown.entries().stream().map(RevenueMovementsService.Entry::amountMinor).toList());
+        org.assertj.core.api.Assertions.assertThat(
+                        timelineMovements.stream().map(node -> node.get("movementType").asText()).toList())
+                .containsExactlyElementsOf(
+                        drilldown.entries().stream().map(RevenueMovementsService.Entry::movementType).toList());
+        org.assertj.core.api.Assertions.assertThat(
+                        timelineMovements.stream().map(node -> node.get("confidence").asText()).toList())
+                .containsExactly("STRONG", "STRONG");
     }
 
     @Test
@@ -232,10 +257,13 @@ class CustomerTimelineIntegrationTests {
         movement("cus_currencies", "USD", 1_000, "NEW", "2026-01-01T00:00:00Z");
         movement("cus_currencies", "EUR", 900, "NEW", "2026-01-01T00:00:00Z");
 
-        mockMvc.perform(timeline(OWNER, "cus_currencies", null, null))
+        String response = mockMvc.perform(timeline(OWNER, "cus_currencies", null, null))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.detail.currentMrr.length()").value(2))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='MRR_MOVEMENT')].length()").value(2));
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(response, "MRR_MOVEMENT")).hasSize(2);
     }
 
     @Test
@@ -305,11 +333,20 @@ class CustomerTimelineIntegrationTests {
 
         mockMvc.perform(timeline(OWNER, "cus_capability", null, null))
                 .andExpect(jsonPath("$.detail.repairCapability.canRepair").value(true))
-                .andExpect(jsonPath("$.detail.repairCapability.reason").doesNotExist());
+                .andExpect(jsonPath("$.detail.repairCapability.reason").doesNotExist())
+                .andExpect(jsonPath("$.detail.activeLink.externalUserId").value("user-cus_capability"))
+                .andExpect(jsonPath("$.detail.activeLink.linkedBySubjectId").value("owner"));
 
-        mockMvc.perform(timeline("user-member", "cus_capability", null, null))
+        String memberTimeline = mockMvc.perform(timeline("user-member", "cus_capability", null, null))
                 .andExpect(jsonPath("$.detail.repairCapability.canRepair").value(false))
-                .andExpect(jsonPath("$.detail.repairCapability.reason").value("WORKSPACE_ROLE_INSUFFICIENT"));
+                .andExpect(jsonPath("$.detail.repairCapability.reason").value("WORKSPACE_ROLE_INSUFFICIENT"))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        JsonNode memberTree = new ObjectMapper().readTree(memberTimeline);
+        org.assertj.core.api.Assertions.assertThat(memberTree.at("/detail/activeLink/externalUserId").isNull()).isTrue();
+        org.assertj.core.api.Assertions.assertThat(memberTree.at("/detail/activeLink/linkedBySubjectId").isNull()).isTrue();
+        org.assertj.core.api.Assertions.assertThat(memberTimeline).doesNotContain("user-cus_capability");
 
         mockMvc.perform(timeline("user-not-a-member", "cus_capability", null, null)).andExpect(status().isNotFound());
     }
@@ -323,17 +360,25 @@ class CustomerTimelineIntegrationTests {
         attribution.recalculate(workspace, project, "cus_repaired");
         identify(project, "user_repaired");
 
-        mockMvc.perform(timeline(OWNER, "cus_repaired", null, null))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='REPAIR_AUDIT')].length()").value(0));
+        String beforeRepair = mockMvc.perform(timeline(OWNER, "cus_repaired", null, null))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        org.assertj.core.api.Assertions.assertThat(entriesOfType(beforeRepair, "REPAIR_AUDIT")).isEmpty();
 
         mockMvc.perform(repair(OWNER, project, "user_repaired", "cus_repaired")).andExpect(status().isOk());
 
-        mockMvc.perform(timeline(OWNER, "cus_repaired", null, null))
+        String afterRepair = mockMvc.perform(timeline(OWNER, "cus_repaired", null, null))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.entries[?(@.eventType=='REPAIR_AUDIT')].length()").value(1))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='REPAIR_AUDIT')].actionType").value(List.of("CREATED")))
-                .andExpect(jsonPath("$.entries[?(@.eventType=='REPAIR_AUDIT')].externalUserId")
-                        .value(List.of("user_repaired")));
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        List<JsonNode> repairEntries = entriesOfType(afterRepair, "REPAIR_AUDIT");
+        org.assertj.core.api.Assertions.assertThat(repairEntries).hasSize(1);
+        org.assertj.core.api.Assertions.assertThat(repairEntries.getFirst().get("actionType").asText())
+                .isEqualTo("CREATED");
+        org.assertj.core.api.Assertions.assertThat(repairEntries.getFirst().get("externalUserId").asText())
+                .isEqualTo("user_repaired");
     }
 
     @Test
@@ -367,12 +412,23 @@ class CustomerTimelineIntegrationTests {
                     .getContentAsString();
             pagedOrder.addAll(referenceIdOrder(page));
             var pageTree = new ObjectMapper().readTree(page);
-            cursor = pageTree.has("nextCursor") ? pageTree.get("nextCursor").asText() : null;
+            cursor = pageTree.hasNonNull("nextCursor") ? pageTree.get("nextCursor").asText() : null;
         }
         org.assertj.core.api.Assertions.assertThat(cursor).isNull();
 
         org.assertj.core.api.Assertions.assertThat(pagedOrder).isEqualTo(fullOrder);
         org.assertj.core.api.Assertions.assertThat(new java.util.HashSet<>(pagedOrder)).hasSize(4);
+    }
+
+    private List<JsonNode> entriesOfType(String responseBody, String eventType) throws Exception {
+        JsonNode entries = new ObjectMapper().readTree(responseBody).get("entries");
+        List<JsonNode> matches = new java.util.ArrayList<>();
+        entries.forEach(node -> {
+            if (eventType.equals(node.get("eventType").asText())) {
+                matches.add(node);
+            }
+        });
+        return matches;
     }
 
     private List<String> referenceIdOrder(String responseBody) throws Exception {
