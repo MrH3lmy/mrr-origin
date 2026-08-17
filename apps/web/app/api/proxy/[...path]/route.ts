@@ -40,14 +40,18 @@ async function handle(
     cache: "no-store",
   });
 
-  const body = await upstream.text();
-  return new NextResponse(body, {
-    status: upstream.status,
-    headers: {
-      "content-type":
-        upstream.headers.get("content-type") ?? "application/json",
-    },
-  });
+  const headers: Record<string, string> = {
+    "content-type": upstream.headers.get("content-type") ?? "application/json",
+  };
+  // #26's CSV exports rely on these two to trigger a browser download with the right filename and
+  // to let a caller confirm which frozen schema version it received -- forwarded verbatim when the
+  // upstream response sets them, absent for every other (JSON) response.
+  const contentDisposition = upstream.headers.get("content-disposition");
+  if (contentDisposition) headers["content-disposition"] = contentDisposition;
+  const schemaVersion = upstream.headers.get("x-export-schema-version");
+  if (schemaVersion) headers["x-export-schema-version"] = schemaVersion;
+
+  return new NextResponse(upstream.body, { status: upstream.status, headers });
 }
 
 export {

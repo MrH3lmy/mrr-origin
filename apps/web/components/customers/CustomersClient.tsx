@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { ExportLink } from "@/components/ui/ExportLink";
 import { Field } from "@/components/ui/Field";
 import { Panel } from "@/components/ui/Panel";
 import { EmptyState, ErrorState } from "@/components/ui/StateMessage";
@@ -12,6 +13,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { createBrowserClient } from "@/lib/api/client";
 import { listCustomers } from "@/lib/api/customers";
 import { ApiError } from "@/lib/api/errors";
+import { customersExportUrl } from "@/lib/api/reporting";
 import type { CustomerDirectoryEntry } from "@/lib/api/types";
 import { formatDateTime } from "@/lib/format";
 import { formatMoneyMinor } from "@/lib/format-currency";
@@ -106,6 +108,11 @@ export function CustomersClient({
     <Panel
       title="Customers"
       subtitle="Every Stripe customer this project owns, with acquisition and current MRR at a glance."
+      actions={
+        <ExportLink href={customersExportUrl(workspaceId, projectId)}>
+          Export CSV
+        </ExportLink>
+      }
     >
       <form
         className={styles.searchRow}

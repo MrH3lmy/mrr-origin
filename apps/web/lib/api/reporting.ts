@@ -9,6 +9,7 @@ import type {
   RetentionSummary,
   RevenueOverview,
   SourceComparison,
+  WeeklySummary,
 } from "./types";
 
 function base(workspaceId: string, projectId: string): string {
@@ -164,4 +165,75 @@ export function getRetentionSummary(
   return client.get<RetentionSummary>(
     `${base(workspaceId, projectId)}/reporting/retention/summary?${params}`,
   );
+}
+
+// -- Weekly action summary (#26) --
+
+/** ISO date (YYYY-MM-DD) of a Monday in the project's timezone. Defaults server-side to the last completed week. */
+export function getWeeklySummary(
+  client: ApiClient,
+  workspaceId: string,
+  projectId: string,
+  weekStart?: string,
+): Promise<WeeklySummary> {
+  const params = weekStart ? `?${new URLSearchParams({ weekStart })}` : "";
+  return client.get<WeeklySummary>(
+    `${base(workspaceId, projectId)}/reporting/weekly-summary${params}`,
+  );
+}
+
+// -- CSV exports (#26) --
+//
+// These return same-origin proxy paths (not fetched via ApiClient) so a plain <a href> download
+// link carries the session's httpOnly cookie the same way every other proxied request does -- no
+// token ever needs to reach browser JS to authorize an export.
+
+export interface ComparisonExportOptions {
+  source?: string;
+  campaign?: string;
+  campaignMissing?: boolean;
+  retentionAgeDays?: RetentionAgeDays;
+}
+
+export function comparisonExportUrl(
+  workspaceId: string,
+  projectId: string,
+  from: string,
+  to: string,
+  dimension: ComparisonDimension,
+  options: ComparisonExportOptions = {},
+): string {
+  const params = new URLSearchParams({ from, to, dimension });
+  if (options.source) params.set("source", options.source);
+  if (options.campaign) params.set("campaign", options.campaign);
+  if (options.campaignMissing) params.set("campaignMissing", "true");
+  if (options.retentionAgeDays)
+    params.set("retentionAgeDays", String(options.retentionAgeDays));
+  return `/api/proxy/workspaces/${workspaceId}/projects/${projectId}/reporting/exports/comparison?${params}`;
+}
+
+export interface RetentionCohortsExportOptions {
+  source?: string;
+  campaign?: string;
+  campaignMissing?: boolean;
+}
+
+export function retentionCohortsExportUrl(
+  workspaceId: string,
+  projectId: string,
+  dimension: ComparisonDimension,
+  options: RetentionCohortsExportOptions = {},
+): string {
+  const params = new URLSearchParams({ dimension });
+  if (options.source) params.set("source", options.source);
+  if (options.campaign) params.set("campaign", options.campaign);
+  if (options.campaignMissing) params.set("campaignMissing", "true");
+  return `/api/proxy/workspaces/${workspaceId}/projects/${projectId}/reporting/exports/retention-cohorts?${params}`;
+}
+
+export function customersExportUrl(
+  workspaceId: string,
+  projectId: string,
+): string {
+  return `/api/proxy/workspaces/${workspaceId}/projects/${projectId}/reporting/exports/customers`;
 }

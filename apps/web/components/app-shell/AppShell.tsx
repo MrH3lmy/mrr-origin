@@ -134,6 +134,13 @@ export function AppShell({ initialWorkspaces, children }: AppShellProps) {
     Boolean(customersHref) &&
     (pathname === customersHref || pathname.startsWith(`${customersHref}/`));
 
+  const weeklySummaryHref =
+    currentWorkspaceId && currentProjectId
+      ? `/app/${currentWorkspaceId}/projects/${currentProjectId}/weekly-summary`
+      : undefined;
+  const isWeeklySummaryActive =
+    Boolean(weeklySummaryHref) && pathname === weeklySummaryHref;
+
   const sidebar = (
     <nav
       id="primary-navigation"
@@ -233,6 +240,19 @@ export function AppShell({ initialWorkspaces, children }: AppShellProps) {
               </Link>
             ) : (
               <span className={styles.navLinkDisabled}>Customers</span>
+            )}
+          </li>
+          <li>
+            {weeklySummaryHref ? (
+              <Link
+                href={weeklySummaryHref}
+                className={`${styles.navLink} ${isWeeklySummaryActive ? styles.navLinkActive : ""}`}
+                aria-current={isWeeklySummaryActive ? "page" : undefined}
+              >
+                Weekly summary
+              </Link>
+            ) : (
+              <span className={styles.navLinkDisabled}>Weekly summary</span>
             )}
           </li>
           <li>

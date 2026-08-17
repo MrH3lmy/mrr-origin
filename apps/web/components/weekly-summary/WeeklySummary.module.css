@@ -1,0 +1,52 @@
+.periodLabel {
+  margin: 0;
+  color: var(--ds-text-muted);
+  font-size: 0.875rem;
+}
+
+.insightList {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.insightRow {
+  border: 1px solid var(--ds-border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.insightHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.insightLabel {
+  font-weight: 600;
+}
+
+.insightDetail {
+  margin: 8px 0;
+  color: var(--ds-text-muted);
+  font-size: 0.875rem;
+}
+
+.evidenceLinks {
+  font-size: 0.8125rem;
+}
+
+.allStable,
+.stableNote {
+  margin: 0;
+  color: var(--ds-text-muted);
+  font-size: 0.875rem;
+}
+
+.stableNote {
+  margin-top: 12px;
+}

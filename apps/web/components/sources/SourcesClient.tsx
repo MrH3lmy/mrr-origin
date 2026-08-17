@@ -2,8 +2,13 @@
 
 import { useState } from "react";
 
+import { ExportLink } from "@/components/ui/ExportLink";
 import { Panel } from "@/components/ui/Panel";
 import { MovementsDrilldown } from "@/components/overview/MovementsDrilldown";
+import {
+  comparisonExportUrl,
+  retentionCohortsExportUrl,
+} from "@/lib/api/reporting";
 import type { AttributionCoverage, ComparisonDimension } from "@/lib/api/types";
 
 import { ComparisonTable, type MetricSelection } from "./ComparisonTable";
@@ -17,16 +22,19 @@ interface SourcesClientProps {
   to: string;
   /** Null when this signal couldn't be loaded -- rendered as its own degraded state, never blocking the rest of the page. */
   coverage: AttributionCoverage | null;
+  /** Deep-link starting point (e.g. from a #26 weekly-summary evidence link). Defaults to the root. */
+  initialPath?: DrillPath;
+  initialSelectedMetric?: MetricSelection | null;
 }
 
-interface DrillPath {
+export interface DrillPath {
   source: string | null;
   campaign: string | null;
   /** True when the "no campaign captured" bucket was drilled into explicitly, rather than a real campaign. */
   campaignMissing: boolean;
 }
 
-const ROOT_PATH: DrillPath = {
+export const ROOT_PATH: DrillPath = {
   source: null,
   campaign: null,
   campaignMissing: false,
@@ -38,16 +46,96 @@ function dimensionFor(path: DrillPath): ComparisonDimension {
   return "SOURCE";
 }
 
+/**
+ * Resolves the same explicit boolean-mode evidence filters #26's weekly summary (and #22's
+ * `/movements` endpoint) use into this component's drill path + selected metric, so opening a
+ * summary insight's evidence link preselects the exact comparison cell and movement drilldown that
+ * produced it -- never a looser filter. A real value, `*Missing`, and `*Unattributed` are always
+ * distinguished by an explicit boolean, so `"NONE"`/`"UNATTRIBUTED"` bucket labels can never collide
+ * with an actual source/campaign/landing-page string of that name.
+ */
+export function resolveSourcesDeepLink(params: {
+  movementType?: string | null;
+  currency?: string | null;
+  source?: string | null;
+  sourceUnattributed?: boolean;
+  sourceMissing?: boolean;
+  campaign?: string | null;
+  campaignMissing?: boolean;
+  landingPage?: string | null;
+  landingPageMissing?: boolean;
+}): { path: DrillPath; selectedMetric: MetricSelection | null } {
+  const hasSource =
+    !!params.source || !!params.sourceMissing || !!params.sourceUnattributed;
+  if (!hasSource) {
+    return { path: ROOT_PATH, selectedMetric: null };
+  }
+  const hasCampaign = !!params.campaign || !!params.campaignMissing;
+  const hasLandingPage = !!params.landingPage || !!params.landingPageMissing;
+  const canSelectMetric = !!params.movementType && !!params.currency;
+  const movementType = params.movementType as MetricSelection["movementType"];
+
+  if (hasLandingPage) {
+    const path: DrillPath = {
+      source: params.source ?? null,
+      campaign: params.campaign ?? null,
+      campaignMissing: !!params.campaignMissing,
+    };
+    return {
+      path,
+      selectedMetric: canSelectMetric
+        ? {
+            dimensionValue: params.landingPage ?? null,
+            attributed: true,
+            movementType,
+            currency: params.currency as string,
+          }
+        : null,
+    };
+  }
+  if (hasCampaign) {
+    const path: DrillPath = {
+      source: params.source ?? null,
+      campaign: null,
+      campaignMissing: false,
+    };
+    return {
+      path,
+      selectedMetric: canSelectMetric
+        ? {
+            dimensionValue: params.campaign ?? null,
+            attributed: true,
+            movementType,
+            currency: params.currency as string,
+          }
+        : null,
+    };
+  }
+  return {
+    path: ROOT_PATH,
+    selectedMetric: canSelectMetric
+      ? {
+          dimensionValue: params.source ?? null,
+          attributed: !params.sourceUnattributed,
+          movementType,
+          currency: params.currency as string,
+        }
+      : null,
+  };
+}
+
 export function SourcesClient({
   workspaceId,
   projectId,
   from,
   to,
   coverage,
+  initialPath = ROOT_PATH,
+  initialSelectedMetric = null,
 }: SourcesClientProps) {
-  const [path, setPath] = useState<DrillPath>(ROOT_PATH);
+  const [path, setPath] = useState<DrillPath>(initialPath);
   const [selectedMetric, setSelectedMetric] = useState<MetricSelection | null>(
-    null,
+    initialSelectedMetric,
   );
 
   const dimension = dimensionFor(path);
@@ -158,6 +246,40 @@ export function SourcesClient({
       <Panel
         title="Compare by source, campaign, and landing page"
         subtitle="New MRR, Churned MRR, customer count, and 30/60/90-day Retained MRR / NRR for the selected period."
+        actions={
+          <div style={{ display: "flex", gap: 8 }}>
+            <ExportLink
+              href={comparisonExportUrl(
+                workspaceId,
+                projectId,
+                from,
+                to,
+                dimension,
+                {
+                  source: path.source ?? undefined,
+                  campaign: path.campaign ?? undefined,
+                  campaignMissing: path.campaignMissing || undefined,
+                },
+              )}
+            >
+              Export comparison CSV
+            </ExportLink>
+            <ExportLink
+              href={retentionCohortsExportUrl(
+                workspaceId,
+                projectId,
+                dimension,
+                {
+                  source: path.source ?? undefined,
+                  campaign: path.campaign ?? undefined,
+                  campaignMissing: path.campaignMissing || undefined,
+                },
+              )}
+            >
+              Export retention cohorts CSV
+            </ExportLink>
+          </div>
+        }
       >
         <nav aria-label="Drill-down" className={styles.breadcrumb}>
           {path.source === null ? (

@@ -1,7 +1,10 @@
 import { notFound } from "next/navigation";
 
 import { PeriodFilter } from "@/components/overview/PeriodFilter";
-import { SourcesClient } from "@/components/sources/SourcesClient";
+import {
+  resolveSourcesDeepLink,
+  SourcesClient,
+} from "@/components/sources/SourcesClient";
 import { ApiError } from "@/lib/api/errors";
 import { getAttributionCoverage } from "@/lib/api/reporting";
 import { createServerClient } from "@/lib/api/server-client";
@@ -15,7 +18,27 @@ import {
 
 interface SourcesPageProps {
   params: Promise<{ workspaceId: string; projectId: string }>;
-  searchParams: Promise<{ preset?: string }>;
+  /**
+   * `preset` drives the normal period picker. The rest are #26 evidence-link deep-link filters --
+   * present together only when arriving from a weekly-summary insight link -- carrying the exact
+   * boolean-mode evidence filter set `EvidenceLink`/`RevenueMovementsService` use, so this page can
+   * preselect the precise comparison cell and movement drilldown that produced that insight. `from`/
+   * `to`, when present, override `preset` with the linked insight's exact week boundaries.
+   */
+  searchParams: Promise<{
+    preset?: string;
+    from?: string;
+    to?: string;
+    movementType?: string;
+    currency?: string;
+    source?: string;
+    sourceUnattributed?: string;
+    sourceMissing?: string;
+    campaign?: string;
+    campaignMissing?: string;
+    landingPage?: string;
+    landingPageMissing?: string;
+  }>;
 }
 
 /** #23's source/campaign/landing-page comparison, period/project-scoped like the Overview screen. */
@@ -24,11 +47,25 @@ export default async function ProjectSourcesPage({
   searchParams,
 }: SourcesPageProps) {
   const { workspaceId, projectId } = await params;
-  const { preset: rawPreset } = await searchParams;
-  const preset: PeriodPreset = isPeriodPreset(rawPreset)
-    ? rawPreset
+  const search = await searchParams;
+  const preset: PeriodPreset = isPeriodPreset(search.preset)
+    ? search.preset
     : DEFAULT_PERIOD_PRESET;
-  const { from, to } = resolvePeriod(preset);
+  const { from: presetFrom, to: presetTo } = resolvePeriod(preset);
+  const from = search.from ?? presetFrom;
+  const to = search.to ?? presetTo;
+  const { path: initialPath, selectedMetric: initialSelectedMetric } =
+    resolveSourcesDeepLink({
+      movementType: search.movementType,
+      currency: search.currency,
+      source: search.source,
+      sourceUnattributed: search.sourceUnattributed === "true",
+      sourceMissing: search.sourceMissing === "true",
+      campaign: search.campaign,
+      campaignMissing: search.campaignMissing === "true",
+      landingPage: search.landingPage,
+      landingPageMissing: search.landingPageMissing === "true",
+    });
 
   const client = await createServerClient();
 
@@ -90,6 +127,8 @@ export default async function ProjectSourcesPage({
         from={from}
         to={to}
         coverage={coverage}
+        initialPath={initialPath}
+        initialSelectedMetric={initialSelectedMetric}
       />
     </div>
   );
