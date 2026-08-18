@@ -110,13 +110,12 @@ support ticket), or if a founder asks for it. No fixed schedule — self-service
 
 ## Incident contacts
 
-`SECURITY.md` currently only states "contact the repository owner privately through their GitHub
-profile" — there is no named on-call rotation, incident-response contact list, or escalation path
-documented anywhere in this repository. This runbook intentionally does **not** invent one:
-populate the table below with real contacts before private beta, and link it from `SECURITY.md`.
+Temporary private-beta assignment (decided on #27). A single point of contact for all three roles
+is a stopgap, not a long-term posture — revisit once a dedicated security/legal contact is
+appointed.
 
-| Role                                    | Contact                                 | Notes                                                    |
-| --------------------------------------- | --------------------------------------- | -------------------------------------------------------- |
-| Primary incident owner                  | _(unfilled — operator action required)_ |                                                          |
-| Stripe/billing-data incident escalation | _(unfilled)_                            | e.g. if the platform secret key is suspected compromised |
-| Legal/notification obligations          | _(unfilled)_                            | for any confirmed customer-data exposure                 |
+| Role                                    | Contact  | Notes                                                                  |
+| --------------------------------------- | -------- | ---------------------------------------------------------------------- |
+| Primary incident owner                  | @MrH3lmy |                                                                        |
+| Stripe/billing-data incident escalation | @MrH3lmy | e.g. if the platform secret key is suspected compromised               |
+| Legal/notification obligations          | @MrH3lmy | temporary coordinator until a real legal/security contact is appointed |
