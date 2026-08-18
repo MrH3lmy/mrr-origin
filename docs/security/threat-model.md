@@ -44,20 +44,24 @@ changes.
   (`AllowedDomainService`); a missing/invalid `Origin` header or a disallowed origin is rejected.
 - Request bodies are capped (`IngestionBodyLimitFilter`, 1 MiB) independent of any client-declared
   `Content-Length`.
-- Invalid-key, blocked-origin, and invalid-payload attempts are recorded for the data-health
-  diagnostics screen (`TrackingIngestionFailureRecorder`), not silently dropped.
+- Blocked-origin attempts are always recorded for the data-health diagnostics screen
+  (`TrackingIngestionFailureRecorder`). Invalid-key and invalid-payload attempts are recorded
+  best-effort, only where the request can be attributed to a project: an invalid key is recorded
+  only when `resolveProjectByPrefixForDiagnostics` can still resolve its prefix to a project, and an
+  invalid payload only when the key on the request fully resolves. This is a deliberate
+  privacy-preserving tradeoff (no project attribution is invented for a key that doesn't resolve at
+  all), not an oversight — see `EventIngestionController`.
 
 **Gaps / follow-ups:**
 
-- **No rate limiting.** `ARCHITECTURE.md`'s security baseline states "Public ingestion is
-  rate-limited and constrained by allowed project domains" — only the domain half is built. This is
-  the highest-priority remaining gap in this section and is tracked as a follow-up issue (see
-  private-beta checklist). It is not implemented in this PR because the enforcement mechanism is an
-  open architecture question: an in-process counter is simple but degrades (not fails) once the API
-  is horizontally scaled, which sits in tension with `ARCHITECTURE.md`'s "no correctness-critical
-  state exists only in process memory" rule; a DB-backed sliding-window counter matches the existing
-  checkpoint/idempotency patterns but is more work and needs a migration. Recommended default:
-  DB-backed, scoped per ingestion key.
+- **No rate limiting yet.** `ARCHITECTURE.md`'s security baseline states "Public ingestion is
+  rate-limited and constrained by allowed project domains" — only the domain half is built so far.
+  The contract is now decided (accepted on #27, no longer an open question): a **DB-backed,
+  multi-instance-safe counter** — not in-memory, so enforcement stays correct once the API is
+  horizontally scaled, consistent with `ARCHITECTURE.md`'s "no correctness-critical state exists
+  only in process memory" rule and with the existing checkpoint/idempotency patterns. **Scope:** per
+  ingestion key. **Threshold:** configurable, defaulting to 60 requests/minute. **Over-limit
+  response:** `429` with `Retry-After`. Implementation is tracked as a follow-up child issue of #27.
 
 ## 3. Stripe secrets and webhooks
 
@@ -136,19 +140,28 @@ changes.
 
 **Gaps / follow-ups:**
 
-- **No workspace-wide export.** A founder cannot get one bundle covering billing, revenue,
+- **No workspace-wide export yet.** A founder cannot get one bundle covering billing, revenue,
   attribution, and tracking data across all of a workspace's projects. `ARCHITECTURE.md`'s security
   baseline lists "Data export and deletion are first-class flows before public launch" and the
-  ROADMAP's Phase 6 gate requires it explicitly.
-- **No workspace-wide deletion.** There is no way to delete a workspace and cascade through every
-  module's tenant-owned data (billing raw events/normalized objects, revenue movements, attribution
-  records, notification recipients/deliveries) the way the existing tracking-deletion flow does for
-  one module. This is the single highest-impact remaining gap and is intentionally **not**
-  implemented in this PR: `PRODUCT.md`/`ARCHITECTURE.md` do not state a retention policy (hard delete
-  vs. anonymize, and whether billing/invoice records need a legal/tax retention exception carved out
-  before deletion), and inventing that policy is out of scope for an AI contributor per `AGENTS.md`
-  ("If requirements are ambiguous, record the ambiguity on the issue instead of inventing product
-  behavior"). Posted as an open decision on #27; tracked as a follow-up issue once answered.
+  ROADMAP's Phase 6 gate requires it explicitly. The contract is now decided (accepted on #27):
+  **manager-only**, a **synchronously streamed ZIP** for v1 (no object storage introduced), with a
+  versioned `manifest.json` plus streaming NDJSON files covering every workspace-owned domain.
+  Credentials, secret digests, lease tokens, and other internal security material are excluded.
+  Successful exports are audited (same pattern as the existing CSV export audit), and cross-tenant
+  denial is covered by an automated test. Implementation is tracked as a follow-up child issue of
+  #27.
+- **No workspace-wide deletion yet.** There is no way to delete a workspace and cascade through
+  every module's tenant-owned data (billing raw events/normalized objects, revenue movements,
+  attribution records, notification recipients/deliveries) the way the existing tracking-deletion
+  flow does for one module. This is the highest-impact remaining gap. The contract is now decided
+  (accepted on #27): **owner-only**, requires **explicit confirmation**, and is **resumable and
+  idempotent** (generalizing the existing batched tracking-deletion pattern across modules).
+  Sequence: mark the workspace `deleting` → reject new writes → revoke ingestion keys → disable
+  Stripe sync → hard-delete all workspace-owned billing, acquisition, reporting, notification, and
+  tracking data in dependency-safe batches. MRROrigin does **not** retain copied invoice/event
+  payloads for tax purposes — Stripe remains the billing system of record. Only a minimal, non-PII
+  **deletion tombstone** is retained, for 30 days: request ID, workspace UUID, status, and
+  timestamps. Implementation is tracked as a follow-up child issue of #27, first among the three.
 
 ## 6. Secret and key rotation
 
