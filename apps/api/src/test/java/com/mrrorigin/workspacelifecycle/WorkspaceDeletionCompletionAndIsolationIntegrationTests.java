@@ -6,7 +6,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
@@ -122,10 +124,22 @@ class WorkspaceDeletionCompletionAndIsolationIntegrationTests extends AbstractWo
         seedWorkspaceData(workspaceA, "a", OWNER);
         seedWorkspaceData(workspaceB, "b", OTHER_OWNER);
 
+        Map<String, Long> workspaceBCountsBefore = new LinkedHashMap<>();
+        long populatedTables = 0;
         for (String table : WORKSPACE_OWNED_TABLES) {
-            assertThat(count(table, workspaceA)).as("workspace A precondition: %s", table).isEqualTo(1);
-            assertThat(count(table, workspaceB)).as("workspace B precondition: %s", table).isEqualTo(1);
+            long workspaceACount = count(table, workspaceA);
+            long workspaceBCount = count(table, workspaceB);
+            assertThat(workspaceACount)
+                    .as("matching pre-delete fixture count for %s", table)
+                    .isEqualTo(workspaceBCount);
+            workspaceBCountsBefore.put(table, workspaceBCount);
+            if (workspaceBCount > 0) {
+                populatedTables++;
+            }
         }
+        // Make sure this remains a genuinely cross-module structural test rather than accidentally
+        // degenerating into a few empty-table equality assertions as the schema evolves.
+        assertThat(populatedTables).as("cross-module fixture breadth").isGreaterThan(20);
 
         deletionService.createOrGetRequest(workspaceA, "DELETE " + workspaceA);
         runToCompletion(workspaceA);
@@ -134,7 +148,9 @@ class WorkspaceDeletionCompletionAndIsolationIntegrationTests extends AbstractWo
         assertThat(workspaceExists(workspaceB)).isTrue();
         for (String table : WORKSPACE_OWNED_TABLES) {
             assertThat(count(table, workspaceA)).as("workspace A deleted: %s", table).isZero();
-            assertThat(count(table, workspaceB)).as("workspace B preserved: %s", table).isEqualTo(1);
+            assertThat(count(table, workspaceB))
+                    .as("workspace B preserved exactly: %s", table)
+                    .isEqualTo(workspaceBCountsBefore.get(table));
         }
     }
 
