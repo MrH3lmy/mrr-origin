@@ -11,4 +11,6 @@ interface WorkspaceRepository extends JpaRepository<Workspace, UUID> {
     boolean existsBySlug(String slug);
 
     List<Workspace> findAllByIdIn(Collection<UUID> ids);
+
+    boolean existsByIdAndStatus(UUID id, WorkspaceStatus status);
 }

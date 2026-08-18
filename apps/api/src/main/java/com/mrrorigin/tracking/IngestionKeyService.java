@@ -49,6 +49,23 @@ public class IngestionKeyService {
         return insert(workspaceId, projectId);
     }
 
+    /**
+     * Revokes every active ingestion key across every project in the workspace, in one statement --
+     * the #62 workspace-deletion admission step. Idempotent (only touches {@code revoked_at IS NULL}
+     * rows), so replaying it after a crash is harmless.
+     */
+    @Transactional
+    public int revokeAllForWorkspace(UUID workspaceId) {
+        return jdbc.sql("""
+                UPDATE project_ingestion_keys
+                SET revoked_at = :revokedAt
+                WHERE workspace_id = :workspaceId AND revoked_at IS NULL
+                """)
+                .param("revokedAt", OffsetDateTime.now(ZoneOffset.UTC))
+                .param("workspaceId", workspaceId)
+                .update();
+    }
+
     @Transactional
     public boolean revoke(UUID workspaceId, UUID projectId, UUID keyId) {
         return jdbc.sql("""

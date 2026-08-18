@@ -29,18 +29,19 @@ flowchart TD
 
 ## Backend modules
 
-| Module         | Owns                                                      | May depend on               |
-| -------------- | --------------------------------------------------------- | --------------------------- |
-| `workspace`    | Workspaces, members, projects, reporting settings         | shared kernel only          |
-| `tracking`     | Browser events, sessions, touchpoints, ingestion keys     | workspace                   |
-| `identity`     | Visitors, external users, aliases, customer links         | workspace, tracking         |
-| `billing`      | Stripe connection, raw events, normalized billing objects | workspace                   |
-| `revenue`      | MRR snapshots and movements                               | billing                     |
-| `attribution`  | Models, evidence, coverage, customer attribution          | tracking, identity, revenue |
-| `reporting`    | Read models used by the dashboard and summaries           | attribution, revenue        |
-| `notification` | Scheduled summaries and operational notifications         | reporting                   |
+| Module               | Owns                                                      | May depend on               |
+| -------------------- | --------------------------------------------------------- | --------------------------- |
+| `workspace`          | Workspaces, members, projects, reporting settings         | shared kernel only          |
+| `tracking`           | Browser events, sessions, touchpoints, ingestion keys     | workspace                   |
+| `identity`           | Visitors, external users, aliases, customer links         | workspace, tracking         |
+| `billing`            | Stripe connection, raw events, normalized billing objects | workspace                   |
+| `revenue`            | MRR snapshots and movements                               | billing                     |
+| `attribution`        | Models, evidence, coverage, customer attribution          | tracking, identity, revenue |
+| `reporting`          | Read models used by the dashboard and summaries           | attribution, revenue        |
+| `notification`       | Scheduled summaries and operational notifications         | reporting                   |
+| `workspacelifecycle` | Cross-module workspace deletion orchestration (#62)       | all modules above           |
 
-Modules expose application services or events. Code must not reach into another module's repository or persistence internals.
+Modules expose application services or events. Code must not reach into another module's repository or persistence internals. `workspacelifecycle` is a deliberate, narrow exception to the otherwise-strict dependency order above: per ADR-0008, it is the one module allowed to depend on every other module, because owner-only workspace deletion is the first concern whose job is inherently cross-cutting. Even there, it only calls each module's own exposed `*WorkspaceDataDeletionService`, never another module's repository directly.
 
 ## Data flow
 
@@ -140,6 +141,7 @@ The API must remain horizontally safe: scheduled work uses database leases, inge
 | [ADR-0003](docs/adr/0003-stripe-connection-credential-security.md)        | Stripe Standard-account OAuth consent (`read_only`) plus platform-key/`Stripe-Account` API calls                           |
 | [ADR-0004](docs/adr/0004-v1-mrr-semantics.md)                             | Normalize V1 MRR as auditable recurring-revenue state with explicit effective dates and visible unsupported results        |
 | [ADR-0005](docs/adr/0005-attribution-model-evidence-confidence-window.md) | First-touch/last-touch selection, last-non-direct handling, 90-day window, evidence precedence, and recalculation contract |
+| [ADR-0008](docs/adr/0008-workspace-deletion-lifecycle.md)                 | Owner-only, resumable, cross-module workspace deletion; the one module allowed to depend on all others                     |
 
 ## Deferred decisions
 
