@@ -1,5 +1,6 @@
 package com.mrrorigin.workspacelifecycle;
 
+import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.http.HttpStatus;
@@ -15,10 +16,18 @@ import org.springframework.web.server.ResponseStatusException;
 import com.mrrorigin.workspace.WorkspaceContext;
 
 /**
- * Owner-only, cross-module workspace deletion (#62). Every endpoint requires {@link
- * WorkspaceContext#requireOwner}, a stricter bar than the manager-level check the rest of the API
- * uses -- and, deliberately, one that is never itself gated on the workspace being {@code DELETING},
- * so this flow keeps working for the duration of its own run.
+ * Owner-only, cross-module workspace deletion (#62). Active and in-flight deletion endpoints require
+ * {@link WorkspaceContext#requireOwner}, a stricter bar than the manager-level check the rest of the
+ * API uses -- and, deliberately, one that is never itself gated on the workspace being {@code
+ * DELETING}, so this flow keeps working for the duration of its own run.
+ *
+ * <p>After {@code WORKSPACE_ROOT} completes, the workspace and all membership rows are gone by
+ * contract, so there is no owner row left against which {@code requireOwner} can authenticate a retry.
+ * The surviving tombstone is deliberately forbidden from retaining a member subject id. Completed
+ * requests therefore short-circuit to the tombstone's opaque terminal outcome ({@code DONE}, no
+ * workspace/customer/member data) before membership authorization. This is what makes the required
+ * post-completion status and {@code /run} retries idempotent without weakening authorization for any
+ * live or in-flight workspace, or retaining identity data solely for authorization after deletion.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/deletion")
@@ -37,7 +46,10 @@ public class WorkspaceDeletionController {
 
     @GetMapping
     public WorkspaceDeletionRequestService.DeletionRunOutcome status(@PathVariable UUID workspaceId) {
-        workspaceContext.requireOwner(workspaceId);
+        Optional<WorkspaceDeletionRequestService.DeletionRunOutcome> completed = authorizeOrCompleted(workspaceId);
+        if (completed.isPresent()) {
+            return completed.get();
+        }
         return deletion.status(workspaceId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No deletion request for this workspace"));
     }
@@ -45,20 +57,53 @@ public class WorkspaceDeletionController {
     /**
      * Requires the exact confirmation string {@code "DELETE <workspaceId>"}. Idempotent: a retry with
      * the same (correct) confirmation against a workspace that already has a request returns that
-     * request's current progress instead of starting duplicate work.
+     * request's current progress instead of starting duplicate work. The service still validates the
+     * confirmation on a completed retry before returning its tombstone.
      */
     @PostMapping
     public WorkspaceDeletionRequestService.DeletionRunOutcome create(
             @PathVariable UUID workspaceId, @RequestBody(required = false) DeletionRequestBody body) {
-        workspaceContext.requireOwner(workspaceId);
+        authorizeOrCompleted(workspaceId);
         return deletion.createOrGetRequest(workspaceId, body == null ? null : body.confirmation());
     }
 
     @PostMapping("/run")
     public WorkspaceDeletionRequestService.DeletionRunOutcome run(
             @PathVariable UUID workspaceId, @RequestParam(required = false) Integer maxRows) {
-        workspaceContext.requireOwner(workspaceId);
+        Optional<WorkspaceDeletionRequestService.DeletionRunOutcome> completed = authorizeOrCompleted(workspaceId);
+        if (completed.isPresent()) {
+            return completed.get();
+        }
         return deletion.runBatch(workspaceId, boundedOrDefault(maxRows));
+    }
+
+    /**
+     * Returns the terminal tombstone when the workspace is already gone; otherwise authorizes the
+     * caller as the live workspace owner. The second tombstone check closes the small race where the
+     * root-delete transaction commits between the first check and {@code requireOwner}'s membership
+     * lookup.
+     */
+    private Optional<WorkspaceDeletionRequestService.DeletionRunOutcome> authorizeOrCompleted(UUID workspaceId) {
+        Optional<WorkspaceDeletionRequestService.DeletionRunOutcome> completed = completedOutcome(workspaceId);
+        if (completed.isPresent()) {
+            return completed;
+        }
+        try {
+            workspaceContext.requireOwner(workspaceId);
+            return Optional.empty();
+        } catch (ResponseStatusException ex) {
+            if (ex.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) {
+                completed = completedOutcome(workspaceId);
+                if (completed.isPresent()) {
+                    return completed;
+                }
+            }
+            throw ex;
+        }
+    }
+
+    private Optional<WorkspaceDeletionRequestService.DeletionRunOutcome> completedOutcome(UUID workspaceId) {
+        return deletion.status(workspaceId).filter(WorkspaceDeletionRequestService.DeletionRunOutcome::complete);
     }
 
     private static int boundedOrDefault(Integer requested) {
