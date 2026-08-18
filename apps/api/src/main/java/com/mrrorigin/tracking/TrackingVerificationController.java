@@ -37,6 +37,7 @@ public class TrackingVerificationController {
     @PostMapping
     public VerificationResponse start(@PathVariable UUID workspaceId, @PathVariable UUID projectId) {
         workspaceContext.requireMembership(workspaceId);
+        workspaceContext.requireWritable(workspaceId);
         projectAccess.requireProjectInWorkspace(workspaceId, projectId);
         return VerificationResponse.from(verification.start(workspaceId, projectId));
     }

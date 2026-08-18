@@ -10,14 +10,12 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 /**
- * Purges completed workspace-deletion tombstones older than 30 days (#62's accepted contract).
- * {@code workspace_deletion_requests} plays two roles: while {@code RUNNING} it is
- * {@link WorkspaceDeletionRequestService}'s checkpoint; once {@code COMPLETED} it already contains
- * nothing but the tombstone contract's four fields (request id, workspace UUID, status, timestamps) --
- * see V22's migration comment for why -- so this sweep only has to delete by age, mirroring
- * {@code WeeklySummaryDispatchService#retentionTick}'s cutoff-based cleanup rather than needing its own
- * distributed lock: every statement here is an unconditional, cutoff-scoped {@code DELETE}, so two
- * instances racing the same tick simply divide the same work instead of conflicting.
+ * Purges {@code workspace_deletion_tombstones} rows older than 30 days (#62's accepted contract).
+ * That table already holds nothing but the tombstone contract's fields -- request id, workspace UUID,
+ * status, timestamps -- see V22's migration comment, so this sweep only has to delete by age,
+ * mirroring {@code WeeklySummaryDispatchService#retentionTick}'s cutoff-based cleanup rather than
+ * needing its own distributed lock: every statement here is an unconditional, cutoff-scoped {@code
+ * DELETE}, so two instances racing the same tick simply divide the same work instead of conflicting.
  */
 @Service
 class WorkspaceTombstonePurgeService {
@@ -38,7 +36,7 @@ class WorkspaceTombstonePurgeService {
             initialDelayString = "${mrrorigin.workspacelifecycle.tombstone-purge.initial-delay:PT15M}")
     void purgeExpiredTombstones() {
         OffsetDateTime cutoff = OffsetDateTime.now(clock).minusDays(TOMBSTONE_RETENTION_DAYS);
-        int deleted = jdbc.sql("DELETE FROM workspace_deletion_requests WHERE completed_at < :cutoff")
+        int deleted = jdbc.sql("DELETE FROM workspace_deletion_tombstones WHERE completed_at < :cutoff")
                 .param("cutoff", cutoff)
                 .update();
         if (deleted > 0) {

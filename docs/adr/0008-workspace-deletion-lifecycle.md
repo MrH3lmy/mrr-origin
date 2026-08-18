@@ -48,33 +48,72 @@ Each per-module service is stateless and idempotent across calls — it re-check
 scratch every time rather than keeping its own checkpoint — so the orchestrator's one persisted phase
 per module is the only checkpoint needed anywhere in the system.
 
-### One schema table plays checkpoint and tombstone
+### Two tables: a run that cascades, and a tombstone that survives it
 
-`workspace_deletion_requests` (V22) is a single lifetime row per workspace, `workspace_id` database-
-unique (enforcing "one active deletion request per workspace" — a retry or a second confirmed request
-finds the same row instead of starting duplicate work). While `RUNNING` it is the run's
-phase/row-count checkpoint, locked with `SELECT ... FOR UPDATE` exactly like `project_data_deletion_runs`
-— that row lock is the run's multi-instance-safe lease, since a Postgres row lock is visible to every
-API instance sharing the database. Once `COMPLETED`, the same row already contains nothing but the
-tombstone contract's four fields (request id, workspace UUID, status, timestamps): the confirmation
-string is validated by the controller and never persisted, and no requester subject id is stored
-anywhere, so the row is a compliant tombstone by construction rather than by a separate redaction step.
+An earlier revision of this design used one table for both the in-flight checkpoint and the completed
+tombstone. That does not hold up: a checkpoint row needs `phase`/`rows_deleted` operational columns
+the tombstone contract does not call for, and once the workspace row is gone there is no way to
+retroactively strip a row down to "request id, workspace UUID, status, timestamps" without a second
+write anyway. V22 instead uses two tables with different lifetimes:
+
+- `workspace_deletion_runs` — one row per workspace while a deletion is `RUNNING`, foreign-keyed to
+  `workspaces(id) ON DELETE CASCADE`. `workspace_id` is database-unique (enforcing "one active deletion
+  request per workspace"), and the row is read with `SELECT ... FOR UPDATE` before each batch exactly
+  like `project_data_deletion_runs` — that row lock is the run's multi-instance-safe lease. Being
+  foreign-keyed to `workspaces` means it needs no explicit cleanup: it cascades away in the same
+  `DELETE FROM workspaces` statement that finishes the run.
+- `workspace_deletion_tombstones` — written in that same transaction, immediately before the
+  `workspaces` row is deleted. No foreign key (the row it would reference is gone by the time a later
+  reader looks), and no columns beyond exactly the accepted contract: `id` (the same UUID as the run's
+  `id`, so "request ID" carries through), `workspace_id`, `status`, `requested_at`, `completed_at`. It
+  cannot leak PII because it was never given a column capable of holding any — not a redaction step
+  applied to a row that used to hold more.
+
+**Retry and status correctness after completion.** Because the run row is gone once a deletion
+completes, `WorkspaceDeletionRequestService#status` and `#createOrGetRequest` both fall back to
+`workspace_deletion_tombstones` whenever no run row is found, before concluding "never requested" or
+"safe to start a new run." Getting this fallback right matters more than it looks: an earlier version
+of this design checked only the run table, so a status query issued after completion (or, worse, a
+service-level retry from a caller that does not go through `WorkspaceContext` authorization) would see
+an empty result and either 404 or attempt to start a second, pointless run against a workspace whose
+data is already gone. The fix is symmetric with how the run row disappears: `createOrGetRequest` checks
+the tombstone table first, before ever touching `workspace_deletion_runs`, so a retry against a
+completed deletion is a clean `COMPLETED` no-op rather than a reachable second run.
+
 A daily `@Scheduled` sweep (`WorkspaceTombstonePurgeService`, mirroring
-`WeeklySummaryDispatchService#retentionTick`'s cutoff-based cleanup) deletes rows completed more than 30
-days ago. The table has no foreign key to `workspaces(id)`, since it must outlive the workspace row,
-which is hard-deleted as the run's final phase.
+`WeeklySummaryDispatchService#retentionTick`'s cutoff-based cleanup) deletes tombstone rows completed
+more than 30 days ago.
 
-### Phase order
+### Phase order: leaf-first, matching the module dependency graph
 
-`ADMISSION → REPORTING → ATTRIBUTION → IDENTITY → TRACKING → BILLING → REVENUE → NOTIFICATION →
-WORKSPACE_ROOT → DONE`. This is dependency-safe against the full cross-module foreign-key graph:
+`ADMISSION → NOTIFICATION → REPORTING → ATTRIBUTION → REVENUE → IDENTITY → TRACKING → BILLING →
+WORKSPACE_ROOT → DONE`. Declared in leaf-first order against `ARCHITECTURE.md`'s module table — the
+most-dependent module runs first, exactly the ordering principle each per-module service's own internal
+table order already applies one level down:
+
+- `notification` depends on `reporting` → `NOTIFICATION` before `REPORTING`.
+- `reporting` depends on `attribution`, `revenue` → `REPORTING` before `ATTRIBUTION`/`REVENUE`.
+- `attribution` depends on `tracking`, `identity`, `revenue` → `ATTRIBUTION` before all three.
+- `revenue` depends on `billing` → `REVENUE` before `BILLING`. `billing` and `revenue` have no foreign
+  key between them at all (V7's cross-object references are plain Stripe ID columns by design), so this
+  ordering is settled purely by the module graph, not by a constraint the database would otherwise
+  enforce — but it is the direction a future foreign key between them would need to already be safe for.
+- `identity` depends on `workspace`, `tracking` → `IDENTITY` before `TRACKING`.
+- `tracking` and `billing` depend only on `workspace`, the base of the graph, so they run last among the
+  table-sweep phases (either order is safe between them; `TRACKING` is declared first because `IDENTITY`
+  — which runs just before it — already established a real foreign-key reason to be near it: see below).
+
+This order is also dependency-safe against the real cross-module foreign-key graph, which is strictly
+narrower than the module graph (most module pairs have no foreign key between their tables at all):
 `ATTRIBUTION` (`customer_attribution_results`) runs before `IDENTITY` and `TRACKING` because V10
 restricts deleting touchpoints and Stripe customer links while an attribution result references them;
-`IDENTITY` runs before `TRACKING` because V6/V8 restrict deleting visitors/billing customers while a
-visitor alias or Stripe customer link references them; `NOTIFICATION` runs before `WORKSPACE_ROOT`
-because V20 cascades `weekly_summary_opt_outs` from `workspace_members`, which `WORKSPACE_ROOT` removes.
-`BILLING` and `REVENUE` have no foreign keys between them or to any earlier-swept table (V7's
-cross-object references are plain Stripe ID columns by design), so their relative order does not matter.
+`IDENTITY` runs before `TRACKING` because V6 restricts deleting a visitor while its alias references it,
+and before `BILLING` because V8 restricts deleting a billing customer while a Stripe customer link
+references it; `NOTIFICATION` runs before `WORKSPACE_ROOT` because V20 cascades
+`weekly_summary_opt_outs` from `workspace_members`, which `WORKSPACE_ROOT` removes.
+`AttributionWorkspaceDataDeletionService` also clears `attribution_recalculation_runs` (V11) alongside
+`customer_attribution_results` — easy to miss, since it is operational recalculation bookkeeping rather
+than a derived result, but it is workspace-owned data with no exemption in the accepted contract.
 
 ### Admission stops writes without a check in every controller
 
@@ -101,10 +140,31 @@ workspace DELETING first" ordering. It does three idempotent things:
    admission step deliberately does not depend on an external network call succeeding; revoking Stripe's
    own OAuth grant is a separate, non-blocking concern out of scope here.
 
-The one gap this does not close: a scheduled job with no per-request `WorkspaceContext` and no existing
-status-based gate. `WeeklySummaryDispatchService`'s project-candidate query (`ProjectRepository`) is
-given an explicit `NOT EXISTS (... w.status = DELETING)` filter, closing that one case directly rather
-than inventing a general mechanism for a single caller.
+### Full write-path inventory
+
+`requireManager` closes most authenticated writes in one place, but not all of them, and not the two
+kinds of writes that never go through `WorkspaceContext` at all. Every `@PostMapping`/`@PutMapping`/
+`@PatchMapping`/`@DeleteMapping` in `apps/api` was enumerated and checked against `DELETING`:
+
+| Path                                                                                                                                                                                                                                                | Gate                                 | Status                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every `requireManager`-gated controller/service write (projects, members, ingestion keys, allowed domains, retention settings, Stripe connect/disconnect, Stripe customer link/repair, webhook replay, backfill resume, weekly-summary send/replay) | `requireManager`                     | Covered — 409 once `DELETING`                                                                                                                                                                                                                                                       |
+| Public event ingestion (`EventIngestionController`)                                                                                                                                                                                                 | Ingestion-key revocation             | Covered — keys revoked in `ADMISSION`, `resolve()` only matches non-revoked keys                                                                                                                                                                                                    |
+| Stripe webhook normalization (durable receipt itself is intentionally never blocked, per `ARCHITECTURE.md`'s "webhooks acknowledged only after durable receipt")                                                                                    | Stripe connection status             | Covered — `ADMISSION` disables sync, `StripeBackfillPageRunner`/normalization already gate on `connection.status() == ACTIVE`                                                                                                                                                       |
+| Weekly-summary dispatch tick creating new delivery rows                                                                                                                                                                                             | `ProjectRepository` query filter     | Covered — `NOT EXISTS (... w.status = DELETING)`                                                                                                                                                                                                                                    |
+| Weekly-summary dispatch tick **sending already-queued** delivery rows (`WeeklySummaryDeliveryRepository#claim`)                                                                                                                                     | _(none, until this fix)_             | **Fixed** — a `PENDING`/`FAILED` row queued before `DELETING` would otherwise still be claimed and actually emailed by the next tick, racing the `NOTIFICATION` phase that is about to hard-delete it. `claim`'s claimable-row CTE now excludes rows whose workspace is `DELETING`. |
+| `TrackingVerificationController#start` (self-service, `requireMembership` only — starting an install-verification attempt needs no manager role)                                                                                                    | _(none, until this fix)_             | **Fixed** — added an explicit `WorkspaceContext.requireWritable` call alongside `requireMembership`                                                                                                                                                                                 |
+| `WeeklySummaryOptOutController#updateOptOut` (self-service, a member's own opt-out)                                                                                                                                                                 | _(none, until this fix)_             | **Fixed** — same `requireWritable` addition                                                                                                                                                                                                                                         |
+| `WorkspaceDeletionController#create`/`#run` (the deletion flow's own writes)                                                                                                                                                                        | `requireOwner`, deliberately ungated | Exempt by design — see above                                                                                                                                                                                                                                                        |
+
+The last two needed a new `WorkspaceContext.requireWritable(workspaceId)` method: a self-service write
+gated only by `requireMembership` (not `requireManager`, since it needs no manager role) has no existing
+choke point to inherit the `DELETING` check from. `requireWritable` is the same `requireNotDeleting`
+check `requireManager` already runs internally, exposed for a caller that already has membership but
+needs the write gate without the role gate. This is the concrete instance of a broader rule: any new
+write path that is neither `requireManager`-gated, ingestion-key-gated, nor Stripe-connection-status-
+gated needs one of these two treatments explicitly — there is no third mechanism that catches it for
+free.
 
 ### `projects` and `workspace_members` are never their own phase
 
@@ -130,10 +190,12 @@ explicit that no Stripe invoice/event payload is retained; Stripe remains the sy
   scoped to this one cross-cutting lifecycle/security-boundary concern.
 - `WorkspaceContext.requireManager` now has a side effect (a 409 once `DELETING`) that every existing
   caller inherits automatically; no other module needed to change to get workspace-wide write rejection.
-- A scheduled job that is added later and writes tenant-owned data on its own trigger (not behind
-  `requireManager`, an ingestion key, or a Stripe connection) needs its own explicit `DELETING` filter,
-  the same way `WeeklySummaryDispatchService`'s candidate query does — this is a pattern to repeat, not
-  a guarantee the platform enforces automatically for every future scheduled job.
+- A write path that is neither `requireManager`-gated, ingestion-key-gated, nor Stripe-connection-
+  status-gated — a self-service `requireMembership`-only write, or a scheduled job's own claim/candidate
+  query — needs an explicit `DELETING` check added by hand (`WorkspaceContext.requireWritable`, or a SQL
+  filter matching `WeeklySummaryDeliveryRepository#claim`'s). This is a pattern to repeat for each new
+  case, not a guarantee the platform enforces automatically; the full inventory above is the checklist
+  a future write path should be checked against.
 - Deleting a workspace is irreversible from the moment `ADMISSION` runs: there is no API to move a
   workspace back to `ACTIVE`, matching the product decision that this is a one-way action gated by an
   explicit typed confirmation.

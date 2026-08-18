@@ -60,7 +60,8 @@ abstract class AbstractWorkspaceLifecycleIntegrationTest {
 
     @BeforeEach
     void clearState() {
-        new JdbcTemplate(dataSource).execute("TRUNCATE TABLE workspaces, workspace_deletion_requests CASCADE");
+        new JdbcTemplate(dataSource)
+                .execute("TRUNCATE TABLE workspaces, workspace_deletion_runs, workspace_deletion_tombstones CASCADE");
     }
 
     RequestPostProcessor token(String subject) {
@@ -481,6 +482,18 @@ abstract class AbstractWorkspaceLifecycleIntegrationTest {
                 .param("stripeCustomerId", stripeCustomerId)
                 .param("stripeSubscriptionId", stripeSubscriptionId)
                 .param("ref", "test-" + UUID.randomUUID())
+                .update();
+    }
+
+    void insertAttributionRecalculationRun(UUID workspaceId, UUID projectId) {
+        jdbc.sql("""
+                        INSERT INTO attribution_recalculation_runs
+                            (id, workspace_id, project_id, model_version, status, started_at, updated_at)
+                        VALUES (:id, :workspaceId, :projectId, 'attribution-v1', 'RUNNING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """)
+                .param("id", UUID.randomUUID())
+                .param("workspaceId", workspaceId)
+                .param("projectId", projectId)
                 .update();
     }
 

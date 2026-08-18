@@ -116,6 +116,18 @@ public class WorkspaceContext {
         return membership;
     }
 
+    /**
+     * Rejects a mutating call with {@code 409} once the workspace is {@code DELETING}, without
+     * requiring manager/owner role -- for a self-service write gated only by {@link
+     * #requireMembership} (e.g. a member's own weekly-summary opt-out, or starting a tracker
+     * verification attempt). #62's accepted contract rejects every authenticated write once a
+     * workspace is {@code DELETING}, not only manager-gated ones; {@link #requireManager} already
+     * calls this internally, so callers only need it explicitly alongside {@link #requireMembership}.
+     */
+    public void requireWritable(UUID workspaceId) {
+        requireNotDeleting(workspaceId);
+    }
+
     private void requireNotDeleting(UUID workspaceId) {
         if (!workspaceRepository.existsByIdAndStatus(workspaceId, WorkspaceStatus.ACTIVE)) {
             throw new ResponseStatusException(CONFLICT, "Workspace is being deleted");

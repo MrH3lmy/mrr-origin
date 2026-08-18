@@ -252,6 +252,28 @@ class WeeklySummaryDeliveryIntegrationTests {
         assertThat(statusFor(OWNER)).isEqualTo("SENT");
     }
 
+    // -- Workspace deletion (#62) --
+
+    @Test
+    void claimBatchExcludesDeliveriesForAWorkspaceThatIsDeleting() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-03-09T09:00:00Z");
+        deliveryRepository.createIfAbsent(workspace, project, OWNER, "owner@example.com", DUE_WEEK_START, now);
+
+        db.sql("UPDATE workspaces SET status = 'DELETING' WHERE id = :w").param("w", workspace).update();
+
+        // #62: a delivery row queued before the workspace entered DELETING must never actually be
+        // sent -- the workspace-deletion NOTIFICATION phase is about to hard-delete this row
+        // regardless, and a scheduled dispatch tick racing that phase must not email it in the
+        // meantime. Only the ProjectRepository candidate-query filter (stopping *new* rows from being
+        // created for a DELETING workspace) existed before this fix; an already-PENDING row had no
+        // guard at all until claimBatch's claimable-row query gained one.
+        assertThat(deliveryRepository.claimBatch(10, now)).isEmpty();
+        assertThat(statusFor(OWNER)).isEqualTo("PENDING"); // never claimed, so untouched
+
+        db.sql("UPDATE workspaces SET status = 'ACTIVE' WHERE id = :w").param("w", workspace).update();
+        assertThat(deliveryRepository.claimBatch(10, now)).hasSize(1);
+    }
+
     @Test
     void ambiguousNetworkFailureIsRecordedDistinctlyInTheAuditTrail() {
         // Delivery guarantee (corrected, required): an ambiguous outcome (we don't know if Postmark

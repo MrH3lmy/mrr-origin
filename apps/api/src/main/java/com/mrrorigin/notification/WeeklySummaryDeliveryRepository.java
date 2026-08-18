@@ -116,10 +116,17 @@ class WeeklySummaryDeliveryRepository {
         String sql =
                 """
                 WITH claimable AS (
-                    SELECT id FROM weekly_summary_deliveries
+                    SELECT id FROM weekly_summary_deliveries wsd
                     WHERE %s (
                         (status IN ('PENDING', 'FAILED') AND next_attempt_at <= :now)
                         OR (status = 'SENDING' AND lease_until <= :now)
+                    )
+                    -- #62: a workspace mid-deletion must never have a delivery actually sent, even one
+                    -- already PENDING/FAILED from before deletion started -- the NOTIFICATION phase
+                    -- will hard-delete this row shortly regardless, but a scheduled tick racing that
+                    -- phase must not email it in the meantime.
+                    AND NOT EXISTS (
+                        SELECT 1 FROM workspaces w WHERE w.id = wsd.workspace_id AND w.status = 'DELETING'
                     )
                     ORDER BY next_attempt_at ASC
                     LIMIT :batchSize

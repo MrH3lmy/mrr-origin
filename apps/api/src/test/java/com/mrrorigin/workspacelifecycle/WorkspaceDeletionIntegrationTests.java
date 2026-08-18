@@ -3,6 +3,7 @@ package com.mrrorigin.workspacelifecycle;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -11,7 +12,9 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -37,9 +40,11 @@ import com.mrrorigin.tracking.IngestionKeyService;
 
 /**
  * #62's owner-only, resumable, cross-module workspace deletion: owner success, non-owner rejection,
- * cross-tenant concealment, confirmation mismatch, duplicate/concurrent requests, crash/resume, write
- * rejection once {@code DELETING}, ingestion-key/Stripe-sync admission effects, dependency-safe
- * complete deletion, and tombstone contents/cleanup.
+ * cross-tenant concealment, confirmation mismatch, duplicate/concurrent requests, crash/resume, the
+ * full authenticated-write-path inventory (including the two self-service gaps requireManager alone
+ * did not cover) once {@code DELETING}, ingestion-key/Stripe-sync admission effects, leaf-first phase
+ * ordering (revenue before billing), dependency-safe complete deletion, tombstone strict-schema
+ * contents/cleanup, and correct retry/status behavior after a run has already completed.
  */
 @Testcontainers
 @Import(WorkspaceDeletionIntegrationTests.FixedClockConfiguration.class)
@@ -72,7 +77,7 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(confirmationBody(workspaceId)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.phase").value("REPORTING"));
+                .andExpect(jsonPath("$.phase").value("NOTIFICATION"));
 
         var outcome = runToCompletion(workspaceId, 500);
         assertThat(outcome.complete()).isTrue();
@@ -138,7 +143,7 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
         var retry = deletionService.createOrGetRequest(sequentialWorkspace, "DELETE " + sequentialWorkspace);
         assertThat(retry.phase()).isEqualTo(first.phase());
         assertThat(retry.totalRowsDeleted()).isEqualTo(first.totalRowsDeleted());
-        assertThat(count("workspace_deletion_requests", sequentialWorkspace)).isEqualTo(1);
+        assertThat(count("workspace_deletion_runs", sequentialWorkspace)).isEqualTo(1);
 
         UUID concurrentWorkspace = createWorkspace(OWNER);
         ExecutorService pool = Executors.newFixedThreadPool(4);
@@ -162,7 +167,31 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
         } finally {
             pool.shutdown();
         }
-        assertThat(count("workspace_deletion_requests", concurrentWorkspace)).isEqualTo(1);
+        assertThat(count("workspace_deletion_runs", concurrentWorkspace)).isEqualTo(1);
+    }
+
+    @Test
+    void retryAfterCompletionReturnsTheTombstoneInsteadOfStartingANewRun() throws Exception {
+        UUID workspaceId = createWorkspace(OWNER);
+        deletionService.createOrGetRequest(workspaceId, "DELETE " + workspaceId);
+        var completed = runToCompletion(workspaceId, 500);
+        assertThat(completed.complete()).isTrue();
+        // The run row cascaded away with the workspace row; only the tombstone remains.
+        assertThat(count("workspace_deletion_runs", workspaceId)).isZero();
+        assertThat(count("workspace_deletion_tombstones", workspaceId)).isEqualTo(1);
+
+        // A retry with the correct confirmation must not resurrect a run for a workspace whose data
+        // is already gone -- createOrGetRequest checks the tombstone table before ever touching
+        // workspace_deletion_runs.
+        var retryOutcome = deletionService.createOrGetRequest(workspaceId, "DELETE " + workspaceId);
+        assertThat(retryOutcome.complete()).isTrue();
+        assertThat(retryOutcome.phase()).isEqualTo("DONE");
+        assertThat(count("workspace_deletion_runs", workspaceId)).isZero();
+        assertThat(count("workspace_deletion_tombstones", workspaceId)).isEqualTo(1); // still exactly one
+
+        // status() must also fall back to the tombstone once the run row no longer exists, rather than
+        // reporting "no deletion" for a workspace that was, in fact, deleted.
+        assertThat(deletionService.status(workspaceId)).contains(retryOutcome);
     }
 
     @Test
@@ -194,7 +223,7 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
     }
 
     @Test
-    void writesAreRejectedOnceTheWorkspaceIsDeleting() throws Exception {
+    void managerGatedWritesAreRejectedOnceTheWorkspaceIsDeleting() throws Exception {
         UUID workspaceId = createWorkspace(OWNER);
         deletionService.createOrGetRequest(workspaceId, "DELETE " + workspaceId);
 
@@ -203,6 +232,37 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"Blocked\",\"domain\":\"blocked.example.com\",\"timezone\":\"UTC\"}"))
                 .andExpect(status().isConflict());
+    }
+
+    /**
+     * The two self-service writes gated only by {@code requireMembership} (no manager role needed) --
+     * found by enumerating every {@code @Post,@Put,@Patch,@DeleteMapping} in the codebase and checking
+     * each against {@code DELETING}. Neither was covered by the centralized {@code requireManager}
+     * guard alone; both needed an explicit {@code WorkspaceContext#requireWritable} call. Reads on the
+     * same controllers, and an unrelated workspace-scoped read, must keep working throughout.
+     */
+    @Test
+    void selfServiceWritesAreRejectedOnceDeletingButReadsKeepWorking() throws Exception {
+        UUID workspaceId = createWorkspace(OWNER);
+        UUID projectId = createProject(workspaceId);
+        deletionService.createOrGetRequest(workspaceId, "DELETE " + workspaceId);
+
+        mvc.perform(post(verificationPath(workspaceId, projectId)).with(token(OWNER)))
+                .andExpect(status().isConflict());
+        // The read counterpart reaches the service (a 404 "no attempt exists yet", not a 409) --
+        // proving the read path itself was never gated.
+        mvc.perform(get(verificationPath(workspaceId, projectId)).with(token(OWNER)))
+                .andExpect(status().isNotFound());
+
+        mvc.perform(put(optOutPath(workspaceId, projectId))
+                        .with(token(OWNER))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"optedOut\":true}"))
+                .andExpect(status().isConflict());
+        mvc.perform(get(optOutPath(workspaceId, projectId)).with(token(OWNER))).andExpect(status().isOk());
+
+        // A workspace-scoped read entirely unrelated to deletion also keeps working throughout.
+        mvc.perform(get(deletionPath(workspaceId)).with(token(OWNER))).andExpect(status().isOk());
     }
 
     @Test
@@ -225,6 +285,32 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
                         .single())
                 .isEqualTo("DISCONNECTED");
         assertThat(ingestionKeys.getActive(workspaceId, projectId)).isEmpty();
+    }
+
+    /**
+     * Leaf-first phase order (#62 review): {@code revenue} depends on {@code billing}, so {@code
+     * REVENUE} must be fully drained before {@code BILLING} starts, even though no real foreign key
+     * connects their tables (V7's cross-object references are plain Stripe ID columns by design).
+     */
+    @Test
+    void revenueIsFullyClearedBeforeBillingPhaseStarts() {
+        UUID workspaceId = createWorkspace(OWNER);
+        insertBillingCustomer(workspaceId, "cus_1");
+        insertMrrMovement(workspaceId, "cus_1");
+
+        var outcome = deletionService.createOrGetRequest(workspaceId, "DELETE " + workspaceId);
+        List<String> atOrBeforeRevenue = List.of("ADMISSION", "NOTIFICATION", "REPORTING", "ATTRIBUTION", "REVENUE");
+        int guard = 0;
+        while (atOrBeforeRevenue.contains(outcome.phase())) {
+            outcome = deletionService.runBatch(workspaceId, 50);
+            guard++;
+            if (guard > 100) {
+                throw new AssertionError("Did not advance past REVENUE within a bounded number of batches");
+            }
+        }
+
+        assertThat(count("customer_mrr_movements", workspaceId)).isZero();
+        assertThat(count("billing_customers", workspaceId)).isEqualTo(1); // BILLING phase has not run yet
     }
 
     @Test
@@ -265,6 +351,7 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
         insertRevenueSubscriptionState(workspaceId, "cus_1", "sub_1");
 
         insertAttributionResult(workspaceId, projectId, movementId, touchpoint, linkId);
+        insertAttributionRecalculationRun(workspaceId, projectId);
 
         insertExportAuditLog(workspaceId, projectId);
         insertWeeklySummaryDelivery(workspaceId, projectId, MEMBER);
@@ -303,6 +390,7 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
                 "customer_mrr_snapshots",
                 "revenue_subscription_states",
                 "customer_attribution_results",
+                "attribution_recalculation_runs",
                 "export_audit_log",
                 "weekly_summary_deliveries",
                 "weekly_summary_opt_outs",
@@ -314,34 +402,43 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
     }
 
     @Test
-    void tombstoneContainsOnlyNonPiiFieldsAndIsPurgedAfter30Days() throws Exception {
+    void tombstoneContainsOnlyTheContractedFieldsAndIsPurgedAfter30Days() throws Exception {
         UUID workspaceId = createWorkspace(OWNER);
         deletionService.createOrGetRequest(workspaceId, "DELETE " + workspaceId);
         var outcome = runToCompletion(workspaceId, 500);
         assertThat(outcome.complete()).isTrue();
 
-        String status = jdbc().sql("SELECT status FROM workspace_deletion_requests WHERE workspace_id = :w")
+        // The strict schema is the proof, not just an assertion on the values read back:
+        // workspace_deletion_tombstones has exactly five columns -- there is no column capable of
+        // holding a requester subject id, customer data, or billing data in the first place.
+        Map<String, Object> row = jdbc().sql("SELECT * FROM workspace_deletion_tombstones WHERE workspace_id = :w")
                 .param("w", workspaceId)
-                .query(String.class)
+                .query((rs, rowNum) -> {
+                    Map<String, Object> values = new LinkedHashMap<>();
+                    var meta = rs.getMetaData();
+                    for (int i = 1; i <= meta.getColumnCount(); i++) {
+                        values.put(meta.getColumnLabel(i), rs.getObject(i));
+                    }
+                    return values;
+                })
                 .single();
-        String phase = jdbc().sql("SELECT phase FROM workspace_deletion_requests WHERE workspace_id = :w")
-                .param("w", workspaceId)
-                .query(String.class)
-                .single();
-        assertThat(status).isEqualTo("COMPLETED");
-        assertThat(phase).isEqualTo("DONE");
+        assertThat(row.keySet()).containsExactlyInAnyOrder("id", "workspace_id", "status", "requested_at", "completed_at");
+        assertThat(row.get("status")).isEqualTo("COMPLETED");
+        assertThat(row.get("completed_at")).isNotNull();
+        // Cascaded away, not merely emptied -- there is no lingering operational row to purge separately.
+        assertThat(count("workspace_deletion_runs", workspaceId)).isZero();
 
         // A fresh tombstone survives a purge tick.
         purgeService.purgeExpiredTombstones();
-        assertThat(count("workspace_deletion_requests", workspaceId)).isEqualTo(1);
+        assertThat(count("workspace_deletion_tombstones", workspaceId)).isEqualTo(1);
 
         // Aged past 30 days, the next tick purges it.
-        jdbc().sql("UPDATE workspace_deletion_requests SET completed_at = :old WHERE workspace_id = :w")
+        jdbc().sql("UPDATE workspace_deletion_tombstones SET completed_at = :old WHERE workspace_id = :w")
                 .param("old", OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC).minusDays(31))
                 .param("w", workspaceId)
                 .update();
         purgeService.purgeExpiredTombstones();
-        assertThat(count("workspace_deletion_requests", workspaceId)).isZero();
+        assertThat(count("workspace_deletion_tombstones", workspaceId)).isZero();
     }
 
     private WorkspaceDeletionRequestService.DeletionRunOutcome runToCompletion(UUID workspaceId, int maxRows) {
@@ -363,6 +460,14 @@ class WorkspaceDeletionIntegrationTests extends AbstractWorkspaceLifecycleIntegr
 
     private static String confirmationBody(UUID workspaceId) {
         return "{\"confirmation\":\"DELETE %s\"}".formatted(workspaceId);
+    }
+
+    private static String verificationPath(UUID workspaceId, UUID projectId) {
+        return "/api/workspaces/%s/projects/%s/tracking/verification".formatted(workspaceId, projectId);
+    }
+
+    private static String optOutPath(UUID workspaceId, UUID projectId) {
+        return "/api/workspaces/%s/projects/%s/notifications/weekly-summary/opt-out".formatted(workspaceId, projectId);
     }
 
     @TestConfiguration(proxyBeanMethods = false)
