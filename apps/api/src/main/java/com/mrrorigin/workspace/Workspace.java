@@ -6,6 +6,8 @@ import java.util.UUID;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
@@ -29,6 +31,10 @@ public class Workspace {
     @Column(name = "reporting_currency", nullable = false, length = 3)
     private String reportingCurrency;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 16)
+    private WorkspaceStatus status;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
@@ -42,6 +48,7 @@ public class Workspace {
         this.name = name;
         this.slug = slug;
         this.reportingCurrency = reportingCurrency;
+        this.status = WorkspaceStatus.ACTIVE;
         this.createdAt = OffsetDateTime.now(ZoneOffset.UTC);
         this.updatedAt = createdAt;
     }
@@ -60,6 +67,15 @@ public class Workspace {
 
     String reportingCurrency() {
         return reportingCurrency;
+    }
+
+    WorkspaceStatus status() {
+        return status;
+    }
+
+    /** Marks the workspace as being deleted; {@link WorkspaceContext} rejects further mutations once set. */
+    void markDeleting() {
+        this.status = WorkspaceStatus.DELETING;
     }
 
     OffsetDateTime createdAt() {

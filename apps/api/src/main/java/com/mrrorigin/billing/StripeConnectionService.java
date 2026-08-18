@@ -224,6 +224,35 @@ public class StripeConnectionService {
         return ConnectionOutcome.from(connection);
     }
 
+    /**
+     * Disables Stripe sync for #62's workspace-deletion flow: same deauthorize-and-mark logic as
+     * {@link #disconnect}, but skips the {@code requireManager} check (the deletion flow already
+     * authorized the caller as workspace owner, a stricter bar) and treats "no connection" or
+     * "already disconnected" as an already-satisfied no-op rather than a 404, since deletion must be
+     * able to proceed for a workspace that never connected Stripe at all.
+     */
+    @Transactional
+    public void disconnectForWorkspaceDeletion(UUID workspaceId) {
+        StripeConnection connection = connections.findByWorkspaceId(workspaceId).orElse(null);
+        if (connection == null || connection.status() == StripeConnectionStatus.DISCONNECTED) {
+            return;
+        }
+        StripeDeauthorizationOutcome outcome = stripeClient.deauthorize(connection.mode(), connection.stripeAccountId());
+        switch (outcome) {
+            case CONFIRMED -> {
+                connection.markDisconnected();
+                connections.saveAndFlush(connection);
+            }
+            case REJECTED ->
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_GATEWAY, "Stripe rejected the disconnect request; workspace deletion cannot proceed yet");
+            case UNREACHABLE ->
+                throw new ResponseStatusException(
+                        HttpStatus.SERVICE_UNAVAILABLE,
+                        "Stripe could not be reached to confirm the disconnect; workspace deletion cannot proceed yet");
+        }
+    }
+
     private void verifyAndUpdateStatus(StripeConnection connection) {
         StripeVerificationOutcome outcome =
                 stripeClient.verifyAccountAccess(connection.mode(), connection.stripeAccountId());

@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.context.annotation.RequestScope;
 import org.springframework.web.server.ResponseStatusException;
 
+import static org.springframework.http.HttpStatus.CONFLICT;
 import static org.springframework.http.HttpStatus.FORBIDDEN;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
@@ -20,12 +21,17 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 public class WorkspaceContext {
 
     private final WorkspaceMemberRepository memberRepository;
+    private final WorkspaceRepository workspaceRepository;
     private final WorkspaceMemberEmailCaptureService emailCaptureService;
     private final Map<UUID, WorkspaceMember> memberships = new HashMap<>();
     private String subjectId;
 
-    public WorkspaceContext(WorkspaceMemberRepository memberRepository, WorkspaceMemberEmailCaptureService emailCaptureService) {
+    public WorkspaceContext(
+            WorkspaceMemberRepository memberRepository,
+            WorkspaceRepository workspaceRepository,
+            WorkspaceMemberEmailCaptureService emailCaptureService) {
         this.memberRepository = memberRepository;
+        this.workspaceRepository = workspaceRepository;
         this.emailCaptureService = emailCaptureService;
     }
 
@@ -80,10 +86,35 @@ public class WorkspaceContext {
 
     public WorkspaceMember requireManager(UUID workspaceId) {
         WorkspaceMember membership = requireMembership(workspaceId);
+        requireNotDeleting(workspaceId);
         if (!membership.role().canManage()) {
             throw new ResponseStatusException(FORBIDDEN, "Workspace management permission required");
         }
         return membership;
+    }
+
+    /** Stricter than {@link #requireManager}: only the workspace owner, e.g. for #62's workspace deletion. */
+    public WorkspaceMember requireOwner(UUID workspaceId) {
+        WorkspaceMember membership = requireMembership(workspaceId);
+        requireNotDeleting(workspaceId);
+        if (membership.role() != WorkspaceRole.OWNER) {
+            throw new ResponseStatusException(FORBIDDEN, "Workspace owner permission required");
+        }
+        return membership;
+    }
+
+    /**
+     * Rejects mutations once a workspace has entered #62's DELETING state -- deliberately not applied
+     * inside {@link #requireMembership} itself, so reads (including "is my workspace being deleted")
+     * keep working throughout. The deletion flow's own endpoints authorize the caller directly against
+     * {@link #requireMembership} instead of {@link #requireManager}/{@link #requireOwner}, so they are
+     * never blocked by their own state transition.
+     */
+    private void requireNotDeleting(UUID workspaceId) {
+        Workspace workspace = workspaceRepository.findById(workspaceId).orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Workspace not found"));
+        if (workspace.status() == WorkspaceStatus.DELETING) {
+            throw new ResponseStatusException(CONFLICT, "Workspace is being deleted");
+        }
     }
 
     /**

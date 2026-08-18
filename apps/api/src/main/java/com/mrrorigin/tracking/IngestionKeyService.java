@@ -49,6 +49,24 @@ public class IngestionKeyService {
         return insert(workspaceId, projectId);
     }
 
+    /**
+     * Revokes every active key across every project in a workspace in one statement, for #62's
+     * workspace-deletion flow. Unlike {@link #revoke}, this is not scoped to one project and does not
+     * validate the caller's authorization -- the deletion flow has already authorized the caller as
+     * the workspace owner before reaching this point.
+     */
+    @Transactional
+    public int revokeAllForWorkspace(UUID workspaceId) {
+        return jdbc.sql("""
+                UPDATE project_ingestion_keys
+                SET revoked_at = :revokedAt
+                WHERE workspace_id = :workspaceId AND revoked_at IS NULL
+                """)
+                .param("revokedAt", OffsetDateTime.now(ZoneOffset.UTC))
+                .param("workspaceId", workspaceId)
+                .update();
+    }
+
     @Transactional
     public boolean revoke(UUID workspaceId, UUID projectId, UUID keyId) {
         return jdbc.sql("""
