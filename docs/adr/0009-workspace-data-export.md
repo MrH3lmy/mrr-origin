@@ -93,23 +93,26 @@ future column added to an owned table is excluded by default rather than silentl
 concrete exclusions applied against `docs/security/threat-model.md`'s export guidance and #64's
 named categories:
 
-| Category (from #64)    | Concrete column(s) excluded                                                                                                                                                                                                                |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Credentials            | `tracking_verification_attempts.token` (single-use bearer credential)                                                                                                                                                                      |
-| Secret digests         | `project_ingestion_keys.secret_hash`; `stripe_oauth_states` (entire table — CSRF state hash, ephemeral security bookkeeping, not workspace business data)                                                                                  |
-| Ingestion-key secrets  | `project_ingestion_keys.secret_hash`                                                                                                                                                                                                       |
-| Stripe/webhook secrets | Never stored in the database at all (ADR-0003: platform key and webhook signing secrets are process environment configuration, never a per-workspace row) — `stripe_oauth_states` excluded regardless, as ephemeral OAuth CSRF bookkeeping |
-| Lease tokens           | `weekly_summary_deliveries.lease_token` / `.lease_until`                                                                                                                                                                                   |
-| Checkpoint tokens      | `stripe_connections.sync_checkpoint`                                                                                                                                                                                                       |
+| Category (from #64)                               | Concrete column(s) excluded                                                                                                                                                                                                                |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Credentials                                       | `tracking_verification_attempts.token` (single-use bearer credential)                                                                                                                                                                      |
+| Secret digests                                    | `project_ingestion_keys.secret_hash`; `stripe_oauth_states` (entire table — CSRF state hash, ephemeral security bookkeeping, not workspace business data)                                                                                  |
+| Ingestion-key secrets                             | `project_ingestion_keys.secret_hash`                                                                                                                                                                                                       |
+| Stripe/webhook secrets                            | Never stored in the database at all (ADR-0003: platform key and webhook signing secrets are process environment configuration, never a per-workspace row) — `stripe_oauth_states` excluded regardless, as ephemeral OAuth CSRF bookkeeping |
+| Lease tokens                                      | `weekly_summary_deliveries.lease_token` / `.lease_until`                                                                                                                                                                                   |
+| Checkpoint tokens                                 | `stripe_connections.sync_checkpoint`                                                                                                                                                                                                       |
+| (raw verification artifact, not a named category) | `stripe_webhook_events.raw_payload` — the exact signed bytes kept only for cryptographic signature verification; the same row's parsed `payload` column is included and carries the business data                                          |
 
-`stripe_webhook_events` (raw/parsed Stripe webhook payload queue) is excluded from the billing
-domain entirely: it is operational ingestion bookkeeping (replay/attempt counters, the exact signed
-bytes used for cryptographic verification), not the workspace's normalized billing ledger, which is
-already fully represented by `billing_customers`/`billing_prices`/`billing_subscriptions`(+items,
-status events)/`billing_invoices`/`billing_payments`/`billing_refunds`/`billing_discounts`. This is a
-scoping choice within the "billing domain," not a narrowing of the accepted contract's five other
-domains or its named exclusion categories; flagged here and in the #64 PR for review rather than
-silently decided.
+**Revised on review (#78):** an earlier revision of this ADR excluded `stripe_webhook_events`
+entirely from `billing.ndjson`, reasoning it was "operational ingestion bookkeeping, not the
+normalized billing ledger." Review on #78 correctly rejected that: #64's accepted contract is a
+complete export of everything MRROrigin holds for the workspace, and "raw ingestion/replay data" is
+not itself security material — it does not belong on the same list as a signing secret, an
+OAuth-state hash, or a checkpoint token, and excluding a whole table for that reason is a real
+narrowing of the contract, not a scoping detail. `stripe_webhook_events` is now included in
+`billing.ndjson` with an explicit column allow-list, excluding only `raw_payload` (the table's one
+genuinely security/verification-only column — see the table above) while keeping the parsed
+`payload` JSONB column, `processing_state`, and every other business/operational column.
 
 ## Consequences
 
@@ -122,6 +125,6 @@ silently decided.
   trade-off `*WorkspaceDataDeletionService`'s explicit `TABLES_IN_ORDER` lists already make for
   deletion, and the reason the exclusion regression tests assert against literal forbidden values
   rather than only against a table/column list.
-- `stripe_webhook_events` raw payload export is a follow-up if a future need for raw Stripe replay
-  data in the export bundle is identified; not building it now keeps this issue's scope to the
-  normalized ledger the rest of the product already treats as the billing system's shape.
+- `stripe_webhook_events.raw_payload` (the raw signed bytes) remains excluded; a future need to
+  re-verify or replay the exact original webhook signature from an export would need a dedicated,
+  explicitly-scoped follow-up, not a default inclusion.

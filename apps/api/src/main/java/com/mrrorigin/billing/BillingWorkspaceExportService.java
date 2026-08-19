@@ -12,23 +12,27 @@ import com.mrrorigin.workspace.WorkspaceExportStreaming;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * The billing module's own slice of #64's cross-module workspace export: streams every row of the
- * normalized billing ledger this module owns as NDJSON. Scoped to
- * {@code billing_customers}/{@code billing_prices}/{@code billing_subscriptions} (+ items, status
- * events)/{@code billing_invoices}/{@code billing_payments}/{@code billing_refunds}/{@code
- * billing_discounts} plus {@code stripe_connections}' non-secret connection metadata -- the
- * workspace's normalized billing state, matching what {@code BillingWorkspaceDataDeletionService}
- * calls "the billing ledger."
+ * The billing module's own slice of #64's cross-module workspace export: streams every row of
+ * workspace-owned billing data as NDJSON -- the normalized ledger ({@code billing_customers}/{@code
+ * billing_prices}/{@code billing_subscriptions} (+ items, status events)/{@code billing_invoices}/
+ * {@code billing_payments}/{@code billing_refunds}/{@code billing_discounts}), {@code
+ * stripe_connections}' non-secret connection metadata, and {@code stripe_webhook_events}' inbound
+ * event history -- since a complete export is everything MRROrigin holds for the workspace, not only
+ * the module's own "ledger" summary of it (per review on #78: raw ingestion/replay data is not
+ * itself security material and does not get excluded merely for being raw).
  *
- * <p>Deliberately excludes, per #64's accepted contract and ADR-0009:
+ * <p>Deliberately excludes, per #64's accepted contract and ADR-0009 -- genuine security-only
+ * material, never a whole table simply because it holds operational/ingestion data:
  * <ul>
  *   <li>{@code stripe_connections.sync_checkpoint} -- a reserved backfill checkpoint field
  *       ("checkpoint tokens").
  *   <li>{@code stripe_oauth_states} entirely -- ephemeral OAuth CSRF state, keyed by a hash of a
  *       one-time secret ("secret digests"), never workspace business data.
- *   <li>{@code stripe_webhook_events} entirely -- raw/parsed Stripe webhook ingestion bookkeeping
- *       (replay/attempt counters, the exact signed bytes used for cryptographic verification), not
- *       the normalized billing ledger; see ADR-0009 for the scoping rationale.
+ *   <li>{@code stripe_webhook_events.raw_payload} -- the exact signed bytes verified against
+ *       Stripe's signature header, kept only as a cryptographic-verification artifact (V5's own
+ *       comment: "the only source of truth for what Stripe actually sent and signed"), not a second
+ *       copy of business data -- the same event's parsed {@code payload} JSONB column is included
+ *       and carries every business-relevant field.
  * </ul>
  *
  * No per-workspace Stripe credential is ever stored in this database at all (ADR-0003): the platform
@@ -88,6 +92,12 @@ public class BillingWorkspaceExportService {
             created_at, updated_at, connected_at, disconnected_at, last_verified_at,
             last_verification_failed_at
             """;
+    // raw_payload deliberately omitted -- see class Javadoc; payload (parsed) carries the same data.
+    private static final String WEBHOOK_EVENT_COLUMNS = """
+            id, stripe_event_id, stripe_account_id, mode, connection_id, workspace_id, event_type,
+            api_version, stripe_created_at, received_at, payload, processing_state, attempt_count,
+            last_attempted_at, last_error, replay_count, last_replayed_at, updated_at
+            """;
 
     private final JdbcClient jdbc;
     private final ObjectMapper objectMapper;
@@ -110,6 +120,7 @@ public class BillingWorkspaceExportService {
         count += stream(workspaceId, out, "billing_refunds", REFUND_COLUMNS, mapper);
         count += stream(workspaceId, out, "billing_discounts", DISCOUNT_COLUMNS, mapper);
         count += stream(workspaceId, out, "stripe_connections", STRIPE_CONNECTION_COLUMNS, mapper);
+        count += stream(workspaceId, out, "stripe_webhook_events", WEBHOOK_EVENT_COLUMNS, mapper);
         return count;
     }
 

@@ -185,6 +185,37 @@ class WorkspaceDataExportIntegrationTests {
     }
 
     @Test
+    void billingExportIncludesStripeWebhookEventsButNeverTheRawSignedPayloadBytes() throws Exception {
+        String payloadMarker = "webhook_included_marker_9999";
+        byte[] rawPayloadBytes = "RAW_PAYLOAD_MARKER_9999".getBytes(StandardCharsets.UTF_8);
+        db.sql("""
+                        INSERT INTO stripe_webhook_events
+                            (id, stripe_event_id, stripe_account_id, mode, workspace_id, event_type,
+                             stripe_created_at, raw_payload, payload)
+                        VALUES (:id, :eventId, :acct, 'TEST', :w, 'invoice.paid', now(), :rawPayload, :payload::jsonb)
+                        """)
+                .param("id", UUID.randomUUID())
+                .param("eventId", "evt_" + UUID.randomUUID())
+                .param("acct", "acct_" + UUID.randomUUID())
+                .param("w", workspace)
+                .param("rawPayload", rawPayloadBytes)
+                .param("payload", "{\"marker\": \"" + payloadMarker + "\"}")
+                .update();
+
+        byte[] zipBytes = mockMvc.perform(exportRequest(OWNER)).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+        Map<String, String> entries = readZipEntriesAsText(zipBytes);
+        String billingNdjson = entries.get("billing.ndjson");
+
+        Assertions.assertTrue(
+                billingNdjson.contains("stripe_webhook_events"), "billing.ndjson must include stripe_webhook_events rows");
+        Assertions.assertTrue(
+                billingNdjson.contains(payloadMarker), "the parsed payload's business content must be exported");
+        Assertions.assertFalse(
+                billingNdjson.contains("RAW_PAYLOAD_MARKER_9999"),
+                "raw_payload (the raw signed verification bytes) must never be exported");
+    }
+
+    @Test
     void exportedBundleNeverContainsCredentialsSecretDigestsOrLeaseCheckpointTokens() throws Exception {
         String ingestionKeySecretHash = "1".repeat(64);
         String oauthStateHash = "2".repeat(64);
