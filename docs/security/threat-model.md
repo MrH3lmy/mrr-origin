@@ -1,9 +1,10 @@
 # Security and privacy readiness — threat model and gap inventory
 
-Status as of the #27 (P6 security readiness) audit. This document is the source of truth for
-what is already enforced, what is a known gap, and who owns triaging new findings. It replaces
-the need to re-derive this state from code on every review; update it whenever a listed control
-changes.
+Status as of the #27 (P6 security readiness) audit, last reconciled 2026-08-19 after #62
+(workspace deletion), #64 (workspace export), and #65 (public-ingestion rate limiting) all merged.
+This document is the source of truth for what is already enforced, what is a known gap, and who
+owns triaging new findings. It replaces the need to re-derive this state from code on every
+review; update it whenever a listed control changes.
 
 ## 1. Authentication and tenant isolation
 
@@ -147,31 +148,46 @@ changes.
   workspace-wide flow.
 - The three reporting CSV exports (§4) let a workspace export specific _views_ of its own data, but
   they are not a full data bundle and don't cover billing/revenue/attribution raw records.
+- **Workspace-wide export** (`GET /api/workspaces/{workspaceId}/exports/data`, PR #78, closes #64,
+  [ADR-0009](../adr/0009-workspace-data-export.md)): manager-only, a synchronously streamed ZIP
+  containing a versioned `manifest.json` plus one streaming NDJSON file per workspace-owned domain
+  (billing, revenue, attribution, reporting, notification, tracking). Every query uses an explicit
+  column allow-list rather than `SELECT *`, so new columns are excluded by default until reviewed;
+  credentials, secret digests, lease tokens, OAuth CSRF state, and Stripe webhook raw signed bytes
+  are excluded (the parsed webhook payload is included, matching #64's accepted scope). Rows stream
+  through `ZipOutputStream` with bounded keyset pagination (500 rows/page) — never buffered fully in
+  memory. Successful exports are audited in `workspace_export_audit_log` (actor subject, schema
+  version, per-domain row counts, timestamp; never row content). Cross-tenant access is hidden as
+  `404`, matching the rest of the API. `WorkspaceDataExportIntegrationTests` (9 tests) covers
+  manager authorization, cross-tenant denial, manifest/row-count correctness, the secret-exclusion
+  regression, audit-without-content-leakage, and pagination past the 500-row boundary.
+- **Workspace-wide deletion** (`POST /api/workspaces/{workspaceId}/deletion`, PR #76, closes #62,
+  [ADR-0008](../adr/0008-workspace-deletion-lifecycle.md)): owner-only, requires the exact
+  confirmation string `DELETE <workspace slug>`; a retry with the same confirmation returns the
+  existing request rather than starting duplicate work. Admission runs synchronously: marks the
+  workspace `DELETING` (after which `WorkspaceContext.requireManager`/`requireWritable` reject
+  further mutations with `409`), revokes every project ingestion key, and disables Stripe sync
+  locally. A new `workspacelifecycle` module (the one deliberate exception to the module dependency
+  order, alongside `workspaceexport`; see `ARCHITECTURE.md` → Backend modules) then orchestrates a
+  resumable, checkpointed, leaf-first hard delete: notification → reporting → attribution → revenue
+  → identity → tracking → billing → workspace root, mirroring `ARCHITECTURE.md`'s module dependency
+  graph. No Stripe invoice/event payload is retained — `stripe_webhook_events` is hard-deleted
+  rather than orphaned. Only a minimal, non-PII **deletion tombstone** survives for 30 days: request
+  ID, workspace UUID, status, and timestamps — the table has no column capable of holding PII or
+  billing data. `WorkspaceDeletionIntegrationTests` (13 tests) and
+  `WorkspaceDeletionCompletionAndIsolationIntegrationTests` (2 tests) cover owner-only authorization,
+  confirmation mismatch, duplicate/concurrent requests, retry-after-completion via the tombstone
+  fallback, crash/resume across bounded batches, write rejection once `DELETING`, leaf-first phase
+  ordering, ingestion-key/Stripe-sync admission effects, full dependency-safe deletion across every
+  module's owned tables, and cross-tenant concealment. All 24 tests across both features re-ran
+  clean on 2026-08-19 as part of the #27 close-out audit.
 
-**Gaps / follow-ups:**
+**Known trade-off:**
 
-- **No workspace-wide export yet.** A founder cannot get one bundle covering billing, revenue,
-  attribution, and tracking data across all of a workspace's projects. `ARCHITECTURE.md`'s security
-  baseline lists "Data export and deletion are first-class flows before public launch" and the
-  ROADMAP's Phase 6 gate requires it explicitly. The contract is now decided (accepted on #27):
-  **manager-only**, a **synchronously streamed ZIP** for v1 (no object storage introduced), with a
-  versioned `manifest.json` plus streaming NDJSON files covering every workspace-owned domain.
-  Credentials, secret digests, lease tokens, and other internal security material are excluded.
-  Successful exports are audited (same pattern as the existing CSV export audit), and cross-tenant
-  denial is covered by an automated test. Implementation is tracked as a follow-up child issue of
-  #27.
-- **No workspace-wide deletion yet.** There is no way to delete a workspace and cascade through
-  every module's tenant-owned data (billing raw events/normalized objects, revenue movements,
-  attribution records, notification recipients/deliveries) the way the existing tracking-deletion
-  flow does for one module. This is the highest-impact remaining gap. The contract is now decided
-  (accepted on #27): **owner-only**, requires **explicit confirmation**, and is **resumable and
-  idempotent** (generalizing the existing batched tracking-deletion pattern across modules).
-  Sequence: mark the workspace `deleting` → reject new writes → revoke ingestion keys → disable
-  Stripe sync → hard-delete all workspace-owned billing, acquisition, reporting, notification, and
-  tracking data in dependency-safe batches. MRROrigin does **not** retain copied invoice/event
-  payloads for tax purposes — Stripe remains the billing system of record. Only a minimal, non-PII
-  **deletion tombstone** is retained, for 30 days: request ID, workspace UUID, status, and
-  timestamps. Implementation is tracked as a follow-up child issue of #27, first among the three.
+- Workspace deletion disables Stripe sync **locally only** — it does not call Stripe to revoke the
+  OAuth grant itself. This is a deliberate ADR-0008 scope decision so admission stays a durable,
+  no-external-network-dependency step. Revoking the Stripe OAuth grant is a non-blocking follow-up,
+  not tracked as a private-beta gate.
 
 ## 6. Secret and key rotation
 
