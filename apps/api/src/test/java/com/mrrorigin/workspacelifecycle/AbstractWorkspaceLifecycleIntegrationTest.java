@@ -106,6 +106,10 @@ abstract class AbstractWorkspaceLifecycleIntegrationTest {
 
     UUID insertIngestionKey(UUID workspaceId, UUID projectId) {
         UUID id = UUID.randomUUID();
+        // secret_hash is CHAR(64) UNIQUE, constrained to hex (V2) -- two concatenated random UUIDs
+        // (32 hex chars each, dashes stripped) give a distinct, valid value on every call, including
+        // across different workspaces in the same test.
+        String hash = (id.toString() + UUID.randomUUID()).replace("-", "");
         jdbc.sql("""
                         INSERT INTO project_ingestion_keys (id, workspace_id, project_id, key_prefix, secret_hash)
                         VALUES (:id, :workspaceId, :projectId, :prefix, :hash)
@@ -114,7 +118,7 @@ abstract class AbstractWorkspaceLifecycleIntegrationTest {
                 .param("workspaceId", workspaceId)
                 .param("projectId", projectId)
                 .param("prefix", "mrr_" + id.toString().substring(0, 8))
-                .param("hash", "0".repeat(64))
+                .param("hash", hash)
                 .update();
         return id;
     }
@@ -142,6 +146,10 @@ abstract class AbstractWorkspaceLifecycleIntegrationTest {
     }
 
     void insertVerificationAttempt(UUID workspaceId, UUID projectId) {
+        // token is CHAR(43) UNIQUE (V13) -- must be distinct across calls, including across
+        // different workspaces in the same test, so two random UUIDs concatenated (64 hex chars,
+        // no dashes) truncated to 43 is used rather than a fixed placeholder.
+        String token = (UUID.randomUUID().toString() + UUID.randomUUID()).replace("-", "").substring(0, 43);
         jdbc.sql("""
                         INSERT INTO tracking_verification_attempts (id, workspace_id, project_id, token, status, created_at, expires_at)
                         VALUES (:id, :workspaceId, :projectId, :token, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour')
@@ -149,7 +157,7 @@ abstract class AbstractWorkspaceLifecycleIntegrationTest {
                 .param("id", UUID.randomUUID())
                 .param("workspaceId", workspaceId)
                 .param("projectId", projectId)
-                .param("token", "0".repeat(43))
+                .param("token", token)
                 .update();
     }
 
@@ -552,10 +560,10 @@ abstract class AbstractWorkspaceLifecycleIntegrationTest {
                 .update();
     }
 
-    int count(String table, UUID workspaceId) {
+    long count(String table, UUID workspaceId) {
         return jdbc.sql("SELECT COUNT(*) FROM " + table + " WHERE workspace_id = :w")
                 .param("w", workspaceId)
-                .query(Integer.class)
+                .query(Long.class)
                 .single();
     }
 
