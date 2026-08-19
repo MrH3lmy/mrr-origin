@@ -18,8 +18,8 @@ import org.springframework.web.servlet.HandlerInterceptor;
  * bean-invalid JSON: those requests fail during argument resolution and never enter the method. This
  * interceptor runs after handler mapping but before argument resolution, closing that bypass while
  * preserving the accepted ordering: only a resolvable active key whose Origin is allowed spends
- * budget. Invalid keys and blocked Origins fall through to the controller's existing error handling
- * and diagnostics rather than consuming a legitimate integration's allowance.
+ * budget. Invalid keys and blocked/missing Origins fall through to the controller's existing error
+ * handling and diagnostics rather than consuming a legitimate integration's allowance.
  */
 @Component
 final class IngestionRateLimitInterceptor implements HandlerInterceptor {
@@ -63,8 +63,10 @@ final class IngestionRateLimitInterceptor implements HandlerInterceptor {
     }
 
     private boolean originAllowed(IngestionKeyService.ResolvedProject project, String origin) {
+        if (origin == null) {
+            return false;
+        }
         try {
-            AllowedDomainService.normalizeOrigin(origin);
             return allowedDomains.isAllowed(project.workspaceId(), project.projectId(), origin);
         } catch (IllegalArgumentException invalid) {
             return false;
