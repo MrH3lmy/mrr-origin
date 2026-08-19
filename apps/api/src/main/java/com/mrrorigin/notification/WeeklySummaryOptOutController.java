@@ -44,6 +44,7 @@ public class WeeklySummaryOptOutController {
     public OptOutResponse updateOptOut(
             @PathVariable UUID workspaceId, @PathVariable UUID projectId, @RequestBody UpdateOptOutRequest request) {
         String subjectId = requireProjectMembership(workspaceId, projectId);
+        workspaceContext.requireWritable(workspaceId);
         return new OptOutResponse(optOutService.setOptedOut(workspaceId, projectId, subjectId, request.optedOut()));
     }
 

@@ -224,6 +224,26 @@ public class StripeConnectionService {
         return ConnectionOutcome.from(connection);
     }
 
+    /**
+     * The #62 workspace-deletion admission step: stops OUR side of Stripe sync so
+     * {@code StripeBackfillPageRunner}'s existing {@code connection.status() != ACTIVE} gate (checked
+     * under the same row lock it uses for its own checkpoint) naturally refuses to apply any further
+     * backfill page, and newly arriving webhooks stop resolving to a live connection. Deliberately
+     * does not call {@link StripeConnectClient#deauthorize}, unlike {@link #disconnect}: a durable,
+     * resumable, idempotent-under-retry admission step must not depend on an external network call
+     * succeeding. Revoking Stripe's own OAuth grant is a separate, non-blocking concern out of scope
+     * here. Idempotent (a no-op if there is no connection, or it is already non-live), and does not
+     * check workspace membership -- the deletion controller has already authorized the caller as the
+     * workspace owner before this is invoked.
+     */
+    @Transactional
+    public void disableSyncForDeletion(UUID workspaceId) {
+        connections.findByWorkspaceId(workspaceId).filter(StripeConnection::isLive).ifPresent(connection -> {
+            connection.markDisconnected();
+            connections.saveAndFlush(connection);
+        });
+    }
+
     private void verifyAndUpdateStatus(StripeConnection connection) {
         StripeVerificationOutcome outcome =
                 stripeClient.verifyAccountAccess(connection.mode(), connection.stripeAccountId());

@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.context.annotation.RequestScope;
 import org.springframework.web.server.ResponseStatusException;
 
+import static org.springframework.http.HttpStatus.CONFLICT;
 import static org.springframework.http.HttpStatus.FORBIDDEN;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
@@ -21,12 +22,17 @@ public class WorkspaceContext {
 
     private final WorkspaceMemberRepository memberRepository;
     private final WorkspaceMemberEmailCaptureService emailCaptureService;
+    private final WorkspaceRepository workspaceRepository;
     private final Map<UUID, WorkspaceMember> memberships = new HashMap<>();
     private String subjectId;
 
-    public WorkspaceContext(WorkspaceMemberRepository memberRepository, WorkspaceMemberEmailCaptureService emailCaptureService) {
+    public WorkspaceContext(
+            WorkspaceMemberRepository memberRepository,
+            WorkspaceMemberEmailCaptureService emailCaptureService,
+            WorkspaceRepository workspaceRepository) {
         this.memberRepository = memberRepository;
         this.emailCaptureService = emailCaptureService;
+        this.workspaceRepository = workspaceRepository;
     }
 
     public String subjectId() {
@@ -78,12 +84,54 @@ public class WorkspaceContext {
         emailCaptureService.captureOrRefresh(workspaceId, member.subjectId(), email);
     }
 
+    /**
+     * Authorizes a mutating call: membership, manager-or-owner role, and -- unlike {@link
+     * #requireOwner}, which the workspace-deletion flow itself uses so that flow can keep running
+     * while the workspace is {@code DELETING} -- that the workspace is not currently being deleted.
+     * Per #62's accepted contract ("all mutating endpoints should 409/423 once a workspace is in this
+     * state -- needs a WorkspaceContext-level check, not one check per controller"), every other
+     * module's write endpoints route authorization through this one method, so gating writes here
+     * covers them uniformly.
+     */
     public WorkspaceMember requireManager(UUID workspaceId) {
         WorkspaceMember membership = requireMembership(workspaceId);
         if (!membership.role().canManage()) {
             throw new ResponseStatusException(FORBIDDEN, "Workspace management permission required");
         }
+        requireNotDeleting(workspaceId);
         return membership;
+    }
+
+    /**
+     * Authorizes the workspace-owner-only actions in #62's deletion flow. Stricter than {@link
+     * #requireManager} on role (owner only, not owner-or-admin) but deliberately does not gate on
+     * deletion status -- the deletion flow's own controller is the one caller allowed to keep writing
+     * (advancing the deletion run's phases) while the workspace is {@code DELETING}.
+     */
+    public WorkspaceMember requireOwner(UUID workspaceId) {
+        WorkspaceMember membership = requireMembership(workspaceId);
+        if (membership.role() != WorkspaceRole.OWNER) {
+            throw new ResponseStatusException(FORBIDDEN, "Workspace owner permission required");
+        }
+        return membership;
+    }
+
+    /**
+     * Rejects a mutating call with {@code 409} once the workspace is {@code DELETING}, without
+     * requiring manager/owner role -- for a self-service write gated only by {@link
+     * #requireMembership} (e.g. a member's own weekly-summary opt-out, or starting a tracker
+     * verification attempt). #62's accepted contract rejects every authenticated write once a
+     * workspace is {@code DELETING}, not only manager-gated ones; {@link #requireManager} already
+     * calls this internally, so callers only need it explicitly alongside {@link #requireMembership}.
+     */
+    public void requireWritable(UUID workspaceId) {
+        requireNotDeleting(workspaceId);
+    }
+
+    private void requireNotDeleting(UUID workspaceId) {
+        if (!workspaceRepository.existsByIdAndStatus(workspaceId, WorkspaceStatus.ACTIVE)) {
+            throw new ResponseStatusException(CONFLICT, "Workspace is being deleted");
+        }
     }
 
     /**
