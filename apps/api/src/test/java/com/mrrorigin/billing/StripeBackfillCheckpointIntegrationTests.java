@@ -68,6 +68,92 @@ class StripeBackfillCheckpointIntegrationTests extends AbstractBillingLedgerInte
         assertThat(countCustomers(workspaceId)).isEqualTo(150);
     }
 
+    /**
+     * #81's core recovery drill: interrupt a multi-phase backfill (not just the customers phase)
+     * after a partial page, resume it from a brand-new call (simulating a process restart), and
+     * prove the final normalized state across every object type is identical to a clean,
+     * uninterrupted run of the exact same source data -- not just that a row count matches a
+     * hardcoded number. Also proves the interrupted/resumed run of workspace A never touches a
+     * concurrently-active workspace B's ledger or checkpoint.
+     */
+    @Test
+    void interruptedMultiPhaseBackfillResumesToStateIdenticalToACleanRunAndNeverTouchesAnotherWorkspace() {
+        // ---- workspace B: seeded and fully backfilled first, so we have a baseline to prove it's
+        // untouched by workspace A's later interrupt/resume. -----------------------------------
+        UUID workspaceB = createWorkspace();
+        UUID connectionB = insertActiveConnection(workspaceB, "acct_bystander", StripeConnectionMode.TEST);
+        STRIPE_LIST_STUB.seed("/v1/customers", List.of(BillingFixtures.customer("cus_bystander", "usd", Instant.now().getEpochSecond(), false, null)));
+        STRIPE_LIST_STUB.seed("/v1/prices", List.of());
+        STRIPE_LIST_STUB.seed("/v1/subscriptions", List.of());
+        STRIPE_LIST_STUB.seed("/v1/invoices", List.of());
+        STRIPE_LIST_STUB.seed("/v1/charges", List.of());
+        STRIPE_LIST_STUB.seed("/v1/refunds", List.of());
+        runBackfillToCompletion(connectionB);
+        assertThat(countCustomers(workspaceB)).isEqualTo(1);
+        String bystanderCheckpointBefore = rawCheckpoint(connectionB);
+
+        // ---- shared source data for both the clean and the interrupted run: 130 customers (more
+        // than one PAGE_SIZE=100 page) plus one full object chain across every other phase. -------
+        long created = Instant.now().getEpochSecond();
+        List<String> customers = customers(130);
+        String subscription = BillingFixtures.subscription(
+                "sub_recovery", "cus_0000", "active", "usd", created, created + 2_592_000L, false, null, null,
+                BillingFixtures.subscriptionItem("si_recovery", "price_recovery", 1),
+                BillingFixtures.discount("di_recovery", null, "sub_recovery", "coupon_recovery", 10L, null, null, created, null));
+        STRIPE_LIST_STUB.seed("/v1/customers", customers);
+        STRIPE_LIST_STUB.seed(
+                "/v1/prices",
+                List.of(BillingFixtures.price("price_recovery", "prod_recovery", "usd", 1500L, "recurring", "month", 1, true)));
+        STRIPE_LIST_STUB.seed("/v1/subscriptions", List.of(subscription));
+        STRIPE_LIST_STUB.seed(
+                "/v1/invoices",
+                List.of(BillingFixtures.invoice("in_recovery", "cus_0000", "sub_recovery", "paid", "usd", 1350, 1350, 0, created, created + 2_592_000L, created)));
+        STRIPE_LIST_STUB.seed(
+                "/v1/charges",
+                List.of(BillingFixtures.charge("ch_recovery", "cus_0000", "in_recovery", 1350, "usd", "succeeded", true, false, 200, created)));
+        STRIPE_LIST_STUB.seed(
+                "/v1/refunds",
+                List.of(BillingFixtures.refund("re_recovery", "ch_recovery", 200, "usd", "succeeded", "requested_by_customer", created)));
+
+        // ---- clean, uninterrupted run: the baseline every recovery must match. -------------------
+        UUID cleanWorkspace = createWorkspace();
+        UUID cleanConnection = insertActiveConnection(cleanWorkspace, "acct_recovery_clean", StripeConnectionMode.TEST);
+        runBackfillToCompletion(cleanConnection);
+
+        // ---- interrupted run: only the first page of the first phase completes, simulating a
+        // process crash right after that page's checkpoint commit... --------------------------
+        UUID interruptedWorkspace = createWorkspace();
+        UUID interruptedConnection = insertActiveConnection(interruptedWorkspace, "acct_recovery_interrupted", StripeConnectionMode.TEST);
+        StripeBackfillService.BackfillRunOutcome partial = backfillService.runBatch(interruptedConnection, 1);
+        assertThat(partial.complete()).isFalse();
+        assertThat(countCustomers(interruptedWorkspace)).isEqualTo(StripeBackfillClient.PAGE_SIZE);
+
+        // ...workspace B is completely unaffected by A's in-flight interrupted backfill.
+        assertThat(countCustomers(workspaceB)).isEqualTo(1);
+        assertThat(rawCheckpoint(connectionB)).isEqualTo(bystanderCheckpointBefore);
+
+        // ...then a brand-new call (simulating the restarted process) resumes purely from the
+        // persisted checkpoint and completes.
+        runBackfillToCompletion(interruptedConnection);
+
+        // ---- final state: interrupted-then-resumed must equal the clean run, table by table. -----
+        assertThat(countCustomers(interruptedWorkspace)).isEqualTo(countCustomers(cleanWorkspace)).isEqualTo(130);
+        assertThat(count("billing_prices", interruptedWorkspace)).isEqualTo(count("billing_prices", cleanWorkspace)).isEqualTo(1);
+        assertThat(count("billing_subscriptions", interruptedWorkspace)).isEqualTo(count("billing_subscriptions", cleanWorkspace)).isEqualTo(1);
+        assertThat(count("billing_invoices", interruptedWorkspace)).isEqualTo(count("billing_invoices", cleanWorkspace)).isEqualTo(1);
+        assertThat(count("billing_payments", interruptedWorkspace)).isEqualTo(count("billing_payments", cleanWorkspace)).isEqualTo(1);
+        assertThat(count("billing_refunds", interruptedWorkspace)).isEqualTo(count("billing_refunds", cleanWorkspace)).isEqualTo(1);
+        assertThat(count("billing_discounts", interruptedWorkspace)).isEqualTo(count("billing_discounts", cleanWorkspace)).isEqualTo(1);
+
+        assertThat(priceSnapshot(interruptedWorkspace, "price_recovery")).isEqualTo(priceSnapshot(cleanWorkspace, "price_recovery"));
+        assertThat(subscriptionSnapshot(interruptedWorkspace, "sub_recovery")).isEqualTo(subscriptionSnapshot(cleanWorkspace, "sub_recovery"));
+        assertThat(subscriptionItemSnapshots(interruptedWorkspace, "sub_recovery")).isEqualTo(subscriptionItemSnapshots(cleanWorkspace, "sub_recovery"));
+        assertThat(invoiceSnapshot(interruptedWorkspace, "in_recovery")).isEqualTo(invoiceSnapshot(cleanWorkspace, "in_recovery"));
+        assertThat(paymentSnapshot(interruptedWorkspace, "ch_recovery")).isEqualTo(paymentSnapshot(cleanWorkspace, "ch_recovery"));
+        assertThat(refundSnapshot(interruptedWorkspace, "re_recovery")).isEqualTo(refundSnapshot(cleanWorkspace, "re_recovery"));
+        assertThat(discountSnapshot(interruptedWorkspace, "di_recovery")).isEqualTo(discountSnapshot(cleanWorkspace, "di_recovery"));
+    }
+
     @Test
     void aFailureBeforeCheckpointCommitLeavesNoPartialStateAndRetryStartsFromTheSameCursor() {
         UUID workspaceId = createWorkspace();
@@ -199,18 +285,25 @@ class StripeBackfillCheckpointIntegrationTests extends AbstractBillingLedgerInte
     }
 
     private int countCustomers(UUID workspaceId) {
-        return jdbc().sql("SELECT COUNT(*) FROM billing_customers WHERE workspace_id = :w")
+        return count("billing_customers", workspaceId);
+    }
+
+    private int count(String table, UUID workspaceId) {
+        return jdbc().sql("SELECT COUNT(*) FROM " + table + " WHERE workspace_id = :w")
                 .param("w", workspaceId)
                 .query(Integer.class)
                 .single();
     }
 
     private String currentCheckpointCursor(UUID connectionId) {
-        String raw = jdbc().sql("SELECT sync_checkpoint FROM stripe_connections WHERE id = :id")
+        return StripeBackfillCheckpoint.parse(objectMapper, rawCheckpoint(connectionId)).cursor();
+    }
+
+    private String rawCheckpoint(UUID connectionId) {
+        return jdbc().sql("SELECT sync_checkpoint FROM stripe_connections WHERE id = :id")
                 .param("id", connectionId)
                 .query(String.class)
                 .optional()
                 .orElse(null);
-        return StripeBackfillCheckpoint.parse(objectMapper, raw).cursor();
     }
 }

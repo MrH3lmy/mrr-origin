@@ -6,7 +6,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
@@ -124,6 +126,57 @@ class StripeWebhookReplayIntegrationTests extends AbstractBillingLedgerIntegrati
         assertThat(replayService.replayEvent(workspaceId, eventId)).isEqualTo(StripeWebhookReplayService.ReplayOutcome.NOT_ELIGIBLE);
         assertThat(replayCount(eventId)).isEqualTo(1);
         assertThat(processingState(eventId)).isEqualTo("PENDING");
+    }
+
+    /**
+     * #81's ledger-level drill: replaying an event whose payload was already fully applied once
+     * must not create a second copy of anything it touched. Forces a subscription-creation event
+     * that already reached PROCESSED back to FAILED (an operator manually replaying an event that,
+     * unknown to them, already succeeded is exactly the risky case -- if replay re-inserted instead
+     * of re-upserting, this would double the subscription/items/status-event rows) and proves every
+     * affected table's row count is identical before and after the replay.
+     */
+    @Test
+    void replayingAnAlreadyFullyAppliedEventCreatesNoDuplicateLedgerRows() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_replay_no_dup", StripeConnectionMode.TEST);
+
+        String customer = BillingFixtures.customer("cus_no_dup", "usd", BASE.getEpochSecond(), false, null);
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_cust_no_dup", "customer.created", BASE, customer);
+        String item = BillingFixtures.subscriptionItem("si_no_dup", "price_no_dup", 1);
+        String subscription = BillingFixtures.subscription(
+                "sub_no_dup", "cus_no_dup", "active", "usd", BASE.getEpochSecond(),
+                BASE.plusSeconds(2_592_000).getEpochSecond(), false, null, null, item, null);
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_sub_no_dup", "customer.subscription.created",
+                BASE.plusSeconds(1), subscription);
+        drainWebhookQueue();
+
+        UUID subscriptionEventId = eventIdFor(workspaceId, "evt_sub_no_dup");
+        assertThat(processingState(subscriptionEventId)).isEqualTo("PROCESSED");
+        assertThat(subscriptionSnapshot(workspaceId, "sub_no_dup")).isPresent();
+
+        Map<String, Integer> before = ledgerRowCounts(workspaceId);
+        assertThat(before.get("billing_customers")).isEqualTo(1);
+        assertThat(before.get("billing_subscriptions")).isEqualTo(1);
+        assertThat(before.get("billing_subscription_items")).isEqualTo(1);
+        assertThat(before.get("billing_subscription_status_events")).isEqualTo(1);
+        var subscriptionBefore = subscriptionSnapshot(workspaceId, "sub_no_dup");
+
+        // An operator (or a stale monitoring signal) forces this already-succeeded event back to
+        // FAILED and replays it -- the same object payload gets fully renormalized a second time.
+        jdbc().sql("UPDATE stripe_webhook_events SET processing_state = 'FAILED', failure_kind = 'TRANSIENT' WHERE id = :id")
+                .param("id", subscriptionEventId)
+                .update();
+
+        assertThat(replayService.replayEvent(workspaceId, subscriptionEventId))
+                .isEqualTo(StripeWebhookReplayService.ReplayOutcome.REPLAYED);
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(processingState(subscriptionEventId)).isEqualTo("PROCESSED");
+
+        assertThat(ledgerRowCounts(workspaceId)).isEqualTo(before);
+        assertThat(subscriptionSnapshot(workspaceId, "sub_no_dup")).isEqualTo(subscriptionBefore);
     }
 
     // ---- Interrupted replay + retry ---------------------------------------------------------------
@@ -357,6 +410,24 @@ class StripeWebhookReplayIntegrationTests extends AbstractBillingLedgerIntegrati
                 .param("id", eventId)
                 .query(Integer.class)
                 .single();
+    }
+
+    private static final List<String> LEDGER_TABLES = List.of(
+            "billing_customers", "billing_prices", "billing_subscriptions", "billing_subscription_items",
+            "billing_subscription_status_events", "billing_invoices", "billing_payments", "billing_refunds",
+            "billing_discounts");
+
+    private Map<String, Integer> ledgerRowCounts(UUID workspaceId) {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (String table : LEDGER_TABLES) {
+            counts.put(
+                    table,
+                    jdbc().sql("SELECT COUNT(*) FROM " + table + " WHERE workspace_id = :w")
+                            .param("w", workspaceId)
+                            .query(Integer.class)
+                            .single());
+        }
+        return counts;
     }
 
     private OffsetDateTime lastReplayedAt(UUID eventId) {
