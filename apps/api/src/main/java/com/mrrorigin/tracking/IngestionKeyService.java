@@ -109,12 +109,13 @@ public class IngestionKeyService {
         }
         try {
             return Optional.of(jdbc.sql("""
-                    SELECT workspace_id, project_id
+                    SELECT id, workspace_id, project_id
                     FROM project_ingestion_keys
                     WHERE secret_hash = :secretHash AND revoked_at IS NULL
                     """)
                     .param("secretHash", hash(rawKey))
                     .query((rs, rowNum) -> new ResolvedProject(
+                            rs.getObject("id", UUID.class),
                             rs.getObject("workspace_id", UUID.class),
                             rs.getObject("project_id", UUID.class)))
                     .single());
@@ -142,12 +143,13 @@ public class IngestionKeyService {
         String prefix = rawKey.substring(0, separator);
         try {
             return Optional.of(jdbc.sql("""
-                    SELECT workspace_id, project_id
+                    SELECT id, workspace_id, project_id
                     FROM project_ingestion_keys
                     WHERE key_prefix = :prefix
                     """)
                     .param("prefix", prefix)
                     .query((rs, rowNum) -> new ResolvedProject(
+                            rs.getObject("id", UUID.class),
                             rs.getObject("workspace_id", UUID.class),
                             rs.getObject("project_id", UUID.class)))
                     .single());
@@ -202,7 +204,7 @@ public class IngestionKeyService {
 
     public record IssuedKey(UUID id, String secret, String prefix) {}
 
-    public record ResolvedProject(UUID workspaceId, UUID projectId) {}
+    public record ResolvedProject(UUID keyId, UUID workspaceId, UUID projectId) {}
 
     public record ActiveKeySummary(UUID id, String prefix, OffsetDateTime createdAt) {}
 }

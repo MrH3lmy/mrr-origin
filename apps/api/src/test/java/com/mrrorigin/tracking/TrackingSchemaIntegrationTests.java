@@ -56,7 +56,8 @@ class TrackingSchemaIntegrationTests {
         IngestionKeyService.IssuedKey issued = keys.issue(tenant.workspaceId(), tenant.projectId());
 
         assertThat(keys.resolve(issued.secret()))
-                .contains(new IngestionKeyService.ResolvedProject(tenant.workspaceId(), tenant.projectId()));
+                .contains(new IngestionKeyService.ResolvedProject(
+                        issued.id(), tenant.workspaceId(), tenant.projectId()));
         Map<String, Object> stored = jdbc.sql("""
                         SELECT key_prefix, secret_hash FROM project_ingestion_keys WHERE id = :id
                         """)
