@@ -6,6 +6,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
@@ -54,7 +55,7 @@ final class IngestionRateLimitInterceptor implements HandlerInterceptor {
             return true;
         }
 
-        response.setStatus(HttpServletResponse.SC_TOO_MANY_REQUESTS);
+        response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
         response.setHeader(HttpHeaders.RETRY_AFTER, String.valueOf(decision.retryAfterSeconds()));
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.getWriter().write(
