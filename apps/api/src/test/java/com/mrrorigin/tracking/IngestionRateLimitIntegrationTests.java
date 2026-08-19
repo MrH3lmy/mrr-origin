@@ -101,19 +101,28 @@ class IngestionRateLimitIntegrationTests {
     }
 
     @Test
-    void theLimitIsIsolatedPerIngestionKeyEvenForTheSameWorkspace() throws Exception {
-        Fixture a = fixture("isolation-a", "a.example");
-        Fixture b = fixture("isolation-b", "b.example");
+    void theLimitIsIsolatedPerIngestionKeyEvenForTheSameProjectAndWorkspace() throws Exception {
+        Fixture a = fixture("isolation", "app.example");
 
         for (int i = 0; i < LIMIT; i++) {
-            mvc.perform(request(a.key(), "https://a.example", "batch-a-" + i, "event-a-" + i))
+            mvc.perform(request(a.key(), "https://app.example", "batch-a-" + i, "event-a-" + i))
                     .andExpect(status().isOk());
         }
-        mvc.perform(request(a.key(), "https://a.example", "batch-a-over", "event-a-over"))
+        mvc.perform(request(a.key(), "https://app.example", "batch-a-over", "event-a-over"))
                 .andExpect(status().isTooManyRequests());
 
-        mvc.perform(request(b.key(), "https://b.example", "batch-b", "event-b"))
+        IngestionKeyService.IssuedKey b = keys.rotate(a.workspaceId(), a.projectId());
+        mvc.perform(request(b.secret(), "https://app.example", "batch-b", "event-b"))
                 .andExpect(status().isOk());
+
+        assertThat(jdbc.sql("SELECT request_count FROM tracking_ingestion_rate_limit_windows WHERE ingestion_key_id = :keyId")
+                .param("keyId", a.keyId())
+                .query(Integer.class)
+                .single()).isEqualTo(LIMIT + 1);
+        assertThat(jdbc.sql("SELECT request_count FROM tracking_ingestion_rate_limit_windows WHERE ingestion_key_id = :keyId")
+                .param("keyId", b.id())
+                .query(Integer.class)
+                .single()).isEqualTo(1);
     }
 
     @Test
