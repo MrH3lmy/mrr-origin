@@ -101,6 +101,25 @@ class IngestionRateLimitIntegrationTests {
     }
 
     @Test
+    void malformedPayloadsCannotBypassTheRateLimit() throws Exception {
+        Fixture fixture = fixture("malformed", "app.example");
+
+        for (int i = 0; i < LIMIT; i++) {
+            mvc.perform(rawRequest(fixture.key(), "https://app.example", "{not-json-" + i))
+                    .andExpect(status().isBadRequest());
+        }
+
+        mvc.perform(request(fixture.key(), "https://app.example", "batch-after-malformed", "event-after-malformed"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().string("Retry-After", "60"));
+
+        assertThat(jdbc.sql("SELECT request_count FROM tracking_ingestion_rate_limit_windows WHERE ingestion_key_id = :keyId")
+                .param("keyId", fixture.keyId())
+                .query(Integer.class)
+                .single()).isEqualTo(LIMIT + 1);
+    }
+
+    @Test
     void theLimitIsIsolatedPerIngestionKeyEvenForTheSameProjectAndWorkspace() throws Exception {
         Fixture a = fixture("isolation", "app.example");
 
@@ -212,6 +231,14 @@ class IngestionRateLimitIntegrationTests {
                 .header("Origin", origin)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(batch(batchId, eventId));
+    }
+
+    private static MockHttpServletRequestBuilder rawRequest(String key, String origin, String body) {
+        return post("/api/public/v1/events")
+                .header("X-Ingestion-Key", key)
+                .header("Origin", origin)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body);
     }
 
     private static String batch(String batchId, String eventId) {
