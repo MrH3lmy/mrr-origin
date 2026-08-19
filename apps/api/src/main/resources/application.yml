@@ -26,6 +26,10 @@ spring:
             - ${OIDC_AUDIENCE:mrr-origin-api}
 
 mrrorigin:
+  tracking:
+    rate-limit:
+      # #65: DB-backed per-ingestion-key ceiling on the public ingestion endpoint.
+      requests-per-minute: ${INGESTION_RATE_LIMIT_PER_MINUTE:60}
   stripe:
     connect:
       # Per ADR-0003, these are the platform's own restricted OAuth client/secret keys -- never a

@@ -13,8 +13,8 @@ import tools.jackson.databind.ObjectMapper;
 
 /**
  * The tracking module's own slice of #64's cross-module workspace export: streams every row this
- * module owns, across every project in the workspace, as NDJSON. Mirrors {@code
- * TrackingWorkspaceDataDeletionService}'s owned-table list but reads instead of deletes.
+ * module owns, across every project in the workspace, as NDJSON, except security-only enforcement
+ * state explicitly excluded by #64's "internal security material" rule.
  *
  * <p>Deliberately excludes, per #64's accepted contract and ADR-0009:
  * <ul>
@@ -22,6 +22,11 @@ import tools.jackson.databind.ObjectMapper;
  *       ("ingestion-key secrets"/"secret digests"); {@code key_prefix} (public, non-secret) is kept.
  *   <li>{@code tracking_verification_attempts.token} -- a single-use bearer credential used to prove
  *       an install-verification event belongs to this exact attempt ("credentials").
+ *   <li>{@code tracking_ingestion_rate_limit_windows} entirely -- short-lived DB-backed counters used
+ *       only to enforce the public-ingestion security throttle (#65). They are internal security
+ *       control state, not workspace business data; exporting key IDs, active window timestamps, and
+ *       live request counts would expose the throttle's operational state. The rows are deleted by the
+ *       table's {@code ON DELETE CASCADE} foreign key when their ingestion key is deleted.
  * </ul>
  *
  * <p>{@code tracking_ingestion_batches.request_hash} is kept: it is a content fingerprint of the
