@@ -4,11 +4,10 @@ import java.util.Map;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -23,19 +22,16 @@ public class EventIngestionController {
     private final EventIngestionService ingestion;
     private final AllowedDomainService allowedDomains;
     private final TrackingIngestionFailureRecorder failures;
-    private final IngestionRateLimiter rateLimiter;
 
     public EventIngestionController(
             IngestionKeyService keys,
             EventIngestionService ingestion,
             AllowedDomainService allowedDomains,
-            TrackingIngestionFailureRecorder failures,
-            IngestionRateLimiter rateLimiter) {
+            TrackingIngestionFailureRecorder failures) {
         this.keys = keys;
         this.ingestion = ingestion;
         this.allowedDomains = allowedDomains;
         this.failures = failures;
-        this.rateLimiter = rateLimiter;
     }
 
     @PostMapping
@@ -62,28 +58,12 @@ public class EventIngestionController {
             failures.recordBlockedOrigin(project.workspaceId(), project.projectId(), normalizedOrigin);
             throw new EventIngestionException(HttpStatus.FORBIDDEN, "origin_not_allowed", "Origin is not allowed");
         }
-        // Rate limiting runs last, after key resolution and the origin check both succeed. Checking it
-        // any earlier would let a stolen-but-valid key probing arbitrary Origins either learn it is
-        // being rate limited without ever guessing an allowed origin (401/403 already tell an attacker
-        // the key is valid; a 429 reachable from any origin would additionally leak how busy the
-        // legitimate integration is), or spend the legitimate integration's own budget on traffic that
-        // was always going to be rejected for its origin anyway.
-        IngestionRateLimiter.Decision rateLimit =
-                rateLimiter.check(project.keyId(), project.workspaceId(), project.projectId());
-        if (!rateLimit.allowed()) {
-            throw new EventIngestionException(HttpStatus.TOO_MANY_REQUESTS, "rate_limit_exceeded",
-                    "Too many requests for this ingestion key", rateLimit.retryAfterSeconds());
-        }
         return ResponseEntity.status(HttpStatus.OK).body(ingestion.ingest(project, request));
     }
 
     @ExceptionHandler(EventIngestionException.class)
     ResponseEntity<Map<String, String>> ingestionError(EventIngestionException error) {
-        ResponseEntity.BodyBuilder response = ResponseEntity.status(error.status());
-        if (error.retryAfterSeconds() != null) {
-            response.header(HttpHeaders.RETRY_AFTER, String.valueOf(error.retryAfterSeconds()));
-        }
-        return response.body(Map.of("code", error.code(), "message", error.getMessage()));
+        return ResponseEntity.status(error.status()).body(Map.of("code", error.code(), "message", error.getMessage()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
