@@ -44,6 +44,20 @@ changes.
   (`AllowedDomainService`); a missing/invalid `Origin` header or a disallowed origin is rejected.
 - Request bodies are capped (`IngestionBodyLimitFilter`, 1 MiB) independent of any client-declared
   `Content-Length`.
+- Requests that pass key resolution and the allowed-origin check are rate-limited per ingestion key
+  by `IngestionRateLimiter`: a DB-backed, multi-instance-safe fixed one-minute window counter using
+  atomic PostgreSQL `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`. The threshold is operator-
+  configurable through `mrrorigin.tracking.rate-limit.requests-per-minute` /
+  `INGESTION_RATE_LIMIT_PER_MINUTE` and defaults to 60 requests/minute. Over-limit requests return
+  `429 Too Many Requests` with `Retry-After`. The counter runs in its own transaction so a rejected
+  or later-failing admitted request still consumes budget; no correctness-critical counter state
+  lives only in process memory. `IngestionRateLimitIntegrationTests` covers configured limits,
+  `Retry-After`, key rotation/isolation on the same project/workspace, window reset, and concurrent
+  bursts without lost increments.
+- Rate limiting intentionally runs after the origin allow-list check: wrong-origin traffic therefore
+  cannot consume a legitimate integration's budget or use `429` as an oracle for that integration's
+  current traffic level. Rate-limited attempts are not written to `tracking_ingestion_failures`;
+  that table remains a misconfiguration diagnostic rather than a high-volume throttle log.
 - Blocked-origin attempts are always recorded for the data-health diagnostics screen
   (`TrackingIngestionFailureRecorder`). Invalid-key and invalid-payload attempts are recorded
   best-effort, only where the request can be attributed to a project: an invalid key is recorded
@@ -52,16 +66,12 @@ changes.
   privacy-preserving tradeoff (no project attribution is invented for a key that doesn't resolve at
   all), not an oversight — see `EventIngestionController`.
 
-**Gaps / follow-ups:**
+**Known trade-offs / follow-ups:**
 
-- **No rate limiting yet.** `ARCHITECTURE.md`'s security baseline states "Public ingestion is
-  rate-limited and constrained by allowed project domains" — only the domain half is built so far.
-  The contract is now decided (accepted on #27, no longer an open question): a **DB-backed,
-  multi-instance-safe counter** — not in-memory, so enforcement stays correct once the API is
-  horizontally scaled, consistent with `ARCHITECTURE.md`'s "no correctness-critical state exists
-  only in process memory" rule and with the existing checkpoint/idempotency patterns. **Scope:** per
-  ingestion key. **Threshold:** configurable, defaulting to 60 requests/minute. **Over-limit
-  response:** `429` with `Retry-After`. Implementation is tracked as a follow-up child issue of #27.
+- The V1 limiter uses fixed one-minute windows rather than a sliding window or token bucket. A burst
+  straddling a minute boundary can therefore admit up to roughly twice the configured rate across a
+  very short interval. This is an accepted V1 precision trade-off; move to a sliding/token-bucket
+  algorithm only if production traffic shows the boundary behavior is too permissive.
 
 ## 3. Stripe secrets and webhooks
 
