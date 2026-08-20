@@ -293,7 +293,7 @@ class BillingLedgerUpsertService {
             ParsedPrice price = pricesById.get(item.stripePriceId());
             items.add(new MrrItem(
                     item.stripeSubscriptionItemId(),
-                    price == null ? null : price.currency(),
+                    price == null ? null : upperCase(price.currency()),
                     price == null ? null : price.unitAmount(),
                     BigDecimal.valueOf(item.quantity()),
                     price == null ? null : price.recurringInterval(),
@@ -328,9 +328,18 @@ class BillingLedgerUpsertService {
                 discount.stripeSubscriptionItemId(),
                 discount.percentOff(),
                 discount.amountOff(),
-                discount.currency(),
+                upperCase(discount.currency()),
                 discount.startAt(),
                 discount.endAt());
+    }
+
+    /**
+     * Stripe's own API always returns lowercase ISO currency codes; {@code RevenueCalculationService}
+     * requires uppercase per ADR-0004. This is a formatting normalization, not currency inference --
+     * the billing ledger itself (e.g. {@code billing_prices.currency}) keeps Stripe's original case.
+     */
+    private static String upperCase(String currency) {
+        return currency == null ? null : currency.toUpperCase(java.util.Locale.ROOT);
     }
 
     /** Resolves each referenced item's price economics from the ledger's own price table. */

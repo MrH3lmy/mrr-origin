@@ -75,9 +75,18 @@ per subscription (a backfill page's shared `source_sequence` bucket is disambigu
 ID, since one page normalizes many subscriptions). `revenue_subscription_states` enforces this
 uniqueness, so a redelivered/replayed event is a no-op insert (`ON CONFLICT DO NOTHING`) and
 `recordAndReplay` re-derives the same movements/snapshots from the same history — no duplicate rows.
-Out-of-order delivery is unaffected: `recordAndReplay` always replays full customer history ordered by
-`effective_at`, so an older event arriving after a newer one is inserted into its chronological place
-and recalculates forward from there without regressing the newer snapshot.
+Out-of-order delivery never regresses newer MRR state, but the mechanism is worth being precise about:
+`BillingLedgerUpsertService.upsertSubscription`'s own pre-existing version guard
+(`(source_version, source_sequence)`, #12) rejects a ledger write that is older than what
+`billing_subscriptions` already holds _before_ recalculation is ever invoked -- a genuinely
+out-of-order (older) event that arrives after a newer one has already applied is a no-op at the
+ledger level, so `recalculateMrr` is never called for it at all. This means MRR history is exactly
+as fine-grained as what the ledger's own convergence guarantee lets through: an older event that
+_does_ still apply (nothing newer has landed yet) is inserted at its correct chronological
+`effective_at` and `recordAndReplay` recalculates forward from there without disturbing later
+history; an older event that arrives _after_ a newer one is safely dropped by the ledger before it
+reaches MRR at all, so it can never regress or fragment the current MRR state. Either way, the
+newer/current MRR snapshot is never regressed -- confirmed by test.
 
 ### Failure and recovery boundary
 
@@ -113,9 +122,17 @@ next `runBatch`) reprocesses it from scratch. No partially-committed billing/MRR
   existing engine already rejects as `UNSUPPORTED_INTERVAL` (visible failure, never a fabricated
   number) — the failure reason code is imprecise, not the correctness outcome. A follow-up issue
   should add the column and the correct reason code.
-- `revenue_subscription_states` enforces one state per `(subscription, effective_at)`. Two distinct
-  Stripe changes to the same subscription landing in the same provider-declared second collide on
-  that constraint; the second insert is a fresh `source_billing_reference` (not deduplicated) and its
-  transaction fails, retrying under the existing lease/checkpoint mechanism but never succeeding on
-  its own. This granularity is the pre-existing tested engine's, not introduced here — reported as a
-  residual gap for a future issue.
+- `revenue_subscription_states` enforces one state per `(subscription, effective_at)`, and Stripe's
+  own provider timestamps only carry whole-second precision, so two distinct, sequence-ordered
+  changes to the same subscription can legitimately resolve to the same second —
+  `BillingLedgerIdempotencyIntegrationTests` already proves this is a real, tested scenario at the
+  ledger layer, not a contrived edge case. `BillingMrrRecalculationAdapter.disambiguate` handles it:
+  before calling `recordAndReplay`, it checks whether the candidate `effective_at` is already taken
+  for that subscription and, if so, advances by the smallest possible increment (1 microsecond) until
+  a free slot is found, bounded by `MAX_DISAMBIGUATION_ATTEMPTS`. This does not fabricate a false
+  real-world timestamp; it only breaks a tie between two changes Stripe itself distinguishes solely by
+  sequence, preserving their correct relative order in `revenue_subscription_states`. A genuine
+  redelivery of the _same_ event is unaffected: `recordAndReplay`'s own
+  `ON CONFLICT (workspace_id, source_billing_reference) DO NOTHING` still no-ops the insert regardless
+  of which candidate timestamp was passed in, since the conflict target is the reference, not the
+  timestamp.
