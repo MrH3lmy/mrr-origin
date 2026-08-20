@@ -4,13 +4,15 @@ Operator-facing procedures for recognizing and safely recovering the resumable/i
 mechanisms that already exist in the system: Stripe backfill, Stripe webhook replay, attribution
 recalculation, and leased scheduled deliveries. Nothing here invents new orchestration — every
 procedure below drives production code and endpoints that already exist. See #81 for the drill
-tests that prove each mechanism converges to a clean, non-duplicated state after interruption or
-replay.
+tests that prove the database-backed recovery mechanisms converge to a clean, non-duplicated state
+after interruption or replay. Provider-facing delivery is called out separately where an external
+side effect can be ambiguous.
 
 **Before touching anything**: capture the current state (see each section's "before" check) so you
-have a baseline to diff against after recovery. Recovery in this system is always safe to attempt
-more than once (every mechanism below is idempotent), but you should still be able to show what
-changed.
+have a baseline to diff against after recovery. The database-backed billing and attribution
+mechanisms below are designed to be safely retried. Do **not** generalize that guarantee to an
+external provider call whose outcome is unknown: weekly-summary delivery has an explicit ambiguous-
+outcome case that must be checked with the provider before replaying.
 
 ## Stripe backfill: interrupted or stuck initial sync
 
@@ -177,8 +179,11 @@ under `SELECT ... FOR UPDATE SKIP LOCKED`, setting `status = SENDING`, a fresh `
 another caller loses the fence and its own completion call becomes a silent no-op. An interrupted
 lease (worker died mid-send) is not manually "unstuck": the next scheduled claim pass reclaims it
 automatically once `lease_until` has passed. The natural key `(project_id, recipient_subject_id,
-week_start)` prevents a duplicate send for the same recipient/week regardless of how many times a
-lease is reclaimed or how many retries occur.
+week_start)` prevents creation of a second **delivery row** for the same recipient/week. It does
+**not** by itself prove an external email was sent exactly once: if the provider accepted the email
+but the worker died before persisting `SENT`, the expired lease may later be reclaimed and a retry
+could send the same email again. Lease fencing protects database state from stale workers; it cannot
+atomically fence an already-completed provider side effect.
 
 **Identify a stuck delivery.**
 
@@ -190,14 +195,15 @@ Look for a delivery stuck in `SENDING` well past what 10 minutes plus retry back
 or `PERMANENTLY_FAILED` / `BLOCKED_MISSING_EMAIL` entries (`attemptCount`, `lastError`,
 `lastOutcomeAmbiguous`).
 
-**Before replaying:** note the delivery's current `status`, `attemptCount`, and `providerMessageId`
-(a non-null `providerMessageId` with `lastOutcomeAmbiguous: true` means the provider may have already
-sent the email even though the local status doesn't confirm it — see below).
+**Before replaying:** note the delivery's current `status`, `attemptCount`, and `providerMessageId`.
+If `lastOutcomeAmbiguous: true`, treat that as a possible prior send even if local state does not
+confirm success; check the provider before any manual replay.
 
 **Recover:**
 
-- A `SENDING` row past its lease will self-heal on the next scheduled claim pass; no operator action
-  is required or possible for that state specifically.
+- A `SENDING` row past its lease becomes eligible for reclamation on the next scheduled claim pass;
+  no manual database unlock is required. If the prior provider call may have escaped before the
+  worker died, verify provider delivery state before deliberately forcing another send.
 - A terminal failure can be manually replayed:
 
   ```
@@ -210,8 +216,8 @@ sent the email even though the local status doesn't confirm it — see below).
 **When not to replay:** if `lastOutcomeAmbiguous` is `true` (the provider call's outcome could not be
 confirmed — it may have sent, or may not have), confirm with the email provider's own delivery logs
 using `providerMessageId` before replaying, to avoid a real duplicate email to the founder. This is
-the one recovery path in this document where the idempotency guarantee lives outside this system's
-database (Postmark's own delivery record), not inside it.
+the one recovery path in this document where exact-once external delivery is **not** guaranteed by
+this system's database state; the operator must resolve the ambiguity using provider evidence.
 
 ## General checks before and after any recovery action
 
@@ -222,7 +228,8 @@ database (Postmark's own delivery record), not inside it.
 - **After:** re-run the same health/status/listing endpoint and diff against the "before" snapshot.
   Row counts should reflect exactly the backlog that was actually outstanding — never more than a
   clean single run would have produced, and never less than what the failed/interrupted work was
-  supposed to accomplish.
+  supposed to accomplish. For external delivery, also verify the provider outcome when local state
+  is ambiguous; database row counts alone cannot establish exactly-once email delivery.
 - **Escalate instead of retrying** when: the same replay/resume call fails identically three or more
   times with the same `lastError`/`failureKind`; the failure indicates a permanently invalid
   upstream object (Stripe-side data problem) rather than a transient condition; or a Postmark
