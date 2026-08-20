@@ -32,6 +32,7 @@ class BillingMrrRecalculationAdapter implements BillingMrrRecalculationPort {
 
     @Override
     public void recalculateSubscription(SubscriptionMrrSnapshot snapshot) {
+        requireResolvedPrices(snapshot);
         clearSupersededState(
                 snapshot.workspaceId(), snapshot.stripeSubscriptionId(), snapshot.effectiveAt(), snapshot.sourceBillingReference());
         revenueCalculationService.recordAndReplay(new SubscriptionState(
@@ -43,6 +44,33 @@ class BillingMrrRecalculationAdapter implements BillingMrrRecalculationPort {
                 snapshot.sourceBillingReference(),
                 toItems(snapshot.items()),
                 toDiscounts(snapshot.discounts())));
+    }
+
+    /**
+     * Subscription payloads carry price IDs while their economics come from {@code billing_prices}.
+     * Webhooks are not guaranteed to arrive in dependency order, so a subscription event can be
+     * claimed before the referenced {@code price.created/updated} event has populated that table.
+     *
+     * <p>Committing that subscription with null economics would leave a durable unsupported MRR
+     * snapshot, and processing the later price event would not by itself replay the subscription.
+     * Treat this dependency miss as a transient processing failure instead. The surrounding
+     * normalization transaction rolls back, the webhook is recorded as failed/retriable by the
+     * existing worker, and replay after the price arrives converges from the original immutable
+     * event. Existing-but-unsupported prices are not caught here: they still carry identifying
+     * economics such as currency/interval and flow into the revenue engine's visible unsupported
+     * reason contract.
+     */
+    private static void requireResolvedPrices(SubscriptionMrrSnapshot snapshot) {
+        for (MrrItem item : snapshot.items()) {
+            boolean unresolved = item.currency() == null
+                    && item.unitAmountMinor() == null
+                    && item.interval() == null
+                    && item.intervalCount() == null;
+            if (unresolved) {
+                throw new IllegalStateException(
+                        "Referenced billing price has not been normalized yet for item " + item.sourceReference());
+            }
+        }
     }
 
     /**
