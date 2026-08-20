@@ -119,9 +119,9 @@ upserts by `(workspace_id, stripe_*_id)`, not insert-only.
 **Known limitation (flagged, not fixed by this runbook):** normalized billing state produced by
 webhook replay is not currently used to (re)compute `customer_mrr_movements` /
 `customer_mrr_snapshots` — `RevenueCalculationService`, the only production entry point for that
-calculation, is not invoked from webhook or backfill normalization today (see #81). If a replayed
-event's business data implies an MRR change, that change will not appear in revenue reporting until
-this wiring gap is addressed as its own piece of work. Do not attempt to work around this by manually
+calculation, is not invoked from webhook or backfill normalization today (discovered during #81;
+tracked as its own piece of work in #83). If a replayed event's business data implies an MRR change,
+that change will not appear in revenue reporting until #83 closes. Do not attempt to work around this by manually
 invoking `RevenueCalculationService` outside of a reviewed code path — it requires a correctly
 constructed `SubscriptionState`, and an ad hoc call is exactly how a real duplicate/incorrect
 movement gets created.
