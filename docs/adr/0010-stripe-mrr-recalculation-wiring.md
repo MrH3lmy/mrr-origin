@@ -70,11 +70,17 @@ the existing engine for a given transition.
 ### Idempotency and ordering
 
 `source_billing_reference` passed to `recordAndReplay` is
-`{WEBHOOK|BACKFILL}:{source_sequence}:{stripe_subscription_id}` — globally unique per accepted event
-per subscription (a backfill page's shared `source_sequence` bucket is disambiguated by subscription
-ID, since one page normalizes many subscriptions). `revenue_subscription_states` enforces this
-uniqueness, so a redelivered/replayed event is a no-op insert (`ON CONFLICT DO NOTHING`) and
+`{WEBHOOK|BACKFILL}:{source_version}:{source_sequence}:{stripe_subscription_id}` — globally unique per
+accepted event per subscription. Both ordering-pair components are required: a backfill fetch's
+`sequence` alone is only a nanosecond-within-second fraction (`BillingSourceVersion.forBackfillFetch`),
+so two fetches in different seconds can share that fraction; including `version` (the whole second)
+rules that out, and a backfill page's shared `sequence` bucket is additionally disambiguated by
+subscription ID, since one page normalizes many subscriptions. `revenue_subscription_states` enforces
+this uniqueness, so a redelivered/replayed event is a no-op insert (`ON CONFLICT DO NOTHING`) and
 `recordAndReplay` re-derives the same movements/snapshots from the same history — no duplicate rows.
+`StripeMrrRecalculationIntegrationTests.backfillFetchesInDifferentSecondsWithTheSameNanosecondFractionProduceDistinctMrrStates`
+covers the collision directly.
+
 Out-of-order delivery never regresses newer MRR state, but the mechanism is worth being precise about:
 `BillingLedgerUpsertService.upsertSubscription`'s own pre-existing version guard
 (`(source_version, source_sequence)`, #12) rejects a ledger write that is older than what
@@ -87,6 +93,47 @@ _does_ still apply (nothing newer has landed yet) is inserted at its correct chr
 history; an older event that arrives _after_ a newer one is safely dropped by the ledger before it
 reaches MRR at all, so it can never regress or fragment the current MRR state. Either way, the
 newer/current MRR snapshot is never regressed -- confirmed by test.
+
+### Same-second, different-sequence collisions
+
+`revenue_subscription_states` holds at most one row per `(subscription, effective_at)` -- correct per
+ADR-0004: "equal effective timestamps are grouped before classification... producing at most one net
+movement." Stripe's own provider timestamps only carry whole-second precision, so two genuinely
+distinct, sequence-ordered changes to the same subscription can legitimately resolve to the same
+second -- `BillingLedgerIdempotencyIntegrationTests` already proves this is a real, tested scenario at
+the ledger layer, not a contrived edge case.
+
+`BillingMrrRecalculationAdapter.clearSupersededState` handles it without ever fabricating a timestamp:
+`effective_at` passed to `recordAndReplay` is always exactly the caller's provider-declared value.
+When a _different_ event already occupies that exact `(subscription, effective_at)` slot, it is
+deleted first (cascading to its items/discounts) so the incoming content becomes the sole record at
+that instant; a true replay of the _same_ event (matching `source_billing_reference`) is left alone,
+and `recordAndReplay`'s own `ON CONFLICT ... DO NOTHING` then correctly no-ops it.
+
+This is deterministic regardless of delivery/processing order because
+`BillingLedgerUpsertService.upsertSubscription`'s own `(source_version, source_sequence)` version guard
+already only ever lets `recalculateMrr` be invoked, for one subscription, in non-decreasing
+ordering-pair order -- a write that would regress relative to the currently stored ledger state is
+rejected before reaching MRR recalculation at all. So whichever call happens to run last for a given
+slot is always the ordering-pair winner, in either processing order:
+`StripeMrrRecalculationIntegrationTests.sameSecondDifferentSequenceSubscriptionChangesConvergeToIdenticalMrrRegardlessOfProcessingOrder`
+proves both the forward and reversed delivery order of the same two events converge to byte-identical
+movements and snapshots. (An earlier version of this adapter nudged the later state's timestamp forward
+by a microsecond instead of clearing the superseded row; that fabricated a timestamp ADR-0004 does not
+sanction and made history depend on processing order -- caught in review before merge.)
+
+### Usage-derived pricing
+
+ADR-0004 requires metered/tiered recurring prices to fail visibly as `UNSUPPORTED_USAGE_PRICING`
+rather than being calculated as ordinary MRR. A metered price can still carry a non-null
+`unit_amount` (the per-unit rate), so `unit_amount` presence alone cannot distinguish it from a fixed
+recurring charge -- an earlier version of this change assumed it could and always passed
+`usagePricing=false`, caught in review before merge. V25 adds `billing_prices.usage_type` (Stripe's
+`recurring.usage_type`, `licensed` or `metered`); `BillingLedgerUpsertService.isUsagePricing` flags an
+item as usage-derived when the price's `usage_type` is `metered` or its `billing_scheme` is `tiered`.
+`StripeMrrRecalculationIntegrationTests.meteredRecurringPriceWithNonNullUnitAmountFailsVisiblyInsteadOfFabricatingMrr`
+proves a metered price with a non-null `unit_amount` produces a visible `UNSUPPORTED_USAGE_PRICING`
+snapshot, not a fabricated MRR number.
 
 ### Failure and recovery boundary
 
@@ -116,23 +163,7 @@ next `runBatch`) reprocesses it from scratch. No partially-committed billing/MRR
   item-level discounts arrive embedded in `customer.subscription.*` events and are covered. A
   workspace relying on the legacy customer-level discount field would not see its MRR effect until a
   later subscription-touching event recalculates.
-- `usagePricing` is always passed as `false`: `billing_prices` has no `usage_type` column (a new
-  migration was out of scope for this issue). Metered/tiered prices are not flagged with
-  `UNSUPPORTED_USAGE_PRICING`; in practice Stripe leaves `unit_amount` null for both, which the
-  existing engine already rejects as `UNSUPPORTED_INTERVAL` (visible failure, never a fabricated
-  number) — the failure reason code is imprecise, not the correctness outcome. A follow-up issue
-  should add the column and the correct reason code.
-- `revenue_subscription_states` enforces one state per `(subscription, effective_at)`, and Stripe's
-  own provider timestamps only carry whole-second precision, so two distinct, sequence-ordered
-  changes to the same subscription can legitimately resolve to the same second —
-  `BillingLedgerIdempotencyIntegrationTests` already proves this is a real, tested scenario at the
-  ledger layer, not a contrived edge case. `BillingMrrRecalculationAdapter.disambiguate` handles it:
-  before calling `recordAndReplay`, it checks whether the candidate `effective_at` is already taken
-  for that subscription and, if so, advances by the smallest possible increment (1 microsecond) until
-  a free slot is found, bounded by `MAX_DISAMBIGUATION_ATTEMPTS`. This does not fabricate a false
-  real-world timestamp; it only breaks a tie between two changes Stripe itself distinguishes solely by
-  sequence, preserving their correct relative order in `revenue_subscription_states`. A genuine
-  redelivery of the _same_ event is unaffected: `recordAndReplay`'s own
-  `ON CONFLICT (workspace_id, source_billing_reference) DO NOTHING` still no-ops the insert regardless
-  of which candidate timestamp was passed in, since the conflict target is the reference, not the
-  timestamp.
+
+`usagePricing` detection and the same-second collision handling were both caught and fixed during
+review (see the dedicated sections above and V25's `billing_prices.usage_type` column) rather than
+left as limitations.

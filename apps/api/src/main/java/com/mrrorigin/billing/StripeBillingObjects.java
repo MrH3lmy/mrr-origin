@@ -22,6 +22,12 @@ final class StripeBillingObjects {
             OffsetDateTime providerCreatedAt,
             Optional<ParsedDiscount> discount) {}
 
+    /**
+     * @param usageType Stripe's {@code recurring.usage_type} ({@code licensed} or {@code metered}),
+     *     {@code null} for a non-recurring price. A metered price can still carry a non-null {@code
+     *     unitAmount} (the per-unit rate), so this is required -- separately from {@code unitAmount}
+     *     being present -- to identify usage-derived recurring revenue per ADR-0004.
+     */
     record ParsedPrice(
             String stripePriceId,
             String stripeProductId,
@@ -31,6 +37,7 @@ final class StripeBillingObjects {
             String type,
             String recurringInterval,
             Integer recurringIntervalCount,
+            String usageType,
             boolean active) {}
 
     /**

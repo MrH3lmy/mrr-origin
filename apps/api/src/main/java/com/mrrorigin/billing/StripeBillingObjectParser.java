@@ -89,6 +89,7 @@ final class StripeBillingObjectParser {
                 requiredText(price, "type"),
                 isRecurring ? requiredText(recurring, "interval") : null,
                 isRecurring ? (int) requiredLong(recurring, "interval_count") : null,
+                isRecurring ? optionalText(recurring, "usage_type") : null,
                 requiredBoolean(price, "active"));
     }
 

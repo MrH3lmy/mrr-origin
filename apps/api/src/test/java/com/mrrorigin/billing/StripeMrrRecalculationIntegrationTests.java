@@ -334,7 +334,124 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
         assertThat(revenue.snapshots(workspaceB, "cus_shared_id")).isEqualTo(workspaceBSnapshotsBefore);
     }
 
+    // ---- 7. Same-second, different-sequence changes converge regardless of processing order --------
+
+    @Test
+    void sameSecondDifferentSequenceSubscriptionChangesConvergeToIdenticalMrrRegardlessOfProcessingOrder() {
+        UUID forwardWorkspace = createWorkspace();
+        UUID reversedWorkspace = createWorkspace();
+        long sharedVersion = 1_800_000_000L;
+        var lower = new BillingSourceVersion.SourceVersion(sharedVersion, "W:evt_order_a");
+        var higher = new BillingSourceVersion.SourceVersion(sharedVersion, "W:evt_order_b");
+
+        var price = new StripeBillingObjects.ParsedPrice(
+                "price_order", "prod_order", "usd", 1000L, "per_unit", "recurring", "month", 1, "licensed", true);
+        ledger.upsertPrice(forwardWorkspace, price, lower, BillingLedgerSource.WEBHOOK);
+        ledger.upsertPrice(reversedWorkspace, price, lower, BillingLedgerSource.WEBHOOK);
+
+        var trialing = subscriptionWithItem("sub_order", "cus_order", "trialing", "price_order", 1);
+        var active = subscriptionWithItem("sub_order", "cus_order", "active", "price_order", 1);
+
+        // Forward: lower-sequence (trialing) applied, then higher-sequence (active) -- both accepted.
+        ledger.upsertSubscription(forwardWorkspace, trialing, lower, BillingLedgerSource.WEBHOOK);
+        ledger.upsertSubscription(forwardWorkspace, active, higher, BillingLedgerSource.WEBHOOK);
+
+        // Reversed: higher-sequence (active) applied first, then lower-sequence (trialing) arrives
+        // after -- rejected as stale by the ledger's own version guard before MRR ever sees it.
+        ledger.upsertSubscription(reversedWorkspace, active, higher, BillingLedgerSource.WEBHOOK);
+        ledger.upsertSubscription(reversedWorkspace, trialing, lower, BillingLedgerSource.WEBHOOK);
+
+        List<Movement> forwardMovements = revenue.movements(forwardWorkspace, "cus_order");
+        List<Movement> reversedMovements = revenue.movements(reversedWorkspace, "cus_order");
+        List<Snapshot> forwardSnapshots = revenue.snapshots(forwardWorkspace, "cus_order");
+        List<Snapshot> reversedSnapshots = revenue.snapshots(reversedWorkspace, "cus_order");
+
+        assertThat(forwardMovements).extracting(Movement::type).containsExactly("NEW");
+        assertThat(forwardMovements).extracting(Movement::amountMinor).containsExactly(1000L);
+        assertThat(forwardMovements).isEqualTo(reversedMovements);
+        assertThat(forwardSnapshots).isEqualTo(reversedSnapshots);
+        assertThat(jdbc().sql("SELECT count(*) FROM revenue_subscription_states WHERE workspace_id = :w")
+                        .param("w", forwardWorkspace)
+                        .query(Long.class)
+                        .single())
+                .isEqualTo(1);
+    }
+
+    // ---- 8. Backfill source_billing_reference stays globally unique across seconds -----------------
+
+    @Test
+    void backfillFetchesInDifferentSecondsWithTheSameNanosecondFractionProduceDistinctMrrStates() {
+        UUID workspaceId = createWorkspace();
+        var price = new StripeBillingObjects.ParsedPrice(
+                "price_bfref", "prod_bfref", "usd", 1000L, "per_unit", "recurring", "month", 1, "licensed", true);
+        // Same `sequence` (nanosecond-within-second fraction), different `version` (whole second) --
+        // exactly the case a sequence-only reference would silently collide on.
+        var firstFetch = new BillingSourceVersion.SourceVersion(2_000_000_000L, "Z:000000001");
+        var secondFetch = new BillingSourceVersion.SourceVersion(2_000_000_100L, "Z:000000001");
+        ledger.upsertPrice(workspaceId, price, firstFetch, BillingLedgerSource.BACKFILL);
+
+        var first = subscriptionWithItem("sub_bfref", "cus_bfref", "active", "price_bfref", 1);
+        var second = subscriptionWithItem("sub_bfref", "cus_bfref", "active", "price_bfref", 2);
+
+        ledger.upsertSubscription(workspaceId, first, firstFetch, BillingLedgerSource.BACKFILL);
+        ledger.upsertSubscription(workspaceId, second, secondFetch, BillingLedgerSource.BACKFILL);
+
+        List<Movement> movements = revenue.movements(workspaceId, "cus_bfref");
+        assertThat(movements).extracting(Movement::type).containsExactly("NEW", "EXPANSION");
+        assertThat(movements).extracting(Movement::amountMinor).containsExactly(1000L, 1000L);
+    }
+
+    // ---- 9. Metered recurring price fails visibly instead of fabricating MRR -----------------------
+
+    @Test
+    void meteredRecurringPriceWithNonNullUnitAmountFailsVisiblyInsteadOfFabricatingMrr() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_metered", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+
+        webhook(connectionId, workspaceId, "evt_metered_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_metered", "usd", start, false, null));
+        // A metered price still carries a non-null unit_amount (the per-unit rate) -- the bug this
+        // guards against is treating that as an ordinary fixed recurring charge.
+        webhook(connectionId, workspaceId, "evt_metered_price", "price.created", T0,
+                BillingFixtures.price("price_metered", "prod_metered", "usd", 500L, "recurring", "month", 1, "metered", true));
+        webhook(connectionId, workspaceId, "evt_metered_sub", "customer.subscription.created", T0.plusSeconds(60),
+                BillingFixtures.subscription(
+                        "sub_metered", "cus_metered", "active", "usd", start, start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_metered", "price_metered", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(3);
+
+        List<Snapshot> snapshots = revenue.snapshots(workspaceId, "cus_metered");
+        assertThat(snapshots).singleElement().satisfies(snapshot -> {
+            assertThat(snapshot.supported()).isFalse();
+            assertThat(snapshot.unsupportedReason()).isEqualTo("UNSUPPORTED_USAGE_PRICING");
+            assertThat(snapshot.amountMinor()).isNull();
+        });
+        assertThat(revenue.movements(workspaceId, "cus_metered")).isEmpty();
+    }
+
     // ---- helpers --------------------------------------------------------------------------------
+
+    private static StripeBillingObjects.ParsedSubscription subscriptionWithItem(
+            String stripeSubscriptionId, String customerId, String status, String stripePriceId, int quantity) {
+        return new StripeBillingObjects.ParsedSubscription(
+                stripeSubscriptionId,
+                customerId,
+                status,
+                "usd",
+                null,
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                List.of(new StripeBillingObjects.ParsedSubscriptionItem(
+                        stripeSubscriptionId + "-item", stripePriceId, quantity, List.of())),
+                List.of());
+    }
 
     private void webhook(UUID connectionId, UUID workspaceId, String eventId, String type, Instant at, String object) {
         insertPendingWebhookEvent(connectionId, workspaceId, StripeConnectionMode.TEST, eventId, type, at, object);

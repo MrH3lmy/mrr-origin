@@ -22,12 +22,6 @@ import com.mrrorigin.revenue.RevenueModels.SubscriptionState;
 @Service
 class BillingMrrRecalculationAdapter implements BillingMrrRecalculationPort {
 
-    /**
-     * Bound on the same-second disambiguation loop below -- generously beyond any realistic number
-     * of distinct provider-sequenced changes to one subscription inside a single second.
-     */
-    private static final int MAX_DISAMBIGUATION_ATTEMPTS = 1000;
-
     private final RevenueCalculationService revenueCalculationService;
     private final JdbcClient jdbc;
 
@@ -38,12 +32,13 @@ class BillingMrrRecalculationAdapter implements BillingMrrRecalculationPort {
 
     @Override
     public void recalculateSubscription(SubscriptionMrrSnapshot snapshot) {
-        OffsetDateTime effectiveAt = disambiguate(snapshot.workspaceId(), snapshot.stripeSubscriptionId(), snapshot.effectiveAt());
+        clearSupersededState(
+                snapshot.workspaceId(), snapshot.stripeSubscriptionId(), snapshot.effectiveAt(), snapshot.sourceBillingReference());
         revenueCalculationService.recordAndReplay(new SubscriptionState(
                 snapshot.workspaceId(),
                 snapshot.stripeCustomerId(),
                 snapshot.stripeSubscriptionId(),
-                effectiveAt,
+                snapshot.effectiveAt(),
                 snapshot.status(),
                 snapshot.sourceBillingReference(),
                 toItems(snapshot.items()),
@@ -52,38 +47,43 @@ class BillingMrrRecalculationAdapter implements BillingMrrRecalculationPort {
 
     /**
      * {@code revenue_subscription_states} holds at most one row per {@code (subscription,
-     * effective_at)} -- correct, since a subscription cannot truly have two different states at the
-     * literal same instant. Stripe's own provider timestamps only carry whole-second precision
-     * (see {@code BillingSourceVersion}), so two genuinely distinct, sequence-ordered changes to the
-     * same subscription can legitimately resolve to the same whole second (proven by
-     * BillingLedgerIdempotencyIntegrationTests' same-second convergence coverage). When that
-     * happens, this nudges the later one forward by the smallest possible increment so both remain
-     * individually recorded in their correct relative order, rather than colliding on the unique
-     * constraint. This does not fabricate a false real-world timestamp -- it only breaks a tie
-     * between two changes Stripe itself only distinguishes by sequence, not by time.
+     * effective_at)} -- correct per ADR-0004: "equal effective timestamps are grouped before
+     * classification... producing at most one net movement." Stripe's own provider timestamps only
+     * carry whole-second precision (see {@code BillingSourceVersion}), so two genuinely distinct,
+     * sequence-ordered changes to the same subscription can legitimately resolve to the same whole
+     * second (proven real, not contrived, by {@code BillingLedgerIdempotencyIntegrationTests}' own
+     * same-second convergence coverage).
+     *
+     * <p>This never fabricates a timestamp -- {@code effective_at} passed to {@code recordAndReplay}
+     * is always exactly the caller's provider-declared value. Instead, when a different event already
+     * occupies that exact {@code (subscription, effective_at)} slot, it is cleared first so the
+     * incoming, more-recently-applied content becomes the sole record at that instant -- the {@code
+     * DELETE}'s cascade removes its items/discounts too. A true replay of the *same* event
+     * (matching {@code source_billing_reference}) is left alone; {@code recordAndReplay}'s own
+     * {@code ON CONFLICT ... DO NOTHING} then correctly no-ops it, id and all.
+     *
+     * <p>This is deterministic regardless of delivery/processing order because {@code
+     * BillingLedgerUpsertService.upsertSubscription}'s own {@code (source_version, source_sequence)}
+     * version guard already only ever lets this method be called, for one subscription, in
+     * non-decreasing ordering-pair order -- a write that would represent a regression relative to the
+     * currently stored ledger state is rejected before reaching MRR recalculation at all. So whichever
+     * call happens to run last for a given slot is always the ordering-pair winner, in either
+     * processing order: proven by the same {@code BillingLedgerIdempotencyIntegrationTests} scenarios
+     * this class's tests reuse.
      */
-    private OffsetDateTime disambiguate(UUID workspaceId, String stripeSubscriptionId, OffsetDateTime effectiveAt) {
-        OffsetDateTime candidate = effectiveAt;
-        for (int attempt = 0; attempt < MAX_DISAMBIGUATION_ATTEMPTS; attempt++) {
-            boolean free = jdbc.sql(
-                            """
-                            SELECT 1 FROM revenue_subscription_states
-                            WHERE workspace_id = :workspaceId AND stripe_subscription_id = :subscriptionId
-                              AND effective_at = :effectiveAt
-                            """)
-                    .param("workspaceId", workspaceId)
-                    .param("subscriptionId", stripeSubscriptionId)
-                    .param("effectiveAt", candidate)
-                    .query(Integer.class)
-                    .optional()
-                    .isEmpty();
-            if (free) {
-                return candidate;
-            }
-            candidate = candidate.plusNanos(1_000);
-        }
-        throw new IllegalStateException(
-                "Could not find a free effective_at slot for subscription " + stripeSubscriptionId + " near " + effectiveAt);
+    private void clearSupersededState(
+            UUID workspaceId, String stripeSubscriptionId, OffsetDateTime effectiveAt, String sourceBillingReference) {
+        jdbc.sql(
+                        """
+                        DELETE FROM revenue_subscription_states
+                        WHERE workspace_id = :workspaceId AND stripe_subscription_id = :subscriptionId
+                          AND effective_at = :effectiveAt AND source_billing_reference <> :sourceBillingReference
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("subscriptionId", stripeSubscriptionId)
+                .param("effectiveAt", effectiveAt)
+                .param("sourceBillingReference", sourceBillingReference)
+                .update();
     }
 
     private static List<Item> toItems(List<MrrItem> items) {
