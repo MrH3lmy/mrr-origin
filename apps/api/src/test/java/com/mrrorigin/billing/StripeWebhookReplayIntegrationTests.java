@@ -57,6 +57,7 @@ class StripeWebhookReplayIntegrationTests extends AbstractBillingLedgerIntegrati
     void replayRecoversATransientlyFailedEventAndReplayingAgainIsANoOp() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_replay_transient", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_unseeded");
 
         String subscriptionId = "sub_transient_fail";
         String customer = BillingFixtures.customer("cus_transient_fail", "usd", BASE.getEpochSecond(), false, null);
@@ -140,6 +141,7 @@ class StripeWebhookReplayIntegrationTests extends AbstractBillingLedgerIntegrati
     void replayingAnAlreadyFullyAppliedEventCreatesNoDuplicateLedgerRows() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_replay_no_dup", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_no_dup");
 
         String customer = BillingFixtures.customer("cus_no_dup", "usd", BASE.getEpochSecond(), false, null);
         insertPendingWebhookEvent(
@@ -185,6 +187,7 @@ class StripeWebhookReplayIntegrationTests extends AbstractBillingLedgerIntegrati
     void interruptedReprocessingAfterReplayIsSafelyRetriedOnceTheLeaseExpires() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_replay_interrupt", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_interrupt");
 
         // A fixable (TRANSIENT) failure, not the always-failing UNSUPPORTED fixture: this test is
         // about the claim/lease pipeline surviving an interruption, so the replayed event must be
