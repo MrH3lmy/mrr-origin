@@ -58,5 +58,6 @@ public interface BillingMrrRecalculationPort {
             Long amountOffMinor,
             String currency,
             OffsetDateTime startAt,
-            OffsetDateTime endAt) {}
+            OffsetDateTime endAt,
+            boolean customerLevel) {}
 }

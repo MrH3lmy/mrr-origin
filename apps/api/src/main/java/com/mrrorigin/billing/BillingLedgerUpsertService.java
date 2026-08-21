@@ -316,6 +316,13 @@ class BillingLedgerUpsertService {
                 discounts.add(toMrrDiscount(discount));
             }
         }
+        for (MrrDiscount customerDiscount : activeCustomerDiscounts(
+                workspaceId, subscription.stripeCustomerId(), effectiveAt)) {
+            // Prefer the ledger row when Stripe also expands the equivalent customer discount in
+            // the subscription payload: it retains customer scope for fixed-allocation validation.
+            discounts.removeIf(existing -> equivalentDiscount(existing, customerDiscount));
+            discounts.add(customerDiscount);
+        }
 
         mrrRecalculation.recalculateSubscription(new SubscriptionMrrSnapshot(
                 workspaceId,
@@ -347,7 +354,44 @@ class BillingLedgerUpsertService {
                 discount.amountOff(),
                 upperCase(discount.currency()),
                 discount.startAt(),
-                discount.endAt());
+                discount.endAt(),
+                false);
+    }
+
+    private List<MrrDiscount> activeCustomerDiscounts(
+            UUID workspaceId, String stripeCustomerId, OffsetDateTime effectiveAt) {
+        return jdbc.sql(
+                        """
+                        SELECT stripe_discount_id, percent_off, amount_off, currency, start_at, end_at
+                        FROM billing_discounts
+                        WHERE workspace_id = :workspaceId
+                          AND stripe_customer_id = :stripeCustomerId
+                          AND stripe_subscription_id IS NULL
+                          AND stripe_subscription_item_id IS NULL
+                          AND deleted = FALSE
+                          AND start_at <= :effectiveAt
+                          AND (end_at IS NULL OR end_at > :effectiveAt)
+                        ORDER BY stripe_discount_id
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("stripeCustomerId", stripeCustomerId)
+                .param("effectiveAt", effectiveAt)
+                .query((rs, rowNum) -> new MrrDiscount(
+                        rs.getString("stripe_discount_id"), null, rs.getBigDecimal("percent_off"),
+                        (Long) rs.getObject("amount_off"), upperCase(rs.getString("currency")),
+                        rs.getObject("start_at", OffsetDateTime.class),
+                        rs.getObject("end_at", OffsetDateTime.class), true))
+                .list();
+    }
+
+    private static boolean equivalentDiscount(MrrDiscount left, MrrDiscount right) {
+        return left.sourceReference().equals(right.sourceReference())
+                || (left.itemReference() == null && right.itemReference() == null
+                        && java.util.Objects.equals(left.percentOff(), right.percentOff())
+                        && java.util.Objects.equals(left.amountOffMinor(), right.amountOffMinor())
+                        && java.util.Objects.equals(left.currency(), right.currency())
+                        && java.util.Objects.equals(left.startAt(), right.startAt())
+                        && java.util.Objects.equals(left.endAt(), right.endAt()));
     }
 
     /**

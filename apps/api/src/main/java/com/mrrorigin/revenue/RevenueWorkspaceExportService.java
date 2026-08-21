@@ -33,7 +33,7 @@ public class RevenueWorkspaceExportService {
             """;
     private static final String STATE_DISCOUNT_COLUMNS = """
             id, workspace_id, state_id, source_discount_reference, source_item_reference, percent_off,
-            amount_off_minor, currency, start_at, end_at
+            amount_off_minor, currency, start_at, end_at, customer_level
             """;
     private static final String SNAPSHOT_COLUMNS = """
             id, workspace_id, stripe_customer_id, currency, amount_minor, effective_at,

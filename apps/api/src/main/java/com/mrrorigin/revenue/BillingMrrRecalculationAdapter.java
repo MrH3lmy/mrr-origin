@@ -136,7 +136,8 @@ class BillingMrrRecalculationAdapter implements BillingMrrRecalculationPort {
                         discount.amountOffMinor(),
                         discount.currency(),
                         discount.startAt(),
-                        discount.endAt()))
+                        discount.endAt(),
+                        discount.customerLevel()))
                 .toList();
     }
 }

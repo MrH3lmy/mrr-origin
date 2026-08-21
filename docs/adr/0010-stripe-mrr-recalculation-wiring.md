@@ -154,15 +154,13 @@ next `runBatch`) reprocesses it from scratch. No partially-committed billing/MRR
 - Real Stripe traffic now produces `customer_mrr_movements`/`customer_mrr_snapshots` without changing
   `RevenueCalculationService`'s calculation semantics.
 
-## Known limitations (reported, not silently papered over)
+## Customer-level discount follow-up
 
-- Legacy top-level `customer.discount.*` webhook events (the customer's singular legacy `discount`
-  field, distinct from a subscription's compound `discounts` array) are not wired to recalculation.
-  These are customer-scoped, not subscription-scoped, in this codebase's parser
-  (`StripeBillingObjectParser.parseNestedDiscount`/`parseTopLevelDiscount`); subscription-level and
-  item-level discounts arrive embedded in `customer.subscription.*` events and are covered. A
-  workspace relying on the legacy customer-level discount field would not see its MRR effect until a
-  later subscription-touching event recalculates.
+ADR-0011 closes the original customer-discount gap: every accepted subscription recalculation now
+loads the normalized customer's discount as of the subscription state's `effective_at`, combines it
+with embedded subscription/item discounts without duplicating an equivalent discount, and preserves
+ADR-0004's visible unsupported outcomes. Customer discount mutation events remain customer-scoped;
+the next accepted subscription recalculation consumes the applicable normalized state.
 
 `usagePricing` detection and the same-second collision handling were both caught and fixed during
 review (see the dedicated sections above and V25's `billing_prices.usage_type` column) rather than

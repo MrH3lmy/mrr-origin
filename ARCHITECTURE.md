@@ -135,16 +135,17 @@ The API must remain horizontally safe: scheduled work uses database leases, inge
 
 ## Architecture decisions
 
-| ADR                                                                       | Decision                                                                                                                   |
-| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| [ADR-0001](docs/adr/0001-modular-monolith.md)                             | Start with a modular monolith                                                                                              |
-| [ADR-0002](docs/adr/0002-immutable-inputs-derived-results.md)             | Separate immutable inputs from derived results                                                                             |
-| [ADR-0003](docs/adr/0003-stripe-connection-credential-security.md)        | Stripe Standard-account OAuth consent (`read_only`) plus platform-key/`Stripe-Account` API calls                           |
-| [ADR-0004](docs/adr/0004-v1-mrr-semantics.md)                             | Normalize V1 MRR as auditable recurring-revenue state with explicit effective dates and visible unsupported results        |
-| [ADR-0005](docs/adr/0005-attribution-model-evidence-confidence-window.md) | First-touch/last-touch selection, last-non-direct handling, 90-day window, evidence precedence, and recalculation contract |
-| [ADR-0008](docs/adr/0008-workspace-deletion-lifecycle.md)                 | Owner-only, resumable, cross-module workspace deletion; the one module allowed to depend on all others                     |
-| [ADR-0009](docs/adr/0009-workspace-data-export.md)                        | Manager-only, synchronously streamed ZIP workspace data export with a versioned manifest and per-domain NDJSON files       |
-| [ADR-0010](docs/adr/0010-stripe-mrr-recalculation-wiring.md)              | Synchronous, in-transaction Stripe → MRR recalculation via a billing-owned port, revenue-provided adapter                  |
+| ADR                                                                           | Decision                                                                                                                   |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| [ADR-0001](docs/adr/0001-modular-monolith.md)                                 | Start with a modular monolith                                                                                              |
+| [ADR-0002](docs/adr/0002-immutable-inputs-derived-results.md)                 | Separate immutable inputs from derived results                                                                             |
+| [ADR-0003](docs/adr/0003-stripe-connection-credential-security.md)            | Stripe Standard-account OAuth consent (`read_only`) plus platform-key/`Stripe-Account` API calls                           |
+| [ADR-0004](docs/adr/0004-v1-mrr-semantics.md)                                 | Normalize V1 MRR as auditable recurring-revenue state with explicit effective dates and visible unsupported results        |
+| [ADR-0005](docs/adr/0005-attribution-model-evidence-confidence-window.md)     | First-touch/last-touch selection, last-non-direct handling, 90-day window, evidence precedence, and recalculation contract |
+| [ADR-0008](docs/adr/0008-workspace-deletion-lifecycle.md)                     | Owner-only, resumable, cross-module workspace deletion; the one module allowed to depend on all others                     |
+| [ADR-0009](docs/adr/0009-workspace-data-export.md)                            | Manager-only, synchronously streamed ZIP workspace data export with a versioned manifest and per-domain NDJSON files       |
+| [ADR-0010](docs/adr/0010-stripe-mrr-recalculation-wiring.md)                  | Synchronous, in-transaction Stripe → MRR recalculation via a billing-owned port, revenue-provided adapter                  |
+| [ADR-0011](docs/adr/0011-effective-customer-discounts-in-subscription-mrr.md) | Effective-time customer discounts included in subscription MRR without invented stacking or allocation semantics           |
 
 ## Deferred decisions
 

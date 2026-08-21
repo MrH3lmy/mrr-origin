@@ -430,6 +430,166 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
         assertThat(revenue.movements(workspaceId, "cus_metered")).isEmpty();
     }
 
+    // ---- 10. Customer-level discounts -----------------------------------------------------------
+
+    @Test
+    void customerPercentageDiscountExistingBeforeSubscriptionIsAppliedAndReplayIsDeterministic() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_customer_discount", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+        String discount = BillingFixtures.discount(
+                "di_customer", "cus_customer_discount", null, "coupon_customer", 25L, null, null,
+                start - 60, start + 3_600L);
+        webhook(connectionId, workspaceId, "evt_cd_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_customer_discount", "usd", start - 60, false, discount));
+        webhook(connectionId, workspaceId, "evt_cd_price", "price.created", T0,
+                BillingFixtures.price("price_cd", "prod_cd", "usd", 2000L, "recurring", "month", 1, true));
+        webhook(connectionId, workspaceId, "evt_cd_sub", "customer.subscription.created", T0.plusSeconds(60),
+                BillingFixtures.subscription(
+                        "sub_cd", "cus_customer_discount", "active", "usd", start, start + 2_592_000L,
+                        false, null, null, BillingFixtures.subscriptionItem("si_cd", "price_cd", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(3);
+        assertThat(revenue.snapshots(workspaceId, "cus_customer_discount"))
+                .singleElement().extracting(Snapshot::amountMinor).isEqualTo(1500L);
+
+        resetEventToPending(workspaceId, "evt_cd_sub");
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(revenue.snapshots(workspaceId, "cus_customer_discount"))
+                .singleElement().extracting(Snapshot::amountMinor).isEqualTo(1500L);
+        assertThat(revenue.movements(workspaceId, "cus_customer_discount")).hasSize(1);
+    }
+
+    @Test
+    void fullBackfillAppliesCustomerPercentageDiscountBeforeSubscriptionPhase() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_discount_backfill", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+        String discount = BillingFixtures.discount(
+                "di_backfill_customer", "cus_backfill_customer", null, "coupon_backfill", 20L, null, null,
+                start - 60, start + 3_600L);
+        STRIPE_LIST_STUB.seed("/v1/customers", List.of(
+                BillingFixtures.customer("cus_backfill_customer", "usd", start - 60, false, discount)));
+        STRIPE_LIST_STUB.seed("/v1/prices", List.of(
+                BillingFixtures.price("price_backfill_discount", "prod_backfill_discount", "usd", 5000L,
+                        "recurring", "month", 1, true)));
+        STRIPE_LIST_STUB.seed("/v1/subscriptions", List.of(BillingFixtures.subscription(
+                "sub_backfill_discount", "cus_backfill_customer", "active", "usd", start, start + 2_592_000L,
+                false, null, null,
+                BillingFixtures.subscriptionItem("si_backfill_discount", "price_backfill_discount", 1), null)));
+        STRIPE_LIST_STUB.seed("/v1/invoices", List.of());
+        STRIPE_LIST_STUB.seed("/v1/charges", List.of());
+        STRIPE_LIST_STUB.seed("/v1/refunds", List.of());
+
+        runBackfillToCompletion(connectionId);
+        assertThat(revenue.snapshots(workspaceId, "cus_backfill_customer"))
+                .singleElement().extracting(Snapshot::amountMinor).isEqualTo(4000L);
+    }
+
+    @Test
+    void customerDiscountLookupRespectsEffectiveStartAndEnd() {
+        assertTemporalCustomerDiscountNotApplied("future", T0.plusSeconds(120).getEpochSecond(), T0.plusSeconds(600).getEpochSecond());
+        assertTemporalCustomerDiscountNotApplied("ended", T0.minusSeconds(600).getEpochSecond(), T0.minusSeconds(1).getEpochSecond());
+    }
+
+    @Test
+    void subscriptionAndCustomerDiscountStackingFailsVisibly() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_discount_stack", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+        String customerDiscount = BillingFixtures.discount(
+                "di_stack_customer", "cus_stack", null, "coupon_stack_customer", 10L, null, null,
+                start - 60, start + 3_600L);
+        String subscriptionDiscount = BillingFixtures.discount(
+                "di_stack_subscription", null, "sub_stack", "coupon_stack_subscription", 5L, null, null,
+                start - 60, start + 3_600L);
+        webhook(connectionId, workspaceId, "evt_stack_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_stack", "usd", start - 60, false, customerDiscount));
+        webhook(connectionId, workspaceId, "evt_stack_price", "price.created", T0,
+                BillingFixtures.price("price_stack", "prod_stack", "usd", 1000L, "recurring", "month", 1, true));
+        webhook(connectionId, workspaceId, "evt_stack_sub", "customer.subscription.created", T0,
+                BillingFixtures.subscription("sub_stack", "cus_stack", "active", "usd", start,
+                        start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_stack", "price_stack", 1), subscriptionDiscount));
+        assertThat(drainWebhookQueue()).isEqualTo(3);
+        assertThat(revenue.snapshots(workspaceId, "cus_stack")).singleElement().satisfies(snapshot -> {
+            assertThat(snapshot.supported()).isFalse();
+            assertThat(snapshot.unsupportedReason()).isEqualTo("UNSUPPORTED_DISCOUNT");
+        });
+        assertThat(revenue.movements(workspaceId, "cus_stack")).isEmpty();
+    }
+
+    @Test
+    void fixedCustomerDiscountBecomesExplicitlyUnsupportedWhenSecondSubscriptionMakesAllocationAmbiguous() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_fixed_customer", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+        String discount = BillingFixtures.discount(
+                "di_fixed_customer", "cus_fixed", null, "coupon_fixed", null, 300L, "usd",
+                start - 60, start + 3_600L);
+        webhook(connectionId, workspaceId, "evt_fixed_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_fixed", "usd", start - 60, false, discount));
+        webhook(connectionId, workspaceId, "evt_fixed_price", "price.created", T0,
+                BillingFixtures.price("price_fixed", "prod_fixed", "usd", 1000L, "recurring", "month", 1, true));
+        webhook(connectionId, workspaceId, "evt_fixed_sub1", "customer.subscription.created", T0,
+                BillingFixtures.subscription("sub_fixed_1", "cus_fixed", "active", "usd", start,
+                        start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_fixed_1", "price_fixed", 1), null));
+        webhook(connectionId, workspaceId, "evt_fixed_sub2", "customer.subscription.created", T0.plusSeconds(60),
+                BillingFixtures.subscription("sub_fixed_2", "cus_fixed", "active", "usd", start + 60,
+                        start + 2_592_060L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_fixed_2", "price_fixed", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(4);
+        Snapshot latest = revenue.snapshots(workspaceId, "cus_fixed").getLast();
+        assertThat(latest.supported()).isFalse();
+        assertThat(latest.unsupportedReason()).isEqualTo("AMBIGUOUS_FIXED_DISCOUNT_ALLOCATION");
+        assertThat(latest.amountMinor()).isNull();
+    }
+
+    @Test
+    void customerDiscountLookupIsWorkspaceScoped() {
+        UUID discountedWorkspace = createWorkspace();
+        UUID plainWorkspace = createWorkspace();
+        UUID discountedConnection = insertActiveConnection(discountedWorkspace, "acct_tenant_discount", StripeConnectionMode.TEST);
+        UUID plainConnection = insertActiveConnection(plainWorkspace, "acct_tenant_plain", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+        String discount = BillingFixtures.discount("di_tenant", "cus_shared", null, "coupon_tenant", 50L,
+                null, null, start - 60, start + 3_600L);
+        webhook(discountedConnection, discountedWorkspace, "evt_tenant_customer_a", "customer.created", T0,
+                BillingFixtures.customer("cus_shared", "usd", start, false, discount));
+        webhook(plainConnection, plainWorkspace, "evt_tenant_customer_b", "customer.created", T0,
+                BillingFixtures.customer("cus_shared", "usd", start, false, null));
+        webhook(plainConnection, plainWorkspace, "evt_tenant_price_b", "price.created", T0,
+                BillingFixtures.price("price_tenant", "prod_tenant", "usd", 1000L, "recurring", "month", 1, true));
+        webhook(plainConnection, plainWorkspace, "evt_tenant_sub_b", "customer.subscription.created", T0,
+                BillingFixtures.subscription("sub_tenant", "cus_shared", "active", "usd", start,
+                        start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_tenant", "price_tenant", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(4);
+        assertThat(revenue.snapshots(plainWorkspace, "cus_shared"))
+                .singleElement().extracting(Snapshot::amountMinor).isEqualTo(1000L);
+    }
+
+    private void assertTemporalCustomerDiscountNotApplied(String suffix, long discountStart, long discountEnd) {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_temporal_" + suffix, StripeConnectionMode.TEST);
+        long effective = T0.getEpochSecond();
+        String customerId = "cus_temporal_" + suffix;
+        String discount = BillingFixtures.discount("di_temporal_" + suffix, customerId, null,
+                "coupon_temporal_" + suffix, 50L, null, null, discountStart, discountEnd);
+        webhook(connectionId, workspaceId, "evt_temporal_customer_" + suffix, "customer.created", T0,
+                BillingFixtures.customer(customerId, "usd", effective - 600, false, discount));
+        webhook(connectionId, workspaceId, "evt_temporal_price_" + suffix, "price.created", T0,
+                BillingFixtures.price("price_temporal_" + suffix, "prod_temporal", "usd", 1000L,
+                        "recurring", "month", 1, true));
+        webhook(connectionId, workspaceId, "evt_temporal_sub_" + suffix, "customer.subscription.created", T0,
+                BillingFixtures.subscription("sub_temporal_" + suffix, customerId, "active", "usd", effective,
+                        effective + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_temporal_" + suffix, "price_temporal_" + suffix, 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(3);
+        assertThat(revenue.snapshots(workspaceId, customerId))
+                .singleElement().extracting(Snapshot::amountMinor).isEqualTo(1000L);
+    }
+
     // ---- helpers --------------------------------------------------------------------------------
 
     private static StripeBillingObjects.ParsedSubscription subscriptionWithItem(
