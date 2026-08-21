@@ -145,6 +145,7 @@ The API must remain horizontally safe: scheduled work uses database leases, inge
 | [ADR-0008](docs/adr/0008-workspace-deletion-lifecycle.md)                 | Owner-only, resumable, cross-module workspace deletion; the one module allowed to depend on all others                     |
 | [ADR-0009](docs/adr/0009-workspace-data-export.md)                        | Manager-only, synchronously streamed ZIP workspace data export with a versioned manifest and per-domain NDJSON files       |
 | [ADR-0010](docs/adr/0010-stripe-mrr-recalculation-wiring.md)              | Synchronous, in-transaction Stripe → MRR recalculation via a billing-owned port, revenue-provided adapter                  |
+| [ADR-0011](docs/adr/0011-customer-level-discount-mrr-recalculation.md)    | Legacy customer-level discount recalculation: percentage fans out per subscription, fixed-amount only when unambiguous     |
 
 ## Deferred decisions
 

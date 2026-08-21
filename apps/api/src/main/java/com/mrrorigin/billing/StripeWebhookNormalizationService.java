@@ -76,6 +76,7 @@ class StripeWebhookNormalizationService {
 
     private final JdbcClient jdbc;
     private final BillingLedgerUpsertService ledger;
+    private final CustomerDiscountMrrRecalculationService customerDiscountMrr;
     private final StripeSubscriptionItemsResolver subscriptionItemsResolver;
     private final StripeBackfillClient stripeClient;
     private final ObjectMapper objectMapper;
@@ -84,12 +85,14 @@ class StripeWebhookNormalizationService {
     StripeWebhookNormalizationService(
             JdbcClient jdbc,
             BillingLedgerUpsertService ledger,
+            CustomerDiscountMrrRecalculationService customerDiscountMrr,
             StripeSubscriptionItemsResolver subscriptionItemsResolver,
             StripeBackfillClient stripeClient,
             ObjectMapper objectMapper,
             PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.ledger = ledger;
+        this.customerDiscountMrr = customerDiscountMrr;
         this.subscriptionItemsResolver = subscriptionItemsResolver;
         this.stripeClient = stripeClient;
         this.objectMapper = objectMapper;
@@ -278,14 +281,14 @@ class StripeWebhookNormalizationService {
         if (DISCOUNT_UPSERT_EVENTS.contains(type)) {
             var parsed = StripeBillingObjectParser.parseTopLevelDiscount(dataObject, false);
             return () -> {
-                ledger.upsertDiscount(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                customerDiscountMrr.applyCustomerDiscount(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
                 return true;
             };
         }
         if (DISCOUNT_DELETE_EVENT.equals(type)) {
             var parsed = StripeBillingObjectParser.parseTopLevelDiscount(dataObject, true);
             return () -> {
-                ledger.upsertDiscount(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
+                customerDiscountMrr.applyCustomerDiscount(workspaceId, parsed, sourceVersion, BillingLedgerSource.WEBHOOK);
                 return true;
             };
         }
