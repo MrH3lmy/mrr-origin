@@ -608,6 +608,209 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
                 .singleElement().extracting(Snapshot::amountMinor).isEqualTo(1000L);
     }
 
+    // ---- 11. Historical resolution: a delayed subscription webhook must still see a customer
+    //          discount that was deleted (or switched) after the subscription's own effective_at,
+    //          never a plausible-but-stale MRR just because billing_discounts only keeps current
+    //          state. See ADR-0011's "Historical state: delete and update" amendment. ---------------
+
+    @Test
+    void delayedSubscriptionCreatedAfterCustomerDiscountDeletedStillAppliesTheHistoricalDiscount() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_hist_del", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+
+        webhook(connectionId, workspaceId, "evt_hd_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_hd", "usd", start - 200, false, null));
+        webhook(connectionId, workspaceId, "evt_hd_price", "price.created", T0,
+                BillingFixtures.price("price_hd", "prod_hd", "usd", 2000L, "recurring", "month", 1, true));
+        assertThat(drainWebhookQueue()).isEqualTo(2);
+
+        // T1: a customer-level percentage discount starts, well before the subscription's own
+        // effective_at (current_period_start = start, below).
+        webhook(connectionId, workspaceId, "evt_hd_discount", "customer.discount.created", T0.plusSeconds(10),
+                BillingFixtures.discount("di_hd", "cus_hd", null, "coupon_hd", 25L, null, null, start - 100, null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        // T3: customer.discount.deleted is processed -- with Stripe's own provider-declared `end` --
+        // BEFORE the delayed subscription webhook below. billing_discounts is now deleted = true.
+        long deletedAt = start + 500;
+        webhook(connectionId, workspaceId, "evt_hd_deleted", "customer.discount.deleted", T0.plusSeconds(20),
+                BillingFixtures.discount("di_hd", "cus_hd", null, "coupon_hd", 25L, null, null, start - 100, deletedAt));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(discountSnapshot(workspaceId, "di_hd")).isPresent().get()
+                .satisfies(row -> assertThat(row.get("deleted")).isEqualTo(true));
+
+        // T4: the older customer.subscription.created event (T2's own effective_at = current_period_start
+        // = `start`, strictly before the deletion instant `deletedAt`) arrives late and is processed last.
+        webhook(connectionId, workspaceId, "evt_hd_sub", "customer.subscription.created", T0.plusSeconds(999),
+                BillingFixtures.subscription(
+                        "sub_hd", "cus_hd", "active", "usd", start, start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_hd", "price_hd", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        // The discount was active at effective_at (start - 100 <= start < deletedAt): MRR is
+        // materialized net of the 25% discount from the very first NEW movement, never plausible
+        // full-price MRR just because the discount is deleted "now".
+        List<Snapshot> snapshots = revenue.snapshots(workspaceId, "cus_hd");
+        assertThat(snapshots).singleElement().satisfies(snapshot -> {
+            assertThat(snapshot.supported()).isTrue();
+            assertThat(snapshot.amountMinor()).isEqualTo(1500L);
+        });
+        List<Movement> movements = revenue.movements(workspaceId, "cus_hd");
+        assertThat(movements).extracting(Movement::type).containsExactly("NEW");
+        assertThat(movements).extracting(Movement::amountMinor).containsExactly(1500L);
+
+        // Replay (lease-expiry reclaim / explicit retry) of the exact same delayed event stays
+        // deterministic -- no duplicate movements or snapshots.
+        List<Movement> firstMovements = movements;
+        List<Snapshot> firstSnapshots = snapshots;
+        resetEventToPending(workspaceId, "evt_hd_sub");
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(revenue.movements(workspaceId, "cus_hd")).isEqualTo(firstMovements);
+        assertThat(revenue.snapshots(workspaceId, "cus_hd")).isEqualTo(firstSnapshots);
+    }
+
+    // ---- 12. As above, but the delete carries no provider-declared `end` -- the persisted end_at
+    //          must fall back to the delete event's own provider second (never NULL, never a
+    //          fabricated value), and the historical subscription recalculation must still see it. ---
+
+    @Test
+    void delayedSubscriptionCreatedAfterCustomerDiscountDeletedWithoutEndStillAppliesTheHistoricalDiscount() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_hist_del_nf", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+
+        webhook(connectionId, workspaceId, "evt_hdnf_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_hdnf", "usd", start - 200, false, null));
+        webhook(connectionId, workspaceId, "evt_hdnf_price", "price.created", T0,
+                BillingFixtures.price("price_hdnf", "prod_hdnf", "usd", 1000L, "recurring", "month", 1, true));
+        assertThat(drainWebhookQueue()).isEqualTo(2);
+
+        webhook(connectionId, workspaceId, "evt_hdnf_discount", "customer.discount.created", T0.plusSeconds(10),
+                BillingFixtures.discount("di_hdnf", "cus_hdnf", null, "coupon_hdnf", 50L, null, null, start - 100, null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        // "forever" duration coupon: the delete payload carries no `end` at all.
+        Instant deleteReceivedAt = T0.plusSeconds(700);
+        webhook(connectionId, workspaceId, "evt_hdnf_deleted", "customer.discount.deleted", deleteReceivedAt,
+                BillingFixtures.discount("di_hdnf", "cus_hdnf", null, "coupon_hdnf", 50L, null, null, start - 100, null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        // No fabricated value: end_at is exactly the delete event's own provider second.
+        assertThat(jdbc().sql("SELECT end_at FROM billing_discounts WHERE workspace_id = :w AND stripe_discount_id = :id")
+                        .param("w", workspaceId)
+                        .param("id", "di_hdnf")
+                        .query((rs, rowNum) -> rs.getObject("end_at", java.time.OffsetDateTime.class))
+                        .single()
+                        .toEpochSecond())
+                .isEqualTo(deleteReceivedAt.getEpochSecond());
+
+        webhook(connectionId, workspaceId, "evt_hdnf_sub", "customer.subscription.created", T0.plusSeconds(999),
+                BillingFixtures.subscription(
+                        "sub_hdnf", "cus_hdnf", "active", "usd", start, start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_hdnf", "price_hdnf", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        assertThat(revenue.snapshots(workspaceId, "cus_hdnf"))
+                .singleElement().extracting(Snapshot::amountMinor).isEqualTo(500L);
+    }
+
+    // ---- 13. Cross-tenant isolation for the historical-delete path: a second workspace reusing the
+    //          same Stripe customer/discount/subscription IDs, without any delete, keeps full price. --
+
+    @Test
+    void delayedSubscriptionAfterDeleteHistoricalResolutionIsWorkspaceScoped() {
+        UUID discountedWorkspace = createWorkspace();
+        UUID plainWorkspace = createWorkspace();
+        UUID discountedConnection = insertActiveConnection(discountedWorkspace, "acct_hist_tenant_a", StripeConnectionMode.TEST);
+        UUID plainConnection = insertActiveConnection(plainWorkspace, "acct_hist_tenant_b", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+
+        webhook(discountedConnection, discountedWorkspace, "evt_ht_customer_a", "customer.created", T0,
+                BillingFixtures.customer("cus_ht_shared", "usd", start - 200, false, null));
+        webhook(discountedConnection, discountedWorkspace, "evt_ht_price_a", "price.created", T0,
+                BillingFixtures.price("price_ht_shared", "prod_ht_a", "usd", 2000L, "recurring", "month", 1, true));
+        webhook(discountedConnection, discountedWorkspace, "evt_ht_discount_a", "customer.discount.created", T0.plusSeconds(10),
+                BillingFixtures.discount("di_ht_shared", "cus_ht_shared", null, "coupon_ht_a", 25L, null, null, start - 100, null));
+        webhook(discountedConnection, discountedWorkspace, "evt_ht_deleted_a", "customer.discount.deleted", T0.plusSeconds(20),
+                BillingFixtures.discount("di_ht_shared", "cus_ht_shared", null, "coupon_ht_a", 25L, null, null, start - 100, start + 500));
+        assertThat(drainWebhookQueue()).isEqualTo(4);
+
+        // Workspace B reuses the exact same Stripe IDs but never receives any discount event at all.
+        webhook(plainConnection, plainWorkspace, "evt_ht_customer_b", "customer.created", T0,
+                BillingFixtures.customer("cus_ht_shared", "usd", start - 200, false, null));
+        webhook(plainConnection, plainWorkspace, "evt_ht_price_b", "price.created", T0,
+                BillingFixtures.price("price_ht_shared", "prod_ht_b", "usd", 2000L, "recurring", "month", 1, true));
+        assertThat(drainWebhookQueue()).isEqualTo(2);
+
+        webhook(discountedConnection, discountedWorkspace, "evt_ht_sub_a", "customer.subscription.created", T0.plusSeconds(999),
+                BillingFixtures.subscription("sub_ht_shared", "cus_ht_shared", "active", "usd", start,
+                        start + 2_592_000L, false, null, null, BillingFixtures.subscriptionItem("si_ht_a", "price_ht_shared", 1), null));
+        webhook(plainConnection, plainWorkspace, "evt_ht_sub_b", "customer.subscription.created", T0.plusSeconds(999),
+                BillingFixtures.subscription("sub_ht_shared", "cus_ht_shared", "active", "usd", start,
+                        start + 2_592_000L, false, null, null, BillingFixtures.subscriptionItem("si_ht_b", "price_ht_shared", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(2);
+
+        assertThat(revenue.snapshots(discountedWorkspace, "cus_ht_shared"))
+                .singleElement().extracting(Snapshot::amountMinor).isEqualTo(1500L);
+        assertThat(revenue.snapshots(plainWorkspace, "cus_ht_shared"))
+                .singleElement().extracting(Snapshot::amountMinor).isEqualTo(2000L);
+    }
+
+    // ---- 14. Historical resolution: a delayed subscription webhook whose effective_at predates a
+    //          customer.discount.updated coupon switch cannot safely reuse the switched-to terms --
+    //          the event fails explicitly (FAILED/UNSUPPORTED) and rolls back atomically, rather than
+    //          silently applying the wrong percentage or silently dropping the discount. -------------
+
+    @Test
+    void delayedSubscriptionEffectiveBeforeCustomerDiscountCouponSwitchFailsExplicitly() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_hist_upd", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+
+        webhook(connectionId, workspaceId, "evt_hu_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_hu", "usd", start - 200, false, null));
+        webhook(connectionId, workspaceId, "evt_hu_price", "price.created", T0,
+                BillingFixtures.price("price_hu", "prod_hu", "usd", 2000L, "recurring", "month", 1, true));
+        assertThat(drainWebhookQueue()).isEqualTo(2);
+
+        // T1: the discount is created at 20% off.
+        webhook(connectionId, workspaceId, "evt_hu_created", "customer.discount.created", T0.plusSeconds(10),
+                BillingFixtures.discount("di_hu", "cus_hu", null, "coupon_hu_v1", 20L, null, null, start - 100, null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        // T5: the SAME discount id is switched to a different coupon (40% off) with a later
+        // provider-declared start -- Stripe's own semantics for customer.discount.updated ("switched
+        // from one coupon to another"). billing_discounts now only knows the 40% terms.
+        long switchedAt = start + 300;
+        webhook(connectionId, workspaceId, "evt_hu_updated", "customer.discount.updated", T0.plusSeconds(20),
+                BillingFixtures.discount("di_hu", "cus_hu", null, "coupon_hu_v2", 40L, null, null, switchedAt, null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(discountSnapshot(workspaceId, "di_hu")).isPresent().get()
+                .satisfies(row -> assertThat(((Number) row.get("percent_off")).intValue()).isEqualTo(40));
+
+        List<Movement> movementsBefore = revenue.movements(workspaceId, "cus_hu");
+        List<Snapshot> snapshotsBefore = revenue.snapshots(workspaceId, "cus_hu");
+
+        // T4: the delayed subscription's own effective_at (current_period_start = `start`) is before
+        // the switch (`switchedAt`), but at-or-after the discount's original first_seen_start_at --
+        // exactly the window whose true terms (20%, not 40%) are no longer recoverable.
+        webhook(connectionId, workspaceId, "evt_hu_sub", "customer.subscription.created", T0.plusSeconds(999),
+                BillingFixtures.subscription(
+                        "sub_hu", "cus_hu", "active", "usd", start, start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_hu", "price_hu", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        assertThat(processingState(workspaceId, "evt_hu_sub")).isEqualTo("FAILED");
+        assertThat(failureKind(workspaceId, "evt_hu_sub")).isEqualTo("UNSUPPORTED");
+
+        // Atomic rollback: no subscription row, no new/changed MRR state for this customer -- never a
+        // plausible number computed from the wrong (post-switch) coupon terms.
+        assertThat(subscriptionSnapshot(workspaceId, "sub_hu")).isEmpty();
+        assertThat(revenue.movements(workspaceId, "cus_hu")).isEqualTo(movementsBefore);
+        assertThat(revenue.snapshots(workspaceId, "cus_hu")).isEqualTo(snapshotsBefore);
+    }
+
     private void assertTemporalCustomerDiscountNotApplied(String suffix, long discountStart, long discountEnd) {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_temporal_" + suffix, StripeConnectionMode.TEST);
@@ -672,6 +875,14 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
 
     private String processingState(UUID workspaceId, String stripeEventId) {
         return jdbc().sql("SELECT processing_state FROM stripe_webhook_events WHERE workspace_id = :w AND stripe_event_id = :e")
+                .param("w", workspaceId)
+                .param("e", stripeEventId)
+                .query(String.class)
+                .single();
+    }
+
+    private String failureKind(UUID workspaceId, String stripeEventId) {
+        return jdbc().sql("SELECT failure_kind FROM stripe_webhook_events WHERE workspace_id = :w AND stripe_event_id = :e")
                 .param("w", workspaceId)
                 .param("e", stripeEventId)
                 .query(String.class)

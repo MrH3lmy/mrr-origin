@@ -364,6 +364,28 @@ class BillingLedgerUpsertService {
                 false);
     }
 
+    /**
+     * A customer's discounts whose effective window covers {@code effectiveAt}, as best-known from
+     * {@code billing_discounts}' current (upserted, not historical) state. Deliberately does NOT
+     * filter on {@code deleted}: per ADR-0011's historical-state amendment, a deleted discount must
+     * still be returned for an older {@code effectiveAt} that falls before its actual deletion/end
+     * instant -- {@link #upsertDiscountReportingApplied} guarantees {@code end_at} always reflects
+     * that instant once deleted (Stripe's own {@code end}, or the same provider-event-second
+     * fallback ADR-0010 already established), so the temporal window alone is authoritative and
+     * {@code deleted} would only ever narrow it incorrectly.
+     *
+     * <p>The lower bound is {@code first_seen_start_at} (this discount identity's earliest-ever
+     * start_at, frozen at first insert), not the current {@code start_at}: the latter moves forward
+     * on a genuine {@code customer.discount.updated} coupon switch (Stripe: "occurs whenever a
+     * customer is switched from one coupon to another"), and this table keeps only the current
+     * coupon's terms -- the prior coupon's are gone. A row matched only by the broader bound (i.e.
+     * {@code effectiveAt} predates the current {@code start_at}) is a provable case of "the terms
+     * that actually applied at effectiveAt are not the ones stored here, and cannot be reconstructed
+     * from normalized state" -- ADR-0004/#86 requires refusing to guess rather than emitting
+     * plausible-but-wrong MRR, so that case throws instead of silently returning wrong terms or
+     * silently omitting the discount (either of which would be exactly the stale-MRR bug this
+     * amendment closes).
+     */
     private List<MrrDiscount> activeCustomerDiscounts(
             UUID workspaceId, String stripeCustomerId, OffsetDateTime effectiveAt) {
         return jdbc.sql(
@@ -374,19 +396,28 @@ class BillingLedgerUpsertService {
                           AND stripe_customer_id = :stripeCustomerId
                           AND stripe_subscription_id IS NULL
                           AND stripe_subscription_item_id IS NULL
-                          AND deleted = FALSE
-                          AND start_at <= :effectiveAt
+                          AND first_seen_start_at <= :effectiveAt
                           AND (end_at IS NULL OR end_at > :effectiveAt)
                         ORDER BY stripe_discount_id
                         """)
                 .param("workspaceId", workspaceId)
                 .param("stripeCustomerId", stripeCustomerId)
                 .param("effectiveAt", effectiveAt)
-                .query((rs, rowNum) -> new MrrDiscount(
-                        rs.getString("stripe_discount_id"), null, rs.getBigDecimal("percent_off"),
-                        (Long) rs.getObject("amount_off"), upperCase(rs.getString("currency")),
-                        rs.getObject("start_at", OffsetDateTime.class),
-                        rs.getObject("end_at", OffsetDateTime.class), true))
+                .query((rs, rowNum) -> {
+                    String stripeDiscountId = rs.getString("stripe_discount_id");
+                    OffsetDateTime startAt = rs.getObject("start_at", OffsetDateTime.class);
+                    if (effectiveAt.isBefore(startAt)) {
+                        throw new StripeBillingNormalizationException(
+                                "Customer-level discount " + stripeDiscountId + " for customer " + stripeCustomerId
+                                        + " was updated (coupon switch) since " + effectiveAt + " -- its terms as of"
+                                        + " that instant are not recoverable from normalized billing_discounts"
+                                        + " state (current terms only effective from " + startAt + ").");
+                    }
+                    return new MrrDiscount(
+                            stripeDiscountId, null, rs.getBigDecimal("percent_off"),
+                            (Long) rs.getObject("amount_off"), upperCase(rs.getString("currency")),
+                            startAt, rs.getObject("end_at", OffsetDateTime.class), true);
+                })
                 .list();
     }
 
@@ -738,16 +769,27 @@ class BillingLedgerUpsertService {
     boolean upsertDiscountReportingApplied(
             UUID workspaceId, ParsedDiscount discount, SourceVersion sourceVersion, BillingLedgerSource source) {
         OffsetDateTime now = now();
+        // Per ADR-0011's historical-state amendment: a delete with no Stripe-provided `end` must
+        // still persist SOME termination instant, or end_at stays NULL forever and every future
+        // temporal query (current or historical) would treat this discount as open-ended --
+        // reopening exactly the staleness gap #86 closed. Reuses the identical last-resort fallback
+        // (the event's own provider second) CustomerDiscountMrrRecalculationService.effectiveAt
+        // already computes for this same transition, rather than inventing a second rule.
+        OffsetDateTime endAt = discount.deleted() && discount.endAt() == null
+                ? Instant.ofEpochSecond(sourceVersion.version()).atOffset(ZoneOffset.UTC)
+                : discount.endAt();
         return jdbc.sql(
                         """
                         INSERT INTO billing_discounts
                             (id, workspace_id, stripe_discount_id, stripe_customer_id, stripe_subscription_id,
                              stripe_subscription_item_id, stripe_coupon_id, percent_off, amount_off, currency,
-                             start_at, end_at, deleted, source, source_version, source_sequence, updated_at)
+                             start_at, end_at, deleted, first_seen_start_at, source, source_version,
+                             source_sequence, updated_at)
                         VALUES
                             (:id, :workspaceId, :stripeDiscountId, :stripeCustomerId, :stripeSubscriptionId,
                              :stripeSubscriptionItemId, :stripeCouponId, :percentOff, :amountOff, :currency,
-                             :startAt, :endAt, :deleted, :source, :sourceVersion, :sourceSequence, :updatedAt)
+                             :startAt, :endAt, :deleted, :startAt, :source, :sourceVersion, :sourceSequence,
+                             :updatedAt)
                         ON CONFLICT (workspace_id, stripe_discount_id) DO UPDATE SET
                             stripe_customer_id = EXCLUDED.stripe_customer_id,
                             stripe_subscription_id = EXCLUDED.stripe_subscription_id,
@@ -778,7 +820,7 @@ class BillingLedgerUpsertService {
                 .param("amountOff", discount.amountOff())
                 .param("currency", discount.currency())
                 .param("startAt", discount.startAt())
-                .param("endAt", discount.endAt())
+                .param("endAt", endAt)
                 .param("deleted", discount.deleted())
                 .param("source", source.name())
                 .param("sourceVersion", sourceVersion.version())
