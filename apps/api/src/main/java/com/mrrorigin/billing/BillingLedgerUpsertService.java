@@ -387,11 +387,15 @@ class BillingLedgerUpsertService {
     private static boolean equivalentDiscount(MrrDiscount left, MrrDiscount right) {
         return left.sourceReference().equals(right.sourceReference())
                 || (left.itemReference() == null && right.itemReference() == null
-                        && java.util.Objects.equals(left.percentOff(), right.percentOff())
+                        && sameDecimal(left.percentOff(), right.percentOff())
                         && java.util.Objects.equals(left.amountOffMinor(), right.amountOffMinor())
                         && java.util.Objects.equals(left.currency(), right.currency())
                         && java.util.Objects.equals(left.startAt(), right.startAt())
                         && java.util.Objects.equals(left.endAt(), right.endAt()));
+    }
+
+    private static boolean sameDecimal(BigDecimal left, BigDecimal right) {
+        return left == null ? right == null : right != null && left.compareTo(right) == 0;
     }
 
     /**

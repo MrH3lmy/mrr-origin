@@ -519,6 +519,45 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
     }
 
     @Test
+    void equivalentCustomerDiscountExpandedInSubscriptionPayloadIsAppliedOnlyOnce() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_discount_equivalent", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+        String customerDiscount = BillingFixtures.discount(
+                "di_equivalent_customer", "cus_equivalent", null, "coupon_equivalent", 25L, null, null,
+                start - 60, start + 3_600L);
+        // A different expansion ID exercises semantic deduplication, including the NUMERIC scale
+        // difference between the ledger's 25.000 and the payload parser's 25.
+        String expandedDiscount = BillingFixtures.discount(
+                "di_equivalent_expanded", null, "sub_equivalent", "coupon_equivalent", 25L, null, null,
+                start - 60, start + 3_600L);
+        webhook(connectionId, workspaceId, "evt_equivalent_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_equivalent", "usd", start - 60, false, customerDiscount));
+        webhook(connectionId, workspaceId, "evt_equivalent_price", "price.created", T0,
+                BillingFixtures.price("price_equivalent", "prod_equivalent", "usd", 2000L,
+                        "recurring", "month", 1, true));
+        webhook(connectionId, workspaceId, "evt_equivalent_sub", "customer.subscription.created", T0,
+                BillingFixtures.subscription("sub_equivalent", "cus_equivalent", "active", "usd", start,
+                        start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_equivalent", "price_equivalent", 1), expandedDiscount));
+        assertThat(drainWebhookQueue()).isEqualTo(3);
+
+        assertThat(revenue.snapshots(workspaceId, "cus_equivalent")).singleElement().satisfies(snapshot -> {
+            assertThat(snapshot.supported()).isTrue();
+            assertThat(snapshot.amountMinor()).isEqualTo(1500L);
+        });
+        assertThat(jdbc().sql(
+                        """
+                        SELECT count(*) FROM revenue_subscription_state_discounts d
+                        JOIN revenue_subscription_states s ON s.id = d.state_id AND s.workspace_id = d.workspace_id
+                        WHERE d.workspace_id = :workspaceId AND s.stripe_subscription_id = 'sub_equivalent'
+                        """)
+                .param("workspaceId", workspaceId)
+                .query(Long.class)
+                .single()).isEqualTo(1L);
+    }
+
+    @Test
     void fixedCustomerDiscountBecomesExplicitlyUnsupportedWhenSecondSubscriptionMakesAllocationAmbiguous() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_fixed_customer", StripeConnectionMode.TEST);

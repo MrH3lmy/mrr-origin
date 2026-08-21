@@ -17,7 +17,9 @@ Before invoking the billing-owned MRR port for an accepted subscription normaliz
 and customer whose interval contains the subscription state's effective time (`start_at <=
 effective_at < end_at`, with a null end treated as open for selection). It combines them with the
 payload's subscription/item discounts. An identical Stripe discount ID, or identical unscoped
-economic terms and effective interval, represents the same discount and is included once.
+economic terms and effective interval, represents the same discount and is included once. Decimal
+percentage comparison is numeric rather than scale-sensitive because PostgreSQL may return `25.000`
+for a payload value of `25`.
 
 The derived revenue discount row records whether its origin was customer-level so replay retains the
 scope required by ADR-0004. Percentage discounts remain deterministic. Multiple effective discounts
