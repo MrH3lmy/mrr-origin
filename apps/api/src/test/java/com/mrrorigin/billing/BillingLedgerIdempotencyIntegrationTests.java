@@ -28,6 +28,7 @@ class BillingLedgerIdempotencyIntegrationTests extends AbstractBillingLedgerInte
     void duplicateWebhookDeliveryOfTheSameEventNormalizesExactlyOnce() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_dup", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_dup");
         Instant createdAt = Instant.parse("2026-02-01T00:00:00Z");
         String object = BillingFixtures.subscription(
                 "sub_dup",
@@ -133,6 +134,7 @@ class BillingLedgerIdempotencyIntegrationTests extends AbstractBillingLedgerInte
     void sameSecondWebhookEventsConvergeIndependentlyOfArrivalOrder() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_identical_ts", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_x");
         Instant sameCreatedAt = Instant.parse("2026-02-01T00:00:00Z");
         Instant sameReceivedAt = Instant.parse("2026-02-01T00:00:05.123456Z");
 

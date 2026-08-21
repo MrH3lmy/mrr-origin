@@ -43,6 +43,7 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
     void subscriptionWithMultipleDiscountsNormalizesEveryDiscount() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_multi_discount", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_x");
 
         String discountOne = BillingFixtures.discount("di_multi_1", null, "sub_multi_disc", "coupon_1", 10L, null, null, T, null);
         String discountTwo = BillingFixtures.discount("di_multi_2", null, "sub_multi_disc", "coupon_2", null, 500L, "usd", T, null);
@@ -79,6 +80,7 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
     void subscriptionItemLevelDiscountIsAttributedToTheItemNotTheSubscription() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_item_discount", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_x");
 
         String itemDiscount = BillingFixtures.discount("di_item_level", null, null, "coupon_item", 20L, null, null, T, null);
         String itemWithDiscount = BillingFixtures.subscriptionItem("si_item_disc", "price_x", 1, itemDiscount);
@@ -105,6 +107,7 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
     void paginatedEmbeddedSubscriptionItemsAreFullyResolvedDuringBackfill() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_paged_items", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_x");
 
         String embeddedItem = BillingFixtures.subscriptionItem("si_page_1", "price_x", 1);
         String subscription = BillingFixtures.subscription(
@@ -142,6 +145,7 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
     void paginatedEmbeddedSubscriptionItemsAreFullyResolvedDuringWebhookNormalization() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_paged_items_wh", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_x");
 
         String embeddedItem = BillingFixtures.subscriptionItem("si_wh_page_1", "price_x", 1);
         String subscription = BillingFixtures.subscription(
@@ -170,6 +174,7 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
     void backfillRequestsDiscountExpansionForSubscriptionsAndSupplementalItems() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_expand_params", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_x");
 
         String embeddedItem = BillingFixtures.subscriptionItem("si_expand_1", "price_x", 1);
         String subscription = BillingFixtures.subscription(
@@ -204,6 +209,7 @@ class BillingSubscriptionCompatibilityIntegrationTests extends AbstractBillingLe
     void webhookPayloadWithUnexpandedDiscountFallsBackToALiveFullyExpandedFetch() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_unexpanded_discount", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_x");
 
         // The webhook's own payload carries only a bare discount ID string -- not a full object --
         // simulating a push-delivered event Stripe did not (and cannot, via expand[]) expand.

@@ -22,6 +22,12 @@ final class StripeBillingObjects {
             OffsetDateTime providerCreatedAt,
             Optional<ParsedDiscount> discount) {}
 
+    /**
+     * @param usageType Stripe's {@code recurring.usage_type} ({@code licensed} or {@code metered}),
+     *     {@code null} for a non-recurring price. A metered price can still carry a non-null {@code
+     *     unitAmount} (the per-unit rate), so this is required -- separately from {@code unitAmount}
+     *     being present -- to identify usage-derived recurring revenue per ADR-0004.
+     */
     record ParsedPrice(
             String stripePriceId,
             String stripeProductId,
@@ -31,7 +37,25 @@ final class StripeBillingObjects {
             String type,
             String recurringInterval,
             Integer recurringIntervalCount,
-            boolean active) {}
+            String usageType,
+            boolean active) {
+
+        /**
+         * V25 adds {@code billing_prices.usage_type} to an existing table, so rows written before
+         * that migration legitimately read back with {@code NULL} even when they are recurring.
+         * There is no safe way to infer licensed vs metered from {@code unit_amount} or
+         * {@code billing_scheme}: Stripe metered/per-unit prices can carry a non-null unit amount.
+         *
+         * <p>Fail closed for those legacy/unknown recurring rows by exposing them to the MRR wiring
+         * as metered until Stripe refreshes the price and persists the real usage type. This can
+         * temporarily make an old licensed price unsupported, but it can never fabricate recurring
+         * revenue from a metered price. Non-recurring prices retain {@code null}.
+         */
+        @Override
+        public String usageType() {
+            return usageType == null && "recurring".equals(type) ? "metered" : usageType;
+        }
+    }
 
     /**
      * Per https://docs.stripe.com/api/subscriptions/object, a subscription carries a plural,

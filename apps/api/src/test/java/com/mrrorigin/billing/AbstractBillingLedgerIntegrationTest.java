@@ -89,6 +89,21 @@ abstract class AbstractBillingLedgerIntegrationTest {
         return workspaceId;
     }
 
+    /**
+     * Seeds a trivial resolvable USD/monthly/licensed price directly into the ledger, bypassing the
+     * webhook/backfill pipeline. Since {@code BillingMrrRecalculationAdapter.requireResolvedPrices}
+     * (#83) requires every subscription item's price to already be normalized -- matching real Stripe,
+     * where a subscription can never reference a price Stripe itself doesn't already have -- any test
+     * that upserts a subscription referencing a price ID must seed that price first, even when the
+     * test's own focus has nothing to do with price economics.
+     */
+    void seedPrice(UUID workspaceId, String stripePriceId) {
+        var price = new StripeBillingObjects.ParsedPrice(
+                stripePriceId, "prod_" + stripePriceId, "usd", 1000L, "per_unit", "recurring", "month", 1, "licensed", true);
+        ledger.upsertPrice(
+                workspaceId, price, BillingSourceVersion.forBackfillFetch(Instant.now()), BillingLedgerSource.BACKFILL);
+    }
+
     UUID insertActiveConnection(UUID workspaceId, String stripeAccountId, StripeConnectionMode mode) {
         return insertConnection(workspaceId, stripeAccountId, mode, StripeConnectionStatus.ACTIVE, StripeVerificationStatus.VERIFIED);
     }

@@ -50,7 +50,7 @@ public class BillingWorkspaceExportService {
             """;
     private static final String PRICE_COLUMNS = """
             id, workspace_id, stripe_price_id, stripe_product_id, currency, unit_amount, billing_scheme,
-            type, recurring_interval, recurring_interval_count, active, source, source_version,
+            type, recurring_interval, recurring_interval_count, usage_type, active, source, source_version,
             source_sequence, created_at, updated_at
             """;
     private static final String SUBSCRIPTION_COLUMNS = """

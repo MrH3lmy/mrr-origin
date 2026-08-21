@@ -1,7 +1,13 @@
 package com.mrrorigin.billing;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -9,6 +15,9 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.mrrorigin.billing.BillingMrrRecalculationPort.MrrDiscount;
+import com.mrrorigin.billing.BillingMrrRecalculationPort.MrrItem;
+import com.mrrorigin.billing.BillingMrrRecalculationPort.SubscriptionMrrSnapshot;
 import com.mrrorigin.billing.BillingSourceVersion.SourceVersion;
 import com.mrrorigin.billing.StripeBillingObjects.ParsedCustomer;
 import com.mrrorigin.billing.StripeBillingObjects.ParsedDiscount;
@@ -39,9 +48,11 @@ class BillingLedgerUpsertService {
     private static final int SUBSCRIPTION_LOCK_NAMESPACE = 914_101;
 
     private final JdbcClient jdbc;
+    private final BillingMrrRecalculationPort mrrRecalculation;
 
-    BillingLedgerUpsertService(JdbcClient jdbc) {
+    BillingLedgerUpsertService(JdbcClient jdbc, BillingMrrRecalculationPort mrrRecalculation) {
         this.jdbc = jdbc;
+        this.mrrRecalculation = mrrRecalculation;
     }
 
     void upsertCustomer(UUID workspaceId, ParsedCustomer customer, SourceVersion sourceVersion, BillingLedgerSource source) {
@@ -86,11 +97,11 @@ class BillingLedgerUpsertService {
                         """
                         INSERT INTO billing_prices
                             (id, workspace_id, stripe_price_id, stripe_product_id, currency, unit_amount,
-                             billing_scheme, type, recurring_interval, recurring_interval_count, active,
+                             billing_scheme, type, recurring_interval, recurring_interval_count, usage_type, active,
                              source, source_version, source_sequence, updated_at)
                         VALUES
                             (:id, :workspaceId, :stripePriceId, :stripeProductId, :currency, :unitAmount,
-                             :billingScheme, :type, :recurringInterval, :recurringIntervalCount, :active,
+                             :billingScheme, :type, :recurringInterval, :recurringIntervalCount, :usageType, :active,
                              :source, :sourceVersion, :sourceSequence, :updatedAt)
                         ON CONFLICT (workspace_id, stripe_price_id) DO UPDATE SET
                             stripe_product_id = EXCLUDED.stripe_product_id,
@@ -100,6 +111,7 @@ class BillingLedgerUpsertService {
                             type = EXCLUDED.type,
                             recurring_interval = EXCLUDED.recurring_interval,
                             recurring_interval_count = EXCLUDED.recurring_interval_count,
+                            usage_type = EXCLUDED.usage_type,
                             active = EXCLUDED.active,
                             source = EXCLUDED.source,
                             source_version = EXCLUDED.source_version,
@@ -118,6 +130,7 @@ class BillingLedgerUpsertService {
                 .param("type", price.type())
                 .param("recurringInterval", price.recurringInterval())
                 .param("recurringIntervalCount", price.recurringIntervalCount())
+                .param("usageType", price.usageType())
                 .param("active", price.active())
                 .param("source", source.name())
                 .param("sourceVersion", sourceVersion.version())
@@ -255,6 +268,126 @@ class BillingLedgerUpsertService {
                 upsertDiscount(workspaceId, discount, sourceVersion, source);
             }
         }
+
+        recalculateMrr(workspaceId, subscription, previousStatus, sourceVersion, source);
+    }
+
+    /**
+     * Triggers deterministic MRR recalculation for the subscription this upsert just applied, per
+     * ADR-0010: once per accepted (non-stale) normalization, in the same transaction as the ledger
+     * write above, using this event's own parsed item/discount list (a Stripe subscription payload
+     * always carries the complete current item list, never a partial diff).
+     */
+    private void recalculateMrr(
+            UUID workspaceId,
+            ParsedSubscription subscription,
+            String previousStatus,
+            SourceVersion sourceVersion,
+            BillingLedgerSource source) {
+        OffsetDateTime providerAt = Instant.ofEpochSecond(sourceVersion.version()).atOffset(ZoneOffset.UTC);
+        OffsetDateTime effectiveAt = SubscriptionMrrEffectiveAt.resolve(previousStatus, subscription, providerAt);
+        // Both components of the ordering pair are required for a globally unique reference: a
+        // backfill fetch's `sequence` alone is only a nanosecond-within-second fraction
+        // (BillingSourceVersion.forBackfillFetch), so two fetches in different seconds can share the
+        // same nanosecond fraction and collide without `version` disambiguating them too.
+        String sourceBillingReference = source.name() + ":" + sourceVersion.version() + ":" + sourceVersion.sequence()
+                + ":" + subscription.stripeSubscriptionId();
+
+        Map<String, ParsedPrice> pricesById = resolvePrices(workspaceId, subscription.items());
+        List<MrrItem> items = new ArrayList<>();
+        for (ParsedSubscriptionItem item : subscription.items()) {
+            ParsedPrice price = pricesById.get(item.stripePriceId());
+            items.add(new MrrItem(
+                    item.stripeSubscriptionItemId(),
+                    price == null ? null : upperCase(price.currency()),
+                    price == null ? null : price.unitAmount(),
+                    BigDecimal.valueOf(item.quantity()),
+                    price == null ? null : price.recurringInterval(),
+                    price == null ? null : price.recurringIntervalCount(),
+                    isUsagePricing(price)));
+        }
+
+        List<MrrDiscount> discounts = new ArrayList<>();
+        for (ParsedDiscount discount : subscription.discounts()) {
+            discounts.add(toMrrDiscount(discount));
+        }
+        for (ParsedSubscriptionItem item : subscription.items()) {
+            for (ParsedDiscount discount : item.discounts()) {
+                discounts.add(toMrrDiscount(discount));
+            }
+        }
+
+        mrrRecalculation.recalculateSubscription(new SubscriptionMrrSnapshot(
+                workspaceId,
+                subscription.stripeCustomerId(),
+                subscription.stripeSubscriptionId(),
+                effectiveAt,
+                subscription.status(),
+                sourceBillingReference,
+                items,
+                discounts));
+    }
+
+    /**
+     * A metered recurring price can still carry a non-null {@code unit_amount} (the per-unit rate),
+     * so {@code unit_amount} presence alone cannot distinguish it from a fixed recurring charge; a
+     * tiered price has no single {@code unit_amount} representing the whole period either. Both must
+     * fail visibly as {@code UNSUPPORTED_USAGE_PRICING}/{@code UNSUPPORTED_INTERVAL} per ADR-0004
+     * rather than being calculated as ordinary MRR.
+     */
+    private static boolean isUsagePricing(ParsedPrice price) {
+        return price != null && ("metered".equals(price.usageType()) || "tiered".equals(price.billingScheme()));
+    }
+
+    private static MrrDiscount toMrrDiscount(ParsedDiscount discount) {
+        return new MrrDiscount(
+                discount.stripeDiscountId(),
+                discount.stripeSubscriptionItemId(),
+                discount.percentOff(),
+                discount.amountOff(),
+                upperCase(discount.currency()),
+                discount.startAt(),
+                discount.endAt());
+    }
+
+    /**
+     * Stripe's own API always returns lowercase ISO currency codes; {@code RevenueCalculationService}
+     * requires uppercase per ADR-0004. This is a formatting normalization, not currency inference --
+     * the billing ledger itself (e.g. {@code billing_prices.currency}) keeps Stripe's original case.
+     */
+    private static String upperCase(String currency) {
+        return currency == null ? null : currency.toUpperCase(java.util.Locale.ROOT);
+    }
+
+    /** Resolves each referenced item's price economics from the ledger's own price table. */
+    private Map<String, ParsedPrice> resolvePrices(UUID workspaceId, List<ParsedSubscriptionItem> items) {
+        List<String> priceIds = items.stream().map(ParsedSubscriptionItem::stripePriceId).distinct().toList();
+        if (priceIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, ParsedPrice> byId = new HashMap<>();
+        jdbc.sql(
+                        """
+                        SELECT stripe_price_id, stripe_product_id, currency, unit_amount, billing_scheme, type,
+                               recurring_interval, recurring_interval_count, usage_type, active
+                        FROM billing_prices WHERE workspace_id = :workspaceId AND stripe_price_id IN (:priceIds)
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("priceIds", priceIds)
+                .query((rs, rowNum) -> new ParsedPrice(
+                        rs.getString("stripe_price_id"),
+                        rs.getString("stripe_product_id"),
+                        rs.getString("currency"),
+                        (Long) rs.getObject("unit_amount"),
+                        rs.getString("billing_scheme"),
+                        rs.getString("type"),
+                        rs.getString("recurring_interval"),
+                        (Integer) rs.getObject("recurring_interval_count"),
+                        rs.getString("usage_type"),
+                        rs.getBoolean("active")))
+                .list()
+                .forEach(price -> byId.put(price.stripePriceId(), price));
+        return byId;
     }
 
     private void replaceSubscriptionItems(

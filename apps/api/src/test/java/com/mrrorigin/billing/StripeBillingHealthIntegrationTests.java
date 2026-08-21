@@ -245,6 +245,7 @@ class StripeBillingHealthIntegrationTests extends AbstractBillingLedgerIntegrati
     void reconciliationMismatchIsDetectedThenResolvedOnceTheMissingCustomerArrives() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_health_mismatch", StripeConnectionMode.TEST);
+        seedPrice(workspaceId, "price_health_mismatch");
 
         String item = BillingFixtures.subscriptionItem("si_health_mismatch", "price_health_mismatch", 1);
         String subscription = BillingFixtures.subscription(

@@ -25,10 +25,26 @@ final class BillingFixtures {
             String recurringInterval,
             Integer recurringIntervalCount,
             boolean active) {
+        String usageType = "recurring".equals(type) ? "licensed" : null;
+        return price(id, productId, currency, unitAmount, type, recurringInterval, recurringIntervalCount, usageType, active);
+    }
+
+    /** @param usageTypeOrNull Stripe's {@code recurring.usage_type} ({@code licensed}/{@code metered}), or null to omit the field. */
+    static String price(
+            String id,
+            String productId,
+            String currency,
+            Long unitAmount,
+            String type,
+            String recurringInterval,
+            Integer recurringIntervalCount,
+            String usageTypeOrNull,
+            boolean active) {
         String recurring = recurringInterval == null
                 ? "null"
                 : """
-                  {"interval":"%s","interval_count":%d}""".formatted(recurringInterval, recurringIntervalCount);
+                  {"interval":"%s","interval_count":%d%s}"""
+                        .formatted(recurringInterval, recurringIntervalCount, trailingField("usage_type", quoteOrNull(usageTypeOrNull)));
         return """
                 {"id":"%s","object":"price","product":"%s","currency":"%s","unit_amount":%s,"billing_scheme":"per_unit","type":"%s","recurring":%s,"active":%b}"""
                 .formatted(id, productId, currency, unitAmount == null ? "null" : unitAmount, type, recurring, active);
