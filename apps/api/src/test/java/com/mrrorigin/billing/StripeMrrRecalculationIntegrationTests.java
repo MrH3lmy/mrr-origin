@@ -1,6 +1,7 @@
 package com.mrrorigin.billing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 import java.time.Instant;
 import java.util.List;
@@ -43,6 +44,7 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
     private RevenueCalculationService revenue;
 
     private static final Instant T0 = Instant.parse("2026-05-01T00:00:00Z");
+    private static final long FAR_FUTURE_END = Instant.parse("2030-01-01T00:00:00Z").getEpochSecond();
 
     // ---- 1. Webhook -> MRR end-to-end: created -> upgraded -> downgraded -> cancelled ------------
 
@@ -884,6 +886,166 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
         assertThat(discountSnapshot(workspaceId, "di_ooe")).isPresent().get().satisfies(row ->
                 assertThat(((Number) row.get("percent_off")).intValue()).isEqualTo(40));
         assertThat(firstSeenStartAt(workspaceId, "di_ooe").toEpochSecond()).isEqualTo(t1Start);
+    }
+
+    // ---- 16. Retroactive invalidation: newly discovered historical evidence must not just widen
+    //          first_seen_start_at -- it must invalidate any already-materialized MRR-retaining
+    //          state that the new evidence proves is no longer provably safe. See ADR-0011's
+    //          "Retroactive invalidation" amendment. ---------------------------------------------
+
+    @Test
+    void staleDiscountEvidenceInvalidatesAlreadyMaterializedHistoricalMrr() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_repair", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+
+        webhook(connectionId, workspaceId, "evt_repair_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_repair", "usd", start - 200, false, null));
+        webhook(connectionId, workspaceId, "evt_repair_price", "price.created", T0,
+                BillingFixtures.price("price_repair", "prod_repair", "usd", 2000L, "recurring", "month", 1, true));
+        assertThat(drainWebhookQueue()).isEqualTo(2);
+
+        // T1: the subscription's own effective_at (current_period_start = `start`) is processed
+        // FIRST -- no customer discount is known yet, so it correctly materializes full price.
+        webhook(connectionId, workspaceId, "evt_repair_sub", "customer.subscription.created", T0.plusSeconds(1),
+                BillingFixtures.subscription(
+                        "sub_repair", "cus_repair", "active", "usd", start, start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_repair", "price_repair", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(revenue.snapshots(workspaceId, "cus_repair")).singleElement().satisfies(s -> {
+            assertThat(s.supported()).isTrue();
+            assertThat(s.amountMinor()).isEqualTo(2000L);
+        });
+        assertThat(revenue.movements(workspaceId, "cus_repair"))
+                .extracting(Movement::type, Movement::amountMinor)
+                .containsExactly(tuple("NEW", 2000L));
+
+        // T2: a customer-level discount is created at 40% off, well after T1. The subscription is
+        // already active, so the existing (unmodified) fan-out logic recalculates it immediately.
+        long t2Start = start + 300;
+        webhook(connectionId, workspaceId, "evt_repair_discount_v2", "customer.discount.created", T0.plusSeconds(50),
+                BillingFixtures.discount("di_repair", "cus_repair", null, "coupon_repair_v2", 40L, null, null, t2Start, FAR_FUTURE_END));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(revenue.snapshots(workspaceId, "cus_repair")).last().satisfies(s -> {
+            assertThat(s.supported()).isTrue();
+            assertThat(s.amountMinor()).isEqualTo(1200L);
+        });
+        assertThat(revenue.movements(workspaceId, "cus_repair"))
+                .extracting(Movement::type, Movement::amountMinor)
+                .containsExactly(tuple("NEW", 2000L), tuple("CONTRACTION", 800L));
+
+        // T0: the SAME discount id's original, older state (20% off, start before T1) arrives late
+        // -- AFTER the subscription's full-price state at T1 was already successfully materialized,
+        // and AFTER the 40%-off state at T2 already applied. It loses the current-terms version race
+        // (its own provider second is earlier than T2's), but its own `start` still proves the
+        // discount identity existed before T1.
+        long t0Start = start - 100;
+        webhook(connectionId, workspaceId, "evt_repair_discount_v1", "customer.discount.updated", T0.plusSeconds(5),
+                BillingFixtures.discount("di_repair", "cus_repair", null, "coupon_repair_v1", 20L, null, null, t0Start, FAR_FUTURE_END));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        // Current terms are not regressed: still 40%, not 20%.
+        assertThat(discountSnapshot(workspaceId, "di_repair")).isPresent().get().satisfies(row ->
+                assertThat(((Number) row.get("percent_off")).intValue()).isEqualTo(40));
+        assertThat(firstSeenStartAt(workspaceId, "di_repair").toEpochSecond()).isEqualTo(t0Start);
+
+        // The already-materialized T1 state is no longer plausible: it must not remain "supported"
+        // at full price (2000), and must not be silently given the newer 40% terms either (1200) --
+        // neither is provable for T1's own instant. It becomes explicitly unsupported.
+        List<Snapshot> snapshotsAfterRepair = revenue.snapshots(workspaceId, "cus_repair");
+        assertThat(snapshotsAfterRepair).hasSize(2);
+        Snapshot t1Snapshot = snapshotsAfterRepair.get(0);
+        assertThat(t1Snapshot.supported()).isFalse();
+        assertThat(t1Snapshot.unsupportedReason()).isEqualTo("UNSUPPORTED_DISCOUNT");
+        assertThat(t1Snapshot.effectiveAt().toEpochSecond()).isEqualTo(start);
+        Snapshot t2Snapshot = snapshotsAfterRepair.get(1);
+        assertThat(t2Snapshot.supported()).isTrue();
+        assertThat(t2Snapshot.amountMinor()).isEqualTo(1200L);
+        assertThat(t2Snapshot.effectiveAt().toEpochSecond()).isEqualTo(t2Start);
+
+        // The stale, wrong historical NEW(2000)/CONTRACTION(800) movement sequence must not survive:
+        // exactly one NEW movement remains, at T2, for the only amount ever provably known (1200).
+        List<Movement> movementsAfterRepair = revenue.movements(workspaceId, "cus_repair");
+        assertThat(movementsAfterRepair).extracting(Movement::type, Movement::amountMinor).containsExactly(tuple("NEW", 1200L));
+        assertThat(movementsAfterRepair.get(0).effectiveAt().toEpochSecond()).isEqualTo(t2Start);
+
+        // Replay/idempotency: retrying the stale discount event a second time changes nothing further.
+        resetEventToPending(workspaceId, "evt_repair_discount_v1");
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(revenue.snapshots(workspaceId, "cus_repair")).isEqualTo(snapshotsAfterRepair);
+        assertThat(revenue.movements(workspaceId, "cus_repair")).isEqualTo(movementsAfterRepair);
+        assertThat(discountSnapshot(workspaceId, "di_repair")).isPresent().get().satisfies(row ->
+                assertThat(((Number) row.get("percent_off")).intValue()).isEqualTo(40));
+
+        // Replay/determinism: retrying the ORIGINAL T1 subscription event now consistently fails --
+        // a live recalculation at T1 can no longer prove which terms applied -- rather than
+        // flip-flopping between the stale full-price success and a failure.
+        resetEventToPending(workspaceId, "evt_repair_sub");
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(processingState(workspaceId, "evt_repair_sub")).isEqualTo("FAILED");
+        assertThat(failureKind(workspaceId, "evt_repair_sub")).isEqualTo("UNSUPPORTED");
+        resetEventToPending(workspaceId, "evt_repair_sub");
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(processingState(workspaceId, "evt_repair_sub")).isEqualTo("FAILED");
+        assertThat(failureKind(workspaceId, "evt_repair_sub")).isEqualTo("UNSUPPORTED");
+        // The corrected historical state and the 40%-discounted MRR from T2 onward are untouched by
+        // these failed replay attempts (they roll back before reaching MRR recalculation at all).
+        assertThat(revenue.snapshots(workspaceId, "cus_repair")).isEqualTo(snapshotsAfterRepair);
+        assertThat(revenue.movements(workspaceId, "cus_repair")).isEqualTo(movementsAfterRepair);
+    }
+
+    // ---- 17. Cross-tenant isolation for retroactive invalidation -------------------------------
+
+    @Test
+    void retroactiveInvalidationIsWorkspaceScoped() {
+        UUID repairedWorkspace = createWorkspace();
+        UUID plainWorkspace = createWorkspace();
+        UUID repairedConnection = insertActiveConnection(repairedWorkspace, "acct_repair_tenant_a", StripeConnectionMode.TEST);
+        UUID plainConnection = insertActiveConnection(plainWorkspace, "acct_repair_tenant_b", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+
+        for (var w : List.of(
+                new Object[] {repairedWorkspace, repairedConnection, "evt_rt_a"},
+                new Object[] {plainWorkspace, plainConnection, "evt_rt_b"})) {
+            UUID workspaceId = (UUID) w[0];
+            UUID connectionId = (UUID) w[1];
+            String prefix = (String) w[2];
+            webhook(connectionId, workspaceId, prefix + "_customer", "customer.created", T0,
+                    BillingFixtures.customer("cus_rt_shared", "usd", start - 200, false, null));
+            webhook(connectionId, workspaceId, prefix + "_price", "price.created", T0,
+                    BillingFixtures.price("price_rt_shared", "prod_rt", "usd", 2000L, "recurring", "month", 1, true));
+            webhook(connectionId, workspaceId, prefix + "_sub", "customer.subscription.created", T0.plusSeconds(1),
+                    BillingFixtures.subscription("sub_rt_shared", "cus_rt_shared", "active", "usd", start,
+                            start + 2_592_000L, false, null, null,
+                            BillingFixtures.subscriptionItem("si_rt_" + prefix, "price_rt_shared", 1), null));
+            webhook(connectionId, workspaceId, prefix + "_discount_v2", "customer.discount.created", T0.plusSeconds(50),
+                    BillingFixtures.discount("di_rt_shared", "cus_rt_shared", null, "coupon_rt_v2", 40L, null, null,
+                            start + 300, FAR_FUTURE_END));
+            assertThat(drainWebhookQueue()).isEqualTo(4);
+        }
+
+        // Only the "repaired" workspace receives the stale, earlier discount evidence.
+        webhook(repairedConnection, repairedWorkspace, "evt_rt_a_discount_v1", "customer.discount.updated", T0.plusSeconds(5),
+                BillingFixtures.discount("di_rt_shared", "cus_rt_shared", null, "coupon_rt_v1", 20L, null, null, start - 100, FAR_FUTURE_END));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        List<Snapshot> repairedSnapshots = revenue.snapshots(repairedWorkspace, "cus_rt_shared");
+        assertThat(repairedSnapshots).hasSize(2);
+        assertThat(repairedSnapshots.get(0).supported()).isFalse();
+        assertThat(repairedSnapshots.get(0).unsupportedReason()).isEqualTo("UNSUPPORTED_DISCOUNT");
+        assertThat(repairedSnapshots.get(1).supported()).isTrue();
+        assertThat(repairedSnapshots.get(1).amountMinor()).isEqualTo(1200L);
+
+        // The other workspace, sharing every Stripe ID but never receiving the stale event, keeps its
+        // original, still-plausible NEW/CONTRACTION history untouched.
+        List<Snapshot> plainSnapshots = revenue.snapshots(plainWorkspace, "cus_rt_shared");
+        assertThat(plainSnapshots).hasSize(2);
+        assertThat(plainSnapshots).allSatisfy(s -> assertThat(s.supported()).isTrue());
+        assertThat(plainSnapshots.get(0).amountMinor()).isEqualTo(2000L);
+        assertThat(plainSnapshots.get(1).amountMinor()).isEqualTo(1200L);
+        assertThat(revenue.movements(plainWorkspace, "cus_rt_shared"))
+                .extracting(Movement::type, Movement::amountMinor)
+                .containsExactly(tuple("NEW", 2000L), tuple("CONTRACTION", 800L));
     }
 
     private java.time.OffsetDateTime firstSeenStartAt(UUID workspaceId, String stripeDiscountId) {

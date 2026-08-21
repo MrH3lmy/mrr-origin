@@ -759,29 +759,32 @@ class BillingLedgerUpsertService {
     }
 
     /**
-     * As {@link #upsertDiscount}, but reports whether the write actually applied (a fresh insert, or
-     * an update whose version guard passed) as opposed to being skipped as stale/out-of-order --
-     * mirroring {@link #upsertSubscription}'s own {@code Optional<SubscriptionUpsertOutcome>} pattern.
-     * {@link CustomerDiscountMrrRecalculationService} uses this to guarantee it never triggers MRR
-     * recalculation for a discount write the ledger itself just rejected as older than what is already
-     * stored (ADR-0004/#86: out-of-order delivery must never regress newer MRR state).
-     *
-     * <p>Deliberately two separate statements, per ADR-0011's out-of-order-evidence amendment:
+     * As {@link #upsertDiscount}, but reports two independent facts about the write, per ADR-0011's
+     * retroactive-invalidation amendment -- {@link CustomerDiscountMrrRecalculationService} must be
+     * able to tell them apart, because they call for different reactions:
      *
      * <ol>
-     *   <li>The version-guarded upsert below governs <em>current state</em> only (coupon terms,
-     *       {@code start_at}/{@code end_at}, {@code deleted}) -- unchanged, and still the sole input
-     *       to the returned {@code applied} flag, so a stale write never triggers recalculation.
-     *   <li>{@link #recordEarliestKnownDiscountStart} governs <em>historical evidence</em> and always
-     *       runs, even when (1) was rejected as stale. A discount event's own {@code start} is proof
-     *       this discount identity existed from at least that instant, regardless of whether its
-     *       coupon terms were newer or older than what is currently stored -- discarding that
-     *       evidence just because the terms lost the version race is exactly how a stale/out-of-order
-     *       {@code customer.discount.updated} could silently blind {@code activeCustomerDiscounts} to
-     *       a discount an older, delayed subscription event needed to see.
+     *   <li>{@link DiscountUpsertOutcome#currentStateApplied}: did this write win the version race and
+     *       become the row's current coupon terms (a fresh insert, or an update whose version guard
+     *       passed)? Mirrors {@link #upsertSubscription}'s own {@code Optional<SubscriptionUpsertOutcome>}
+     *       pattern. {@code false} means the write was stale/out-of-order and must never trigger MRR
+     *       recalculation using its own (regressed) terms (ADR-0004/#86).
+     *   <li>{@link DiscountUpsertOutcome#historicalEvidenceChanged}: did this write's own {@code start}
+     *       prove the discount identity existed earlier than previously known, regardless of whether it
+     *       won the version race? {@code true} means some already-materialized MRR state may now be
+     *       provably unsafe and must be invalidated -- {@code historicalEvidenceChanged} can be {@code
+     *       true} even when {@code currentStateApplied} is {@code false}: a stale write's coupon terms
+     *       are correctly rejected, but its {@code start} is still proof of existence that must not be
+     *       discarded alongside them.
      * </ol>
+     *
+     * <p>Two independent statements below implement this split: the version-guarded upsert governs
+     * <em>current state</em> only (coupon terms, {@code start_at}/{@code end_at}, {@code deleted}) --
+     * unchanged, and still the sole input to {@code currentStateApplied}. {@link
+     * #recordEarliestKnownDiscountStart} governs <em>historical evidence</em> and always runs, even when
+     * the first statement was rejected as stale.
      */
-    boolean upsertDiscountReportingApplied(
+    DiscountUpsertOutcome upsertDiscountReportingApplied(
             UUID workspaceId, ParsedDiscount discount, SourceVersion sourceVersion, BillingLedgerSource source) {
         OffsetDateTime now = now();
         // Per ADR-0011's historical-state amendment: a delete with no Stripe-provided `end` must
@@ -845,8 +848,8 @@ class BillingLedgerUpsertService {
                 .optional()
                 .isPresent();
         // Runs even when the write above was rejected as stale -- see the method Javadoc above.
-        recordEarliestKnownDiscountStart(workspaceId, discount.stripeDiscountId(), discount.startAt());
-        return applied;
+        EvidenceWiden widen = recordEarliestKnownDiscountStart(workspaceId, discount.stripeDiscountId(), discount.startAt());
+        return new DiscountUpsertOutcome(applied, widen.changed(), widen.from(), widen.to());
     }
 
     /**
@@ -860,18 +863,34 @@ class BillingLedgerUpsertService {
      * what that identity's terms were at {@code candidateStartAt} -- {@code activeCustomerDiscounts}'s
      * own ambiguity check still refuses to guess those from the (possibly newer) currently-stored
      * terms.
+     *
+     * <p>Returns the pre- and post-update values so the caller can tell whether this write genuinely
+     * widened the window (versus a no-op replay/duplicate) -- {@link CustomerDiscountMrrRecalculationService}
+     * uses that to decide whether any already-materialized MRR state needs retroactive invalidation.
+     * A single {@code UPDATE ... FROM} statement captures the pre-update value via the subquery (which
+     * sees the pre-update snapshot) in the same round trip as the update itself.
      */
-    private void recordEarliestKnownDiscountStart(UUID workspaceId, String stripeDiscountId, OffsetDateTime candidateStartAt) {
-        jdbc.sql(
+    private EvidenceWiden recordEarliestKnownDiscountStart(UUID workspaceId, String stripeDiscountId, OffsetDateTime candidateStartAt) {
+        return jdbc.sql(
                         """
-                        UPDATE billing_discounts
-                        SET first_seen_start_at = LEAST(first_seen_start_at, :candidateStartAt)
-                        WHERE workspace_id = :workspaceId AND stripe_discount_id = :stripeDiscountId
+                        UPDATE billing_discounts b
+                        SET first_seen_start_at = LEAST(b.first_seen_start_at, :candidateStartAt)
+                        FROM (
+                            SELECT first_seen_start_at FROM billing_discounts
+                            WHERE workspace_id = :workspaceId AND stripe_discount_id = :stripeDiscountId
+                        ) AS prev
+                        WHERE b.workspace_id = :workspaceId AND b.stripe_discount_id = :stripeDiscountId
+                        RETURNING prev.first_seen_start_at AS previous_value, b.first_seen_start_at AS new_value
                         """)
                 .param("workspaceId", workspaceId)
                 .param("stripeDiscountId", stripeDiscountId)
                 .param("candidateStartAt", candidateStartAt)
-                .update();
+                .query((rs, rowNum) -> {
+                    OffsetDateTime previous = rs.getObject("previous_value", OffsetDateTime.class);
+                    OffsetDateTime updated = rs.getObject("new_value", OffsetDateTime.class);
+                    return new EvidenceWiden(previous, updated, updated.isBefore(previous));
+                })
+                .single();
     }
 
     private static OffsetDateTime now() {
@@ -879,4 +898,11 @@ class BillingLedgerUpsertService {
     }
 
     private record SubscriptionUpsertOutcome(UUID id, String newStatus) {}
+
+    /** Pre- and post-{@link #recordEarliestKnownDiscountStart} values for one discount write. */
+    private record EvidenceWiden(OffsetDateTime from, OffsetDateTime to, boolean changed) {}
+
+    /** See {@link #upsertDiscountReportingApplied}. */
+    record DiscountUpsertOutcome(
+            boolean currentStateApplied, boolean historicalEvidenceChanged, OffsetDateTime widenedFrom, OffsetDateTime widenedTo) {}
 }

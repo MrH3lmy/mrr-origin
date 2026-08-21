@@ -23,9 +23,14 @@ import com.mrrorigin.billing.StripeBillingObjects.ParsedDiscount;
  * discounts} array, which arrives embedded in {@code customer.subscription.*} and is already
  * recalculated by {@link BillingLedgerUpsertService#upsertSubscription}) is normalized into {@code
  * billing_discounts} but, per ADR-0010's documented known limitation, never triggered MRR
- * recalculation. This closes that silent-staleness gap without changing any approved MRR semantics:
- * {@code revenue.RevenueCalculationService} is never touched; every recalculation call below reuses
- * the exact same {@link BillingMrrRecalculationPort} the subscription path already uses.
+ * recalculation. This closes that silent-staleness gap without changing any approved MRR calculation
+ * semantics: every recalculation call below reuses the exact same {@link BillingMrrRecalculationPort}
+ * the subscription path already uses. (Per ADR-0011's retroactive-invalidation amendment, a stale
+ * write that nonetheless widens {@code first_seen_start_at} does reach {@code
+ * revenue.RevenueCalculationService} indirectly, through {@link
+ * BillingMrrRecalculationPort#invalidateUnprovenHistoricalDiscountWindow} -- but only to supersede an
+ * already-unsafe historical state with an explicit unsupported marker, never to add a new calculation
+ * rule.)
  *
  * <p><b>Percentage discounts</b> fan out to every one of the customer's {@code active}/{@code
  * past_due} subscriptions (ADR-0004's only MRR-retaining statuses): a percentage composes
@@ -68,13 +73,32 @@ class CustomerDiscountMrrRecalculationService {
     }
 
     void applyCustomerDiscount(UUID workspaceId, ParsedDiscount discount, SourceVersion sourceVersion, BillingLedgerSource source) {
-        boolean applied = ledger.upsertDiscountReportingApplied(workspaceId, discount, sourceVersion, source);
-        if (!applied) {
+        BillingLedgerUpsertService.DiscountUpsertOutcome outcome =
+                ledger.upsertDiscountReportingApplied(workspaceId, discount, sourceVersion, source);
+        boolean customerScoped = discount.stripeSubscriptionId() == null && discount.stripeSubscriptionItemId() == null
+                && discount.stripeCustomerId() != null;
+
+        // Per ADR-0011's retroactive-invalidation amendment: this can fire even when the write below
+        // was rejected as stale (outcome.currentStateApplied() == false) -- a stale write's own start
+        // can still prove the discount identity existed earlier than any already-materialized MRR
+        // state for this customer assumed, which makes that state's supported figure no longer
+        // provably safe. Runs before the staleness early-return below precisely so a stale write is
+        // never silently discarded just because it lost the current-terms version race.
+        if (customerScoped && outcome.historicalEvidenceChanged()) {
+            // The window is [widenedTo, widenedFrom): widenedTo is the new, earlier bound just
+            // discovered; widenedFrom is the previous (later) bound that governed every calculation
+            // made before this write -- exactly the newly-revealed range those calculations could not
+            // have known about.
+            mrrRecalculation.invalidateUnprovenHistoricalDiscountWindow(
+                    workspaceId, discount.stripeCustomerId(), discount.stripeDiscountId(), outcome.widenedTo(), outcome.widenedFrom());
+        }
+
+        if (!outcome.currentStateApplied()) {
             // Stale/out-of-order relative to what's already stored: the ledger itself already
             // rejected this write, so nothing here is any newer than the currently recalculated MRR.
             return;
         }
-        if (discount.stripeSubscriptionId() != null || discount.stripeSubscriptionItemId() != null) {
+        if (!customerScoped) {
             // Not genuinely customer-scoped. ADR-0010 documents that this event type only ever
             // carries customer-scoped discounts in this codebase's parser; subscription/item-scoped
             // discount changes arrive embedded in customer.subscription.* and are already

@@ -23,6 +23,24 @@ public interface BillingMrrRecalculationPort {
     void recalculateSubscription(SubscriptionMrrSnapshot snapshot);
 
     /**
+     * Per ADR-0011's retroactive-invalidation amendment: newly discovered historical evidence (a
+     * customer-level discount identity proven to have existed earlier than previously known, surfaced
+     * by {@code BillingLedgerUpsertService.upsertDiscountReportingApplied}'s widened {@code
+     * first_seen_start_at}) can prove an already-materialized MRR-retaining subscription state is no
+     * longer safely known: it may or may not have included this discount, and the discount's own
+     * actual terms at that now-earlier instant are not recoverable from normalized state.
+     *
+     * <p>Every {@code active}/{@code past_due} subscription state for this customer whose {@code
+     * effective_at} falls in {@code [windowStart, windowEnd)} and does not already reflect {@code
+     * stripeDiscountId} is superseded with an explicit, unprovable-terms marker -- never a guessed
+     * percentage or amount, and never left standing as its previous (now unsafe) supported figure. A
+     * no-op when no such state exists. Idempotent: safe to call repeatedly for the same window (e.g.
+     * on replay of the discount event that discovered this evidence).
+     */
+    void invalidateUnprovenHistoricalDiscountWindow(
+            UUID workspaceId, String stripeCustomerId, String stripeDiscountId, OffsetDateTime windowStart, OffsetDateTime windowEnd);
+
+    /**
      * The complete state of one subscription at one provider-declared effective instant, mirroring
      * exactly what {@code RevenueCalculationService.recordAndReplay} requires -- {@code billing}'s
      * own shape so this module never imports {@code RevenueModels}.

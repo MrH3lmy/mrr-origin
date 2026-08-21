@@ -218,17 +218,82 @@ roll back together with the rest of that event's write, so the evidence update i
 tenant-scoped, and replay-safe (`LEAST` is idempotent and order-independent) as the rest of this
 ADR's convergence guarantees.
 
-**Remaining limitation.** This corrects the picture only from the moment the evidence is learned
-onward. If a delayed subscription event was already processed (and failed, or silently materialized
-full-price MRR under the pre-fix code) _before_ the stale discount write later supplied this evidence,
-that already-materialized state is not retroactively replayed -- doing so would require a general
-recalculation-cascade trigger (re-scanning and re-processing every historical subscription state
-whenever any discount's evidence changes), which no other part of this system does for any other kind
-of newly-arriving evidence either (e.g. a backfill correction to the ledger does not retroactively
-re-trigger already-processed webhook-driven MRR states). A discount whose very first accepted write for
-a given identity is (due to extreme out-of-order delivery) already an "update" rather than the original
-"create" still correctly records `first_seen_start_at` from that write's own `start` -- unaffected by
-this amendment, since there is no earlier write to reject in that case.
+A discount whose very first accepted write for a given identity is (due to extreme out-of-order
+delivery) already an "update" rather than the original "create" still correctly records
+`first_seen_start_at` from that write's own `start` -- unaffected by this amendment, since there is no
+earlier write to reject in that case.
+
+### Retroactive invalidation (amendment)
+
+Widening `first_seen_start_at` fixes every recalculation from that moment forward, but a subscription
+state can already have been _successfully materialized_ before the evidence arrived: `customer.subscription.created`
+processed first at `T1` (full price, discount unknown), a customer-level discount created/updated later
+at `T2`, then the discount's own original, older write arrives last and loses the version race -- exactly
+the scenario above, except this time `T1`'s MRR was already computed and persisted as a _supported_
+`customer_mrr_snapshots`/`customer_mrr_movements` figure before the correction ever ran. Widening
+`first_seen_start_at` alone does nothing to that already-committed number: nobody re-asks the question
+for `T1` unless something re-triggers it. Left alone, that supported-but-now-provably-unsafe figure is
+exactly the "plausible but stale MRR" this whole ADR exists to prevent -- just reached through a
+timing window (evidence learned _after_ materialization) rather than a missing recalculation trigger.
+
+**Design.** `BillingLedgerUpsertService.upsertDiscountReportingApplied` returns a `DiscountUpsertOutcome`
+record splitting the same two facts ADR-0011 already treats independently, made explicit in the type:
+`currentStateApplied` (did this write win the version race?) and `historicalEvidenceChanged` (did this
+write's own `start` prove the discount existed earlier than previously known, regardless of whether it
+won?). `CustomerDiscountMrrRecalculationService.applyCustomerDiscount` acts on `historicalEvidenceChanged`
+independently of, and before, the `currentStateApplied` staleness early-return -- so a stale write is
+never silently discarded just because its coupon terms lost the race.
+
+When evidence changed, it calls a new `BillingMrrRecalculationPort.invalidateUnprovenHistoricalDiscountWindow(workspaceId,
+stripeCustomerId, stripeDiscountId, windowStart, windowEnd)` for the newly-revealed range
+`[widenedTo, widenedFrom)` (the new, earlier bound to the previous, later one). `BillingMrrRecalculationAdapter`
+implements it entirely with existing, tested primitives, per ADR-0002's "recalculation replaces or
+supersedes derived results without rewriting raw evidence":
+
+1. Find every `revenue_subscription_states` row for this customer with `effective_at` in that window,
+   status `active`/`past_due` (ADR-0004's only MRR-retaining statuses -- any other status contributes
+   zero MRR regardless of discount state, so it was never wrong), whose own persisted discounts do not
+   already include this discount id (i.e. computed without knowledge of it -- exactly the ones a live
+   recalculation right now would resolve differently).
+2. For each one, read back its own persisted items and discounts (never live `billing_subscription_items`
+   or current discount state -- an already-materialized historical state is corrected only from what it
+   itself already proved, never from data that could have changed since), then supersede it (`revenue_subscription_states`
+   allows at most one row per `(subscription, effective_at)`, so this reuses `recalculateSubscription`'s own
+   `clearSupersededState` free-the-slot step) with the same items/status plus an explicit marker discount
+   (`percent_off`/`amount_off`/`currency`/`start_at`/`end_at` all `NULL`). `RevenueCalculationService.normalize`'s
+   own existing, already-tested guard (`percent == amount`, i.e. both absent) throws `UNSUPPORTED_DISCOUNT`
+   for that instant deterministically -- no new calculation rule, no invented percentage.
+3. Batch every correction into one `RevenueCalculationService.recordAndReplay` call, so the customer's
+   full `customer_mrr_snapshots`/`movements` history is deleted and rebuilt once, consistently, from the
+   corrected `revenue_subscription_states`.
+
+**Why this needs no separate "closing" step.** `replay()`'s own state-supersession semantics already
+bound the correction to exactly the ambiguous window: a subscription's state persists forward from its
+own `effective_at` until a _later_ state for that same subscription supersedes it. If the customer's
+discount actually changed at `T2` (as it must have, for this correction to be running at all) and the
+subscription was already `active`/`past_due` at that time, `CustomerDiscountMrrRecalculationService`'s
+existing, unmodified fan-out already inserted a fresh, correctly-computed state at `T2` when that write
+was processed -- so poisoning only `T1`'s own row is naturally superseded by the already-correct `T2`
+row the moment replay reaches it, with no invented timestamp or synthetic "closing" state required.
+
+**Idempotency.** Each correction's `source_billing_reference` is deterministic --
+`HISTORICAL_CORRECTION:{discountId}:{subscriptionId}:{effectiveAt}` -- keyed by the instant being
+corrected, not by any internal row id that changes across supersession. Replaying the same discount
+event that discovered this evidence recomputes the identical reference and no-ops via
+`recordAndReplay`'s own `ON CONFLICT(source_billing_reference) DO NOTHING`, exactly like any other
+duplicate event in this system.
+
+**Consequence for the source subscription event.** Once a correction exists, replaying the _original_
+subscription event that first (and, at the time, correctly) materialized the now-poisoned state will
+itself now fail: `activeCustomerDiscounts`'s pre-existing ambiguity guard sees the same widened
+`first_seen_start_at` and refuses the recalculation, deterministically, on every replay. This is
+intentional, not a regression -- the codebase has no notion of "this event was allowed to succeed once,
+so it must keep succeeding"; every recalculation attempt is always judged against the best evidence
+currently available.
+
+**Genuine limitation.** No historical value is ever invented: a corrected instant becomes explicitly
+`UNSUPPORTED_DISCOUNT`, never a guessed percentage. Cross-currency and cross-tenant scoping are
+inherited unchanged from the existing `workspace_id`/`stripe_customer_id`-scoped queries this reuses.
 
 ## Consequences
 
@@ -244,3 +309,9 @@ this amendment, since there is no earlier write to reject in that case.
   additions (`end_at` always populated on delete, `first_seen_start_at` frozen at first insert) close
   the specific historical-resolution gaps `activeCustomerDiscounts` has, without turning the table into
   a general audit log.
+- Newly discovered historical evidence never leaves a stale-but-supported MRR figure standing:
+  `invalidateUnprovenHistoricalDiscountWindow` supersedes any already-materialized
+  `active`/`past_due` state the evidence proves unsafe with an explicit `UNSUPPORTED_DISCOUNT` marker
+  -- built entirely from existing, tested `revenue` primitives (`clearSupersededState`,
+  `recordAndReplay`, `normalize`'s own discount-validation guard), never a new calculation rule or an
+  invented percentage.
