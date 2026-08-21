@@ -293,19 +293,7 @@ class BillingLedgerUpsertService {
         String sourceBillingReference = source.name() + ":" + sourceVersion.version() + ":" + sourceVersion.sequence()
                 + ":" + subscription.stripeSubscriptionId();
 
-        Map<String, ParsedPrice> pricesById = resolvePrices(workspaceId, subscription.items());
-        List<MrrItem> items = new ArrayList<>();
-        for (ParsedSubscriptionItem item : subscription.items()) {
-            ParsedPrice price = pricesById.get(item.stripePriceId());
-            items.add(new MrrItem(
-                    item.stripeSubscriptionItemId(),
-                    price == null ? null : upperCase(price.currency()),
-                    price == null ? null : price.unitAmount(),
-                    BigDecimal.valueOf(item.quantity()),
-                    price == null ? null : price.recurringInterval(),
-                    price == null ? null : price.recurringIntervalCount(),
-                    isUsagePricing(price)));
-        }
+        List<MrrItem> items = toMrrItems(workspaceId, subscription.items());
 
         List<MrrDiscount> discounts = new ArrayList<>();
         for (ParsedDiscount discount : subscription.discounts()) {
@@ -333,6 +321,24 @@ class BillingLedgerUpsertService {
                 sourceBillingReference,
                 items,
                 discounts));
+    }
+
+    /** Shared by a fresh subscription payload's own items and {@link #currentMrrItems}'s ledger-reconstructed ones. */
+    private List<MrrItem> toMrrItems(UUID workspaceId, List<ParsedSubscriptionItem> items) {
+        Map<String, ParsedPrice> pricesById = resolvePrices(workspaceId, items);
+        List<MrrItem> result = new ArrayList<>();
+        for (ParsedSubscriptionItem item : items) {
+            ParsedPrice price = pricesById.get(item.stripePriceId());
+            result.add(new MrrItem(
+                    item.stripeSubscriptionItemId(),
+                    price == null ? null : upperCase(price.currency()),
+                    price == null ? null : price.unitAmount(),
+                    BigDecimal.valueOf(item.quantity()),
+                    price == null ? null : price.recurringInterval(),
+                    price == null ? null : price.recurringIntervalCount(),
+                    isUsagePricing(price)));
+        }
+        return result;
     }
 
     /**
@@ -437,6 +443,109 @@ class BillingLedgerUpsertService {
                 .forEach(price -> byId.put(price.stripePriceId(), price));
         return byId;
     }
+
+    /**
+     * The customer's subscriptions currently in an MRR-retaining status (ADR-0004: only {@code
+     * active}/{@code past_due} do). Used by {@link CustomerDiscountMrrRecalculationService} to find
+     * which subscriptions a legacy customer-level discount change could actually affect -- a churned
+     * or trialing subscription contributes zero MRR regardless of discount state, so recalculating it
+     * would be a needless no-op, and counting it toward "how many subscriptions does this ambiguous
+     * fixed discount span" would over-flag ambiguity that was never real.
+     */
+    List<AffectedSubscription> activeSubscriptionsForCustomer(UUID workspaceId, String stripeCustomerId) {
+        return jdbc.sql(
+                        """
+                        SELECT id, stripe_subscription_id, status FROM billing_subscriptions
+                        WHERE workspace_id = :workspaceId AND stripe_customer_id = :stripeCustomerId
+                          AND status IN ('active', 'past_due')
+                        ORDER BY stripe_subscription_id
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("stripeCustomerId", stripeCustomerId)
+                .query((rs, rowNum) -> new AffectedSubscription(
+                        UUID.fromString(rs.getString("id")), rs.getString("stripe_subscription_id"), rs.getString("status")))
+                .list();
+    }
+
+    /**
+     * A subscription's current items, reconstructed from the ledger's own authoritative "current
+     * state" tables ({@code billing_subscription_items} is fully replaced on every accepted
+     * subscription upsert -- see {@link #replaceSubscriptionItems} -- so it carries no more staleness
+     * risk than what {@link #recalculateMrr} already trusts for a freshly-parsed payload).
+     */
+    List<MrrItem> currentMrrItems(UUID workspaceId, UUID subscriptionId) {
+        List<ParsedSubscriptionItem> items = jdbc.sql(
+                        """
+                        SELECT stripe_subscription_item_id, stripe_price_id, quantity
+                        FROM billing_subscription_items
+                        WHERE workspace_id = :workspaceId AND subscription_id = :subscriptionId
+                        ORDER BY stripe_subscription_item_id
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("subscriptionId", subscriptionId)
+                .query((rs, rowNum) -> new ParsedSubscriptionItem(
+                        rs.getString("stripe_subscription_item_id"), rs.getString("stripe_price_id"), rs.getInt("quantity"), List.of()))
+                .list();
+        return toMrrItems(workspaceId, items);
+    }
+
+    /**
+     * A subscription's currently active (non-deleted) subscription-level and item-level discounts, as
+     * already normalized into {@code billing_discounts} by prior {@code customer.subscription.*}
+     * events. Used to detect pre-existing discount stacking when a legacy customer-level discount is
+     * layered on top: {@code RevenueCalculationService}'s own {@code discounts.size() > 1} guard then
+     * fails the combination visibly (ADR-0004: unsupported discount stacking is never approximated)
+     * without this class needing any new stacking-detection logic of its own.
+     */
+    List<MrrDiscount> currentDiscounts(UUID workspaceId, String stripeSubscriptionId, List<String> stripeItemIds) {
+        Map<String, MrrDiscount> byDiscountId = new java.util.LinkedHashMap<>();
+        for (MrrDiscount discount : jdbc.sql(
+                        """
+                        SELECT stripe_discount_id, stripe_subscription_item_id, percent_off, amount_off, currency,
+                               start_at, end_at
+                        FROM billing_discounts
+                        WHERE workspace_id = :workspaceId AND stripe_subscription_id = :stripeSubscriptionId
+                          AND deleted = false
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("stripeSubscriptionId", stripeSubscriptionId)
+                .query(BillingLedgerUpsertService::mapDiscountRow)
+                .list()) {
+            byDiscountId.put(discount.sourceReference(), discount);
+        }
+        if (!stripeItemIds.isEmpty()) {
+            for (MrrDiscount discount : jdbc.sql(
+                            """
+                            SELECT stripe_discount_id, stripe_subscription_item_id, percent_off, amount_off, currency,
+                                   start_at, end_at
+                            FROM billing_discounts
+                            WHERE workspace_id = :workspaceId AND stripe_subscription_item_id IN (:stripeItemIds)
+                              AND deleted = false
+                            """)
+                    .param("workspaceId", workspaceId)
+                    .param("stripeItemIds", stripeItemIds)
+                    .query(BillingLedgerUpsertService::mapDiscountRow)
+                    .list()) {
+                byDiscountId.put(discount.sourceReference(), discount);
+            }
+        }
+        return List.copyOf(byDiscountId.values());
+    }
+
+    private static MrrDiscount mapDiscountRow(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        return new MrrDiscount(
+                rs.getString("stripe_discount_id"),
+                rs.getString("stripe_subscription_item_id"),
+                rs.getBigDecimal("percent_off"),
+                (Long) rs.getObject("amount_off"),
+                upperCase(rs.getString("currency")),
+                rs.getObject("start_at", OffsetDateTime.class),
+                rs.getObject("end_at", OffsetDateTime.class),
+                false);
+    }
+
+    /** One of a customer's subscriptions currently in an MRR-retaining status. See {@link #activeSubscriptionsForCustomer}. */
+    record AffectedSubscription(UUID id, String stripeSubscriptionId, String status) {}
 
     private void replaceSubscriptionItems(
             UUID workspaceId, UUID subscriptionId, java.util.List<ParsedSubscriptionItem> items, SourceVersion sourceVersion) {
@@ -615,8 +724,21 @@ class BillingLedgerUpsertService {
     }
 
     void upsertDiscount(UUID workspaceId, ParsedDiscount discount, SourceVersion sourceVersion, BillingLedgerSource source) {
+        upsertDiscountReportingApplied(workspaceId, discount, sourceVersion, source);
+    }
+
+    /**
+     * As {@link #upsertDiscount}, but reports whether the write actually applied (a fresh insert, or
+     * an update whose version guard passed) as opposed to being skipped as stale/out-of-order --
+     * mirroring {@link #upsertSubscription}'s own {@code Optional<SubscriptionUpsertOutcome>} pattern.
+     * {@link CustomerDiscountMrrRecalculationService} uses this to guarantee it never triggers MRR
+     * recalculation for a discount write the ledger itself just rejected as older than what is already
+     * stored (ADR-0004/#86: out-of-order delivery must never regress newer MRR state).
+     */
+    boolean upsertDiscountReportingApplied(
+            UUID workspaceId, ParsedDiscount discount, SourceVersion sourceVersion, BillingLedgerSource source) {
         OffsetDateTime now = now();
-        jdbc.sql(
+        return jdbc.sql(
                         """
                         INSERT INTO billing_discounts
                             (id, workspace_id, stripe_discount_id, stripe_customer_id, stripe_subscription_id,
@@ -643,6 +765,7 @@ class BillingLedgerUpsertService {
                             updated_at = EXCLUDED.updated_at
                         WHERE (billing_discounts.source_version, billing_discounts.source_sequence)
                               <= (EXCLUDED.source_version, EXCLUDED.source_sequence)
+                        RETURNING id
                         """)
                 .param("id", UUID.randomUUID())
                 .param("workspaceId", workspaceId)
@@ -661,7 +784,9 @@ class BillingLedgerUpsertService {
                 .param("sourceVersion", sourceVersion.version())
                 .param("sourceSequence", sourceVersion.sequence())
                 .param("updatedAt", now)
-                .update();
+                .query(UUID.class)
+                .optional()
+                .isPresent();
     }
 
     private static OffsetDateTime now() {
