@@ -811,6 +811,90 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
         assertThat(revenue.snapshots(workspaceId, "cus_hu")).isEqualTo(snapshotsBefore);
     }
 
+    // ---- 15. Out-of-order historical evidence: a stale (version-rejected) discount write must still
+    //          widen first_seen_start_at, or a delayed subscription effective between the stale
+    //          event's own start and the currently-stored (newer) coupon's start would silently see
+    //          no discount at all and materialize plausible full-price MRR. See ADR-0011's
+    //          "Out-of-order historical evidence" amendment. -------------------------------------------
+
+    @Test
+    void staleOutOfOrderDiscountEvidenceIsNotDiscardedForADelayedSubscriptionEffectiveAt() {
+        UUID workspaceId = createWorkspace();
+        UUID connectionId = insertActiveConnection(workspaceId, "acct_ooo_evidence", StripeConnectionMode.TEST);
+        long start = T0.getEpochSecond();
+
+        webhook(connectionId, workspaceId, "evt_ooe_customer", "customer.created", T0,
+                BillingFixtures.customer("cus_ooe", "usd", start - 200, false, null));
+        webhook(connectionId, workspaceId, "evt_ooe_price", "price.created", T0,
+                BillingFixtures.price("price_ooe", "prod_ooe", "usd", 2000L, "recurring", "month", 1, true));
+        assertThat(drainWebhookQueue()).isEqualTo(2);
+
+        // T2: the chronologically NEWER discount state (coupon_v2, 40% off, provider second T0+50) is
+        // delivered and processed FIRST -- di_ooe does not exist yet, so this is a fresh insert.
+        long t2Start = start + 300;
+        webhook(connectionId, workspaceId, "evt_ooe_newer", "customer.discount.created", T0.plusSeconds(50),
+                BillingFixtures.discount("di_ooe", "cus_ooe", null, "coupon_ooe_v2", 40L, null, null, t2Start, null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        // T1: the chronologically OLDER discount state for the SAME discount id (coupon_v1, 20% off,
+        // provider second T0+5) arrives late, after the newer one already applied. The ledger's own
+        // version guard rejects it -- current terms stay at 40%, exactly as ADR-0011's existing
+        // out-of-order protection already proves -- but its own `start` is still evidence this
+        // discount identity existed from T0+5's provider-declared instant onward.
+        long t1Start = start - 100;
+        webhook(connectionId, workspaceId, "evt_ooe_older", "customer.discount.updated", T0.plusSeconds(5),
+                BillingFixtures.discount("di_ooe", "cus_ooe", null, "coupon_ooe_v1", 20L, null, null, t1Start, null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        assertThat(discountSnapshot(workspaceId, "di_ooe")).isPresent().get().satisfies(row ->
+                assertThat(((Number) row.get("percent_off")).intValue()).isEqualTo(40));
+        assertThat(firstSeenStartAt(workspaceId, "di_ooe").toEpochSecond()).isEqualTo(t1Start);
+
+        // T4: a delayed customer.subscription.created event whose own effective_at (current_period_start
+        // = `start`) falls strictly between the stale T1 evidence and the currently-stored coupon's own
+        // start (t1Start < start < t2Start). Before the first_seen_start_at fix this discount would have
+        // been silently invisible to activeCustomerDiscounts (first_seen_start_at was pinned at t2Start)
+        // and full-price MRR would have been materialized. Now the row is found, but its only provably
+        // correct terms (40%) are NOT the ones proven to exist at `start` -- so this must fail explicitly
+        // rather than materialize either full-price or 40%-discounted MRR.
+        webhook(connectionId, workspaceId, "evt_ooe_sub", "customer.subscription.created", T0.plusSeconds(999),
+                BillingFixtures.subscription(
+                        "sub_ooe", "cus_ooe", "active", "usd", start, start + 2_592_000L, false, null, null,
+                        BillingFixtures.subscriptionItem("si_ooe", "price_ooe", 1), null));
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+
+        assertThat(processingState(workspaceId, "evt_ooe_sub")).isEqualTo("FAILED");
+        assertThat(failureKind(workspaceId, "evt_ooe_sub")).isEqualTo("UNSUPPORTED");
+        assertThat(subscriptionSnapshot(workspaceId, "sub_ooe")).isEmpty();
+        assertThat(revenue.movements(workspaceId, "cus_ooe")).isEmpty();
+        assertThat(revenue.snapshots(workspaceId, "cus_ooe")).isEmpty();
+
+        // Replay/idempotency: retrying the delayed subscription event fails identically, not
+        // flip-flopping between failure and a plausible (wrong) success.
+        resetEventToPending(workspaceId, "evt_ooe_sub");
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(processingState(workspaceId, "evt_ooe_sub")).isEqualTo("FAILED");
+        assertThat(failureKind(workspaceId, "evt_ooe_sub")).isEqualTo("UNSUPPORTED");
+        assertThat(subscriptionSnapshot(workspaceId, "sub_ooe")).isEmpty();
+
+        // Replay/idempotency: retrying the stale discount event itself is also a deterministic no-op --
+        // current terms and the learned first_seen_start_at are both unchanged, not further perturbed.
+        resetEventToPending(workspaceId, "evt_ooe_older");
+        assertThat(drainWebhookQueue()).isEqualTo(1);
+        assertThat(discountSnapshot(workspaceId, "di_ooe")).isPresent().get().satisfies(row ->
+                assertThat(((Number) row.get("percent_off")).intValue()).isEqualTo(40));
+        assertThat(firstSeenStartAt(workspaceId, "di_ooe").toEpochSecond()).isEqualTo(t1Start);
+    }
+
+    private java.time.OffsetDateTime firstSeenStartAt(UUID workspaceId, String stripeDiscountId) {
+        return jdbc().sql(
+                        "SELECT first_seen_start_at FROM billing_discounts WHERE workspace_id = :w AND stripe_discount_id = :id")
+                .param("w", workspaceId)
+                .param("id", stripeDiscountId)
+                .query((rs, rowNum) -> rs.getObject("first_seen_start_at", java.time.OffsetDateTime.class))
+                .single();
+    }
+
     private void assertTemporalCustomerDiscountNotApplied(String suffix, long discountStart, long discountEnd) {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_temporal_" + suffix, StripeConnectionMode.TEST);
@@ -864,7 +948,7 @@ class StripeMrrRecalculationIntegrationTests extends AbstractBillingLedgerIntegr
         int updated = jdbc().sql(
                         """
                         UPDATE stripe_webhook_events
-                        SET processing_state = 'PENDING', last_attempted_at = NULL, attempt_count = 0
+                        SET processing_state = 'PENDING', last_attempted_at = NULL, attempt_count = 0, failure_kind = NULL
                         WHERE workspace_id = :w AND stripe_event_id = :e
                         """)
                 .param("w", workspaceId)

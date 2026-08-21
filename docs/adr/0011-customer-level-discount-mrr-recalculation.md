@@ -179,12 +179,56 @@ unaffected.
 `effective_at` ever needed to resolve against its pre-switch window will never trip the ambiguity
 guard -- and does not need to, because `activeCustomerDiscounts` is only ever asked to resolve
 `effective_at`s that actually occur; this is not a gap, just a note that the guard is a correctness
-backstop for the genuinely out-of-order case, not a general discount-history feature. Separately, a
-discount whose very first accepted write for a given identity is (due to extreme out-of-order delivery)
-already an "update" rather than the original "create" will record `first_seen_start_at` from that
-first-accepted write, not from the true original creation -- an existing, pre-existing property of
-every `billing_*` table's monotonic-version-guard design (the same is already true of, e.g.,
-`billing_subscriptions.previousStatus`), not something newly introduced here.
+backstop for the genuinely out-of-order case, not a general discount-history feature.
+
+### Out-of-order historical evidence (amendment)
+
+The first version of `first_seen_start_at` was set once at insert and never revisited, including when
+a later write to the same discount id was rejected as stale by the version guard. That left a second,
+narrower hole: if the chronologically newer coupon state (`customer.discount.updated`, a later
+`start`) is processed _before_ the chronologically older one for the same discount id, the older
+write's version guard correctly rejects it (current terms must never regress) -- but the rejection
+also discarded the older write's own `start`, which is proof this discount identity existed from at
+least that instant. `first_seen_start_at` stayed pinned at the newer coupon's `start`, so
+`activeCustomerDiscounts` could not even _find_ the row for an older, delayed subscription
+`effective_at` that fell between the two -- silently materializing full-price MRR, the exact
+plausible-but-stale defect this whole ADR exists to prevent, not merely the narrower "wrong terms"
+case the ambiguity guard already caught.
+
+Fix: `BillingLedgerUpsertService.upsertDiscountReportingApplied` now runs two separate statements
+against `billing_discounts` for every discount write, whether accepted or rejected:
+
+1. The existing version-guarded upsert, governing _current state_ only (coupon terms, `start_at`/
+   `end_at`, `deleted`) -- unchanged, and still the sole input to the `applied` flag
+   `CustomerDiscountMrrRecalculationService` uses to skip recalculation for a stale write.
+2. `recordEarliestKnownDiscountStart`, governing _historical evidence_ only: unconditionally widens
+   `first_seen_start_at` down to `LEAST(first_seen_start_at, incoming start)`, independent of the
+   version guard. A write's own `start` is evidence this discount identity existed from that instant
+   regardless of whether its coupon terms won or lost the version race, so discarding it alongside a
+   rejected write is not required by (and directly undermines) the version guard's actual purpose,
+   which is protecting _current terms_ from regressing, not erasing _existence_ evidence.
+
+This only ever widens the window `activeCustomerDiscounts` searches -- it never claims to know what
+the discount's terms were at the newly-discovered earlier instant. If that widened window makes a
+row reachable for an `effective_at` before the row's _current_ `start_at`, the pre-existing ambiguity
+guard (above) still fires and still refuses to substitute the current (possibly newer, possibly
+different) coupon's terms: the event fails explicitly (`FAILED`/`UNSUPPORTED`), never a fabricated
+percentage and never silent full-price MRR. Both statements run in the same transaction and commit or
+roll back together with the rest of that event's write, so the evidence update is exactly as durable,
+tenant-scoped, and replay-safe (`LEAST` is idempotent and order-independent) as the rest of this
+ADR's convergence guarantees.
+
+**Remaining limitation.** This corrects the picture only from the moment the evidence is learned
+onward. If a delayed subscription event was already processed (and failed, or silently materialized
+full-price MRR under the pre-fix code) _before_ the stale discount write later supplied this evidence,
+that already-materialized state is not retroactively replayed -- doing so would require a general
+recalculation-cascade trigger (re-scanning and re-processing every historical subscription state
+whenever any discount's evidence changes), which no other part of this system does for any other kind
+of newly-arriving evidence either (e.g. a backfill correction to the ledger does not retroactively
+re-trigger already-processed webhook-driven MRR states). A discount whose very first accepted write for
+a given identity is (due to extreme out-of-order delivery) already an "update" rather than the original
+"create" still correctly records `first_seen_start_at` from that write's own `start` -- unaffected by
+this amendment, since there is no earlier write to reject in that case.
 
 ## Consequences
 

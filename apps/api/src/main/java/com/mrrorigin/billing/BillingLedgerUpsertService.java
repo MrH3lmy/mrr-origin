@@ -765,6 +765,21 @@ class BillingLedgerUpsertService {
      * {@link CustomerDiscountMrrRecalculationService} uses this to guarantee it never triggers MRR
      * recalculation for a discount write the ledger itself just rejected as older than what is already
      * stored (ADR-0004/#86: out-of-order delivery must never regress newer MRR state).
+     *
+     * <p>Deliberately two separate statements, per ADR-0011's out-of-order-evidence amendment:
+     *
+     * <ol>
+     *   <li>The version-guarded upsert below governs <em>current state</em> only (coupon terms,
+     *       {@code start_at}/{@code end_at}, {@code deleted}) -- unchanged, and still the sole input
+     *       to the returned {@code applied} flag, so a stale write never triggers recalculation.
+     *   <li>{@link #recordEarliestKnownDiscountStart} governs <em>historical evidence</em> and always
+     *       runs, even when (1) was rejected as stale. A discount event's own {@code start} is proof
+     *       this discount identity existed from at least that instant, regardless of whether its
+     *       coupon terms were newer or older than what is currently stored -- discarding that
+     *       evidence just because the terms lost the version race is exactly how a stale/out-of-order
+     *       {@code customer.discount.updated} could silently blind {@code activeCustomerDiscounts} to
+     *       a discount an older, delayed subscription event needed to see.
+     * </ol>
      */
     boolean upsertDiscountReportingApplied(
             UUID workspaceId, ParsedDiscount discount, SourceVersion sourceVersion, BillingLedgerSource source) {
@@ -778,7 +793,7 @@ class BillingLedgerUpsertService {
         OffsetDateTime endAt = discount.deleted() && discount.endAt() == null
                 ? Instant.ofEpochSecond(sourceVersion.version()).atOffset(ZoneOffset.UTC)
                 : discount.endAt();
-        return jdbc.sql(
+        boolean applied = jdbc.sql(
                         """
                         INSERT INTO billing_discounts
                             (id, workspace_id, stripe_discount_id, stripe_customer_id, stripe_subscription_id,
@@ -829,6 +844,34 @@ class BillingLedgerUpsertService {
                 .query(UUID.class)
                 .optional()
                 .isPresent();
+        // Runs even when the write above was rejected as stale -- see the method Javadoc above.
+        recordEarliestKnownDiscountStart(workspaceId, discount.stripeDiscountId(), discount.startAt());
+        return applied;
+    }
+
+    /**
+     * Widens {@code first_seen_start_at} down to {@code candidateStartAt} if it is earlier than what
+     * is already recorded, independent of the version guard that protects current coupon terms. Never
+     * raises it, never touches any other column, and is a no-op when the candidate isn't earlier --
+     * so calling it once per accepted-or-rejected discount write (including replays and duplicates)
+     * converges to the same minimum regardless of delivery order or repetition. This is existence
+     * evidence only: it lets {@code activeCustomerDiscounts} discover that a discount identity is
+     * relevant to an older {@code effective_at} it would otherwise silently miss, not a claim about
+     * what that identity's terms were at {@code candidateStartAt} -- {@code activeCustomerDiscounts}'s
+     * own ambiguity check still refuses to guess those from the (possibly newer) currently-stored
+     * terms.
+     */
+    private void recordEarliestKnownDiscountStart(UUID workspaceId, String stripeDiscountId, OffsetDateTime candidateStartAt) {
+        jdbc.sql(
+                        """
+                        UPDATE billing_discounts
+                        SET first_seen_start_at = LEAST(first_seen_start_at, :candidateStartAt)
+                        WHERE workspace_id = :workspaceId AND stripe_discount_id = :stripeDiscountId
+                        """)
+                .param("workspaceId", workspaceId)
+                .param("stripeDiscountId", stripeDiscountId)
+                .param("candidateStartAt", candidateStartAt)
+                .update();
     }
 
     private static OffsetDateTime now() {
