@@ -93,7 +93,10 @@ class StripeWebhookNormalizationService {
     private final StripeBackfillClient stripeClient;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
-    private final MeterRegistry meterRegistry;
+    private final Counter processedCounter;
+    private final Counter skippedCounter;
+    private final Counter failedTransientCounter;
+    private final Counter failedUnsupportedCounter;
 
     StripeWebhookNormalizationService(
             JdbcClient jdbc,
@@ -110,7 +113,14 @@ class StripeWebhookNormalizationService {
         this.subscriptionItemsResolver = subscriptionItemsResolver;
         this.stripeClient = stripeClient;
         this.objectMapper = objectMapper;
-        this.meterRegistry = meterRegistry;
+        // Pre-registered at startup, not created lazily on first increment -- see
+        // StripeWebhookIngestionService's identical reasoning.
+        this.processedCounter = Counter.builder(PROCESSED_METRIC).tag("result", "processed").register(meterRegistry);
+        this.skippedCounter = Counter.builder(PROCESSED_METRIC).tag("result", "skipped").register(meterRegistry);
+        this.failedTransientCounter =
+                Counter.builder(FAILED_METRIC).tag("failure_kind", "transient").register(meterRegistry);
+        this.failedUnsupportedCounter =
+                Counter.builder(FAILED_METRIC).tag("failure_kind", "unsupported").register(meterRegistry);
         // Used programmatically (not the @Transactional annotation) for both claimBatch and
         // applyAndMarkProcessed: processBatch calls them on `this`, and an annotation-driven
         // transaction is silently skipped on such self-invocation (it only applies through the
@@ -136,26 +146,24 @@ class StripeWebhookNormalizationService {
                 switch (outcome) {
                     case PROCESSED -> {
                         processed++;
-                        Counter.builder(PROCESSED_METRIC).tag("result", "processed").register(meterRegistry).increment();
+                        processedCounter.increment();
                     }
                     case SKIPPED, LEASE_LOST -> {
                         skipped++;
-                        Counter.builder(PROCESSED_METRIC).tag("result", "skipped").register(meterRegistry).increment();
+                        skippedCounter.increment();
                     }
                 }
             } catch (RuntimeException failure) {
                 StripeWebhookFailureKind failureKind = StripeWebhookFailureKind.classify(failure);
                 if (markFailed(event, failure.getMessage(), failureKind)) {
                     failed++;
-                    Counter.builder(FAILED_METRIC)
-                            .tag("failure_kind", failureKind.name().toLowerCase())
-                            .register(meterRegistry)
+                    (failureKind == StripeWebhookFailureKind.UNSUPPORTED ? failedUnsupportedCounter : failedTransientCounter)
                             .increment();
                 } else {
                     // A newer worker reclaimed or completed this row after our lease expired. The
                     // stale worker must not overwrite that newer outcome with FAILED.
                     skipped++;
-                    Counter.builder(PROCESSED_METRIC).tag("result", "skipped").register(meterRegistry).increment();
+                    skippedCounter.increment();
                 }
             }
         }

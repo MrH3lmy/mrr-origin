@@ -64,6 +64,14 @@ public class AttributionRecalculationService {
     private final AttributionApplicationService attribution;
     private final Clock clock;
     private final MeterRegistry meterRegistry;
+    // Pre-registered at startup (rather than created lazily on first increment) so these report an
+    // explicit 0, not simply absent, until something actually happens -- standard Prometheus counter
+    // practice.
+    private final Counter completedBatchCounter;
+    private final Counter inProgressBatchCounter;
+    private final Counter customersProcessedCounter;
+    private final Counter failuresCounter;
+    private final Timer batchDurationTimer;
 
     public AttributionRecalculationService(
             JdbcClient db, AttributionApplicationService attribution, Clock clock, MeterRegistry meterRegistry) {
@@ -71,6 +79,11 @@ public class AttributionRecalculationService {
         this.attribution = attribution;
         this.clock = clock;
         this.meterRegistry = meterRegistry;
+        this.completedBatchCounter = Counter.builder(BATCHES_METRIC).tag("outcome", "completed").register(meterRegistry);
+        this.inProgressBatchCounter = Counter.builder(BATCHES_METRIC).tag("outcome", "in_progress").register(meterRegistry);
+        this.customersProcessedCounter = Counter.builder(CUSTOMERS_PROCESSED_METRIC).register(meterRegistry);
+        this.failuresCounter = Counter.builder(FAILURES_METRIC).register(meterRegistry);
+        this.batchDurationTimer = Timer.builder(BATCH_DURATION_METRIC).register(meterRegistry);
     }
 
     /**
@@ -86,21 +99,16 @@ public class AttributionRecalculationService {
         Timer.Sample sample = Timer.start(meterRegistry);
         try {
             BatchOutcome outcome = runBatchTimed(workspaceId, projectId, maxCustomers);
-            Counter.builder(BATCHES_METRIC)
-                    .tag("outcome", outcome.complete() ? "completed" : "in_progress")
-                    .register(meterRegistry)
-                    .increment();
+            (outcome.complete() ? completedBatchCounter : inProgressBatchCounter).increment();
             if (outcome.customersProcessedThisBatch() > 0) {
-                Counter.builder(CUSTOMERS_PROCESSED_METRIC)
-                        .register(meterRegistry)
-                        .increment(outcome.customersProcessedThisBatch());
+                customersProcessedCounter.increment(outcome.customersProcessedThisBatch());
             }
             return outcome;
         } catch (RuntimeException failure) {
-            Counter.builder(FAILURES_METRIC).register(meterRegistry).increment();
+            failuresCounter.increment();
             throw failure;
         } finally {
-            sample.stop(Timer.builder(BATCH_DURATION_METRIC).register(meterRegistry));
+            sample.stop(batchDurationTimer);
         }
     }
 

@@ -48,7 +48,7 @@ class IngestionMetricsIntegrationTests extends AbstractTrackingIntegrationTest {
         UUID workspaceA = createWorkspace(OWNER);
         UUID projectA = createProject(workspaceA);
         String keyA = issueKey(workspaceA, projectA);
-        allowDomain(workspaceA, projectA, "https://app-a.example");
+        allowDomain(workspaceA, projectA, "app-a.example");
         mockMvc.perform(ingest(keyA, "https://app-a.example",
                         pageViewBatch("batch-a", "evt-a", "visitor-a", OffsetDateTime.now().toString())))
                 .andExpect(status().isOk());
@@ -56,7 +56,7 @@ class IngestionMetricsIntegrationTests extends AbstractTrackingIntegrationTest {
         UUID workspaceB = createWorkspace(OTHER_OWNER);
         UUID projectB = createProject(workspaceB);
         String keyB = issueKey(workspaceB, projectB);
-        allowDomain(workspaceB, projectB, "https://app-b.example");
+        allowDomain(workspaceB, projectB, "app-b.example");
         mockMvc.perform(ingest(keyB, "https://app-b.example",
                         pageViewBatch("batch-b", "evt-b", "visitor-b", OffsetDateTime.now().toString())))
                 .andExpect(status().isOk());
@@ -70,7 +70,7 @@ class IngestionMetricsIntegrationTests extends AbstractTrackingIntegrationTest {
         UUID workspaceId = createWorkspace(OWNER);
         UUID projectId = createProject(workspaceId);
         String key = issueKey(workspaceId, projectId);
-        allowDomain(workspaceId, projectId, "https://app.example");
+        allowDomain(workspaceId, projectId, "app.example");
         String body = pageViewBatch("batch-dup", "evt-dup", "visitor-dup", OffsetDateTime.now().toString());
         mockMvc.perform(ingest(key, "https://app.example", body)).andExpect(status().isOk());
 

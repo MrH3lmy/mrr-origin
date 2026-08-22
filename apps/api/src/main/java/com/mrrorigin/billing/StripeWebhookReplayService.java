@@ -44,11 +44,12 @@ class StripeWebhookReplayService {
     private static final String REPLAY_METRIC = "mrrorigin.stripe.webhook.replay";
 
     private final JdbcClient jdbc;
-    private final MeterRegistry meterRegistry;
+    private final Counter replayCounter;
 
     StripeWebhookReplayService(JdbcClient jdbc, MeterRegistry meterRegistry) {
         this.jdbc = jdbc;
-        this.meterRegistry = meterRegistry;
+        // Pre-registered at startup -- see StripeWebhookIngestionService's identical reasoning.
+        this.replayCounter = Counter.builder(REPLAY_METRIC).register(meterRegistry);
     }
 
     /**
@@ -76,7 +77,7 @@ class StripeWebhookReplayService {
                 .update()
                 == 1;
         if (replayed) {
-            Counter.builder(REPLAY_METRIC).register(meterRegistry).increment();
+            replayCounter.increment();
             return ReplayOutcome.REPLAYED;
         }
 
@@ -128,7 +129,7 @@ class StripeWebhookReplayService {
                 .query((rs, rowNum) -> UUID.fromString(rs.getString("id")))
                 .list();
         if (!replayedIds.isEmpty()) {
-            Counter.builder(REPLAY_METRIC).register(meterRegistry).increment(replayedIds.size());
+            replayCounter.increment(replayedIds.size());
         }
         return new BatchReplayOutcome(replayedIds);
     }

@@ -6,7 +6,9 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -49,12 +51,14 @@ class StripeWebhookIngestionService {
      */
     private static final String RECEIVED_METRIC = "mrrorigin.stripe.webhook.received";
 
+    private static final List<String> OUTCOMES = List.of("stored", "duplicate", "orphaned");
+
     private final StripeConnectionRepository connections;
     private final StripeConnectProperties properties;
     private final StripeWebhookSignatureVerifier verifier;
     private final ObjectMapper objectMapper;
     private final JdbcClient jdbc;
-    private final MeterRegistry meterRegistry;
+    private final Map<String, Counter> receivedCounters = new ConcurrentHashMap<>();
 
     StripeWebhookIngestionService(
             StripeConnectionRepository connections,
@@ -68,15 +72,28 @@ class StripeWebhookIngestionService {
         this.verifier = verifier;
         this.objectMapper = objectMapper;
         this.jdbc = jdbc;
-        this.meterRegistry = meterRegistry;
+        // Pre-registered at startup (rather than created lazily on first increment) so this metric
+        // reports an explicit 0 -- not simply absent -- until something actually happens; standard
+        // Prometheus counter practice, and what lets an operator distinguish "no traffic yet" from
+        // "this metric was never wired up."
+        for (StripeConnectionMode mode : StripeConnectionMode.values()) {
+            for (String outcome : OUTCOMES) {
+                receivedCounters.put(
+                        key(mode, outcome),
+                        Counter.builder(RECEIVED_METRIC)
+                                .tag("mode", mode.name().toLowerCase())
+                                .tag("outcome", outcome)
+                                .register(meterRegistry));
+            }
+        }
+    }
+
+    private static String key(StripeConnectionMode mode, String outcome) {
+        return mode.name() + ":" + outcome;
     }
 
     private void recordReceived(StripeConnectionMode mode, String outcome) {
-        Counter.builder(RECEIVED_METRIC)
-                .tag("mode", mode.name().toLowerCase())
-                .tag("outcome", outcome)
-                .register(meterRegistry)
-                .increment();
+        receivedCounters.get(key(mode, outcome)).increment();
     }
 
     void ingest(StripeConnectionMode mode, byte[] rawBody, String signatureHeader) {
