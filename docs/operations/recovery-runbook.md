@@ -142,33 +142,102 @@ genuine `restart()` reproduces byte-identical results because recalculation is d
 upserts overwrite in place rather than duplicating
 (`AttributionRecalculationServiceIntegrationTests`).
 
-**Operational gap (flagged):** there is currently no HTTP endpoint or scheduler that invokes
-`runBatch`/`restart`/`status` — recalculation can only be triggered by calling the Spring service
-directly (e.g. from a test, a one-off ops tool, or a future admin surface). Until an operator-facing
-trigger exists, recovering a stalled recalculation requires an engineer to invoke the service
-directly against the target `(workspaceId, projectId)`, not a documented self-serve operator step.
-This is tracked as follow-up scope for #28, not solved by this runbook.
+**#84 closed the operational gap this section used to flag.** `AttributionRecalculationController`
+now exposes `status`/`runBatch`/`restart` over HTTP with no orchestration or semantics beyond what
+`AttributionRecalculationService` already did — it is a thin, manager-authorized wrapper.
 
-**Before recovering:** if you do have a way to invoke `status(workspaceId, projectId)`, capture the
-current `status`/`cursorCustomerId`/`customersProcessed` and the row count in
-`customer_attribution_results` for the scope.
+**Identify a stalled recalculation.**
 
-**Resume:** call `runBatch(workspaceId, projectId, maxCustomers)` repeatedly until
-`BatchOutcome.complete()` is `true`. If the run is stuck (status stays `RUNNING` with no forward
-progress across repeated calls, e.g. a prior process crashed holding no lock because the row lock is
-released with its transaction), a genuine restart is available: `restart(workspaceId, projectId)`
-resets the checkpoint — but it explicitly rejects a still-`RUNNING` run
-(`IllegalStateException("recalculation run is still in progress")`), so first confirm via `status`
-that nothing is actively advancing it before restarting.
+```
+GET /api/workspaces/{workspaceId}/projects/{projectId}/attribution-recalculation
+```
+
+Manager permission required (this is an operator surface, not a general read — unlike
+`/attribution/coverage`, which only requires membership). A project id that does not belong to
+`workspaceId` is rejected as `404`, same as a non-member workspace. Response:
+
+```json
+{
+  "status": "RUNNING",
+  "cursorCustomerId": "cus_123",
+  "customersProcessed": 420,
+  "complete": false,
+  "modelVersion": "attribution-v1"
+}
+```
+
+`status` is `NOT_STARTED` (with `cursorCustomerId: null`, `customersProcessed: 0`) if no run has ever
+been created for this `(workspaceId, projectId)` — a deterministic response, not a `404`/`500`. Look
+for `status: RUNNING` with no forward progress across repeated checks over an extended window (e.g. a
+prior process crashed holding no lock, since the run row's lock is released with its transaction) to
+distinguish a genuinely stuck run from one that is just slow.
+
+**Before recovering:** capture the current `status`/`cursorCustomerId`/`customersProcessed` from the
+response above and the row count in `customer_attribution_results` for the scope.
+
+**Resume one bounded batch.**
+
+```
+POST /api/workspaces/{workspaceId}/projects/{projectId}/attribution-recalculation/resume?maxCustomers=100
+```
+
+Manager permission required. `maxCustomers` defaults to 100 and is bounded to `[1, 500]`; each call
+processes at most that many customers in one transaction and durably advances the checkpoint — it
+never loops internally, so bounded operational recovery means calling this endpoint, not expecting
+one call to finish an arbitrarily large scope. Response reports the existing `BatchOutcome` shape plus
+a derived `status`:
+
+```json
+{
+  "customersProcessedThisBatch": 100,
+  "totalCustomersProcessed": 520,
+  "cursorCustomerId": "cus_987",
+  "complete": false,
+  "status": "RUNNING"
+}
+```
+
+**Repeat resume until COMPLETE.**
+
+```
+while status != COMPLETED:
+  POST .../attribution-recalculation/resume?maxCustomers=100
+```
+
+Safe to call repeatedly and safe to call concurrently with itself, same as backfill/replay above —
+concurrent `resume` calls for the same `(workspaceId, projectId)` serialize on the run row and
+converge without losing or duplicating progress
+(`AttributionRecalculationServiceIntegrationTests#concurrentBatchRunsForTheSameScopeSerializeInsteadOfDuplicatingWork`).
+Once a call's response reports `complete: true` (fewer than `maxCustomers` customers were processed),
+the scope has been fully swept; further `resume` calls are safe no-ops until `restart`.
+
+**Restart a completed sweep.**
+
+```
+POST /api/workspaces/{workspaceId}/projects/{projectId}/attribution-recalculation/restart
+```
+
+Manager permission required. Only valid from `COMPLETED` — e.g. because late `identify()` calls or
+new links since completion mean previously "final" results should be revisited. Resets the checkpoint
+to the beginning and moves the run back to `RUNNING`; a following `resume` performs a fresh sweep, and
+because recalculation is deterministic and upserts overwrite in place, the results end up
+byte-identical to the prior sweep if nothing about the underlying evidence changed.
+
+**What "still running" means.** `restart` returns `409 Conflict` in two cases: the run is still
+`RUNNING` (never call `restart` while another process might still be advancing the same
+`(workspaceId, projectId, model_version)` — checkpoint and existing results are left untouched, not
+corrupted), or no run has ever been created for this scope. Confirm via `status` first; if it reports
+`RUNNING` with no forward progress across repeated checks, keep calling `resume` (it is always safe)
+rather than looping `restart` expecting it to eventually succeed.
 
 **After recovering:** row count in `customer_attribution_results` for the scope should match a
 clean single-pass run over the same input data — recalculation never creates duplicate active
 results for a customer under the same model version.
 
-**When not to replay:** never call `restart` while another process might still be advancing the same
-`(workspaceId, projectId, model_version)` — it will fail fast with the "still in progress" error
-rather than corrupt state, but repeatedly hammering it in a loop wastes the failed attempts. Confirm
-via `status` first.
+**Authorization:** every operation above (`status`, `resume`, `restart`) requires workspace manager
+permission (`WorkspaceContext.requireManager`), which also blocks mutating calls once the workspace is
+`DELETING` (`409 Conflict`). Non-member workspace access is concealed as `404`, matching the rest of
+the API.
 
 ## Weekly summary deliveries: interrupted or stuck leases
 
