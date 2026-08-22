@@ -408,9 +408,9 @@ abstract class AbstractWorkspaceLifecycleIntegrationTest {
         jdbc.sql("""
                         INSERT INTO billing_discounts
                             (id, workspace_id, stripe_discount_id, stripe_customer_id, stripe_coupon_id, start_at,
-                             source, source_version, source_sequence)
+                             first_seen_start_at, source, source_version, source_sequence)
                         VALUES (:id, :workspaceId, :stripeDiscountId, :stripeCustomerId, 'coupon_test', CURRENT_TIMESTAMP,
-                                'BACKFILL', 1, 'test')
+                                CURRENT_TIMESTAMP, 'BACKFILL', 1, 'test')
                         """)
                 .param("id", UUID.randomUUID())
                 .param("workspaceId", workspaceId)

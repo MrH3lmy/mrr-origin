@@ -1,0 +1,317 @@
+# ADR-0011: Legacy customer-level discount MRR recalculation (#86)
+
+- Status: Accepted
+- Date: 2026-08-21
+
+## Context
+
+ADR-0010 wired `customer.subscription.*` normalization into deterministic MRR recalculation, but
+documented one known limitation: legacy top-level `customer.discount.created/updated/deleted` events
+(a customer's singular `discount` field, distinct from a subscription's compound `discounts` array)
+were normalized into `billing_discounts` without ever triggering recalculation. A workspace relying
+on that legacy field would see billing state update while MRR silently stayed stale -- a violation of
+this repository's core invariant that a successfully processed Stripe event never leaves a plausible
+but stale MRR value.
+
+Closing that gap requires deciding what happens when a discount that is not scoped to any one
+subscription needs to affect a customer who may have zero, one, or several subscriptions, possibly in
+different currencies. ADR-0004 already decided the adjacent, narrower question -- a fixed-amount
+discount spanning multiple recurring items within one subscription is unsupported because "V1 has no
+defensible allocation rule" -- but says nothing about a discount scoped above the subscription level.
+
+## Decision
+
+`CustomerDiscountMrrRecalculationService` (new, `billing` module) intercepts customer-scoped discount
+events after `BillingLedgerUpsertService.upsertDiscount` applies (extended to report whether the write
+was stale, mirroring `upsertSubscription`'s existing pattern) and recalculates every affected
+subscription synchronously, in the same transaction, through the same `BillingMrrRecalculationPort`
+the subscription path already uses. This _is_ new orchestration in `billing`, not a new calculation
+rule -- but it required one narrow addition to `RevenueCalculationService` itself: a `customer_level`
+flag threaded through `RevenueModels`, `BillingMrrRecalculationPort`, `BillingMrrRecalculationAdapter`,
+and persisted on `revenue_subscription_state_discounts` (migration V26), so that
+`RevenueCalculationService.calculate` can tell a customer-scoped discount apart from a
+subscription/item-scoped one when a customer has more than one paid (`active`/`past_due`)
+subscription. That distinction feeds exactly one new guard -- `AMBIGUOUS_FIXED_DISCOUNT_ALLOCATION`,
+thrown when a fixed-amount customer-level discount is active across more than one paid subscription --
+mirroring the fixed-amount rejection described below at the orchestration layer, at the calculation
+layer where replay (`history`/`calculate`) also needs to see it. No other calculation semantics
+changed: percentage math, per-subscription discount-count guards, currency checks, and ADR-0004's
+stacking rule are all unchanged.
+
+"Affected" is a customer's subscriptions currently in `active`/`past_due` status -- ADR-0004's only
+MRR-retaining statuses. A churned or trialing subscription contributes zero MRR regardless of discount
+state, so it is excluded both from recalculation (a needless no-op) and from the ambiguity count below
+(it was never really in scope).
+
+### Percentage discounts: fan out, always supported when any subscription is affected
+
+A percentage composes independently per subscription -- there is no allocation choice to make. Fanning
+the same `percent_off` out to every affected subscription is not a new rule; it is the identical
+per-subscription math ADR-0004 already approves for one subscription-wide discount, run once per
+affected subscription instead of once. This holds regardless of how many subscriptions or currencies
+are involved, since percentage discounts carry no currency.
+
+### Fixed-amount discounts: supported only when exactly one subscription is affected
+
+When a customer has more than one `active`/`past_due` subscription, a fixed-amount discount cannot be
+deterministically allocated: split it, apply it in full to each, or apply it to only one? None of these
+is written down anywhere in this codebase's approved semantics, and inventing one would fabricate
+revenue exactly as ADR-0004 already refuses to do at the item level. `CustomerDiscountMrrRecalculationService`
+throws `StripeBillingNormalizationException` in that case, which -- via `StripeWebhookNormalizationService`'s
+existing failure handling -- rolls back the whole transaction (the `billing_discounts` write included)
+and marks the event `FAILED`/`UNSUPPORTED`: inspectable and replayable, never silently accepted.
+
+When exactly one subscription is affected, the existing engine's own guards (`AMBIGUOUS_FIXED_DISCOUNT_ALLOCATION`
+for a multi-item subscription, `DISCOUNT_CURRENCY_MISMATCH` for a currency mismatch) apply completely
+unchanged, because the discount is fed into that one subscription's state exactly as a subscription-wide
+fixed discount already is.
+
+### Existing per-subscription discounts: reuse the stacking guard, add no new one
+
+Each affected subscription's current subscription/item-level discounts (from `billing_discounts`,
+already normalized by prior `customer.subscription.*` events) are included alongside the new
+customer-level one. `RevenueCalculationService`'s pre-existing "at most one active discount per
+subscription state" check then fails a stacked combination visibly (`UNSUPPORTED_DISCOUNT`), the same
+way it already does for two subscription-embedded discounts. No new stacking-detection logic exists in
+`CustomerDiscountMrrRecalculationService`.
+
+### Delete
+
+The discount is simply omitted from the reconstructed per-subscription discount list from its
+effective end onward. ADR-0004's existing customer-movement classification table produces the correct
+expansion/reactivation on its own; no new movement logic was needed. `end_at` is persisted with the
+same value used as `effective_at` below (Stripe's own `end`, or the provider-event-second fallback),
+never left `NULL` on a deleted row -- see "Historical state" below for why that persistence matters
+beyond this event's own recalculation.
+
+### `effective_at`
+
+Create/update use the discount's own provider-declared `start` (always present; required by the
+parser). Delete uses `end` when Stripe provided one, else the event's own provider-declared second --
+exactly ADR-0010's documented last-resort fallback for a transition with no more specific field,
+extended to this event type rather than a new rule. No fabricated timestamp is ever introduced.
+
+### Idempotency and ordering
+
+`source_billing_reference` is `{source}:{version}:{sequence}:{stripeSubscriptionId}` -- the identical
+shape ADR-0010 already uses for the subscription path -- so duplicate delivery, replay, and
+same-second/different-sequence collisions all resolve through the same proven `revenue_subscription_states`
+unique constraint and `clearSupersededState` superseding logic, unchanged. Out-of-order protection comes
+from `upsertDiscount`'s own version guard: a stale discount write is detected before any recalculation
+is attempted (mirroring `upsertSubscription`'s pre-recalculation staleness check), so an older event
+arriving after a newer one is a no-op at the ledger level and never reaches MRR recalculation at all.
+
+### Customer-discount event outcomes
+
+- Closes ADR-0010's documented known limitation for the create/update/delete cases where the
+  underlying semantics are actually deterministic.
+- No new infrastructure. `RevenueCalculationService` gains the narrow `customer_level`
+  threading and `AMBIGUOUS_FIXED_DISCOUNT_ALLOCATION` guard described above -- no other
+  calculation semantics, currency handling, stacking behavior, or attribution changed, and PR
+  #85's price-resolution strictness is untouched.
+- A customer-level fixed-amount discount on a customer with multiple `active`/`past_due` subscriptions
+  is explicitly unsupported (event `FAILED`), not silently approximated. Data-health/support tooling
+  for surfacing `FAILED`/`UNSUPPORTED` rows to an operator is existing #15 territory, not new to this
+  change.
+
+### Subscription events and backfill
+
+The complementary subscription path (`BillingLedgerUpsertService.activeCustomerDiscounts`) also
+resolves any normalized customer-level discount whose effective window contains the subscription
+state's own `effective_at`. This runs for accepted `customer.subscription.*` events and for
+subscription backfill, so the customer-first backfill order cannot materialize plausible undiscounted
+MRR. Subscription/item discounts from the payload are combined with the ledger discount; the same
+Stripe discount, including an equivalent customer expansion represented in both places, is included
+once. Genuinely distinct discounts remain stacked and therefore explicitly unsupported.
+
+The lookup is scoped by both `workspace_id` and customer ID. Derived discount history records
+customer-level scope so replay can preserve multi-subscription fixed-amount ambiguity without
+inventing allocation semantics. Percentage discounts continue to compose independently across
+subscriptions and currencies.
+
+### Historical state: delete and update (amendment)
+
+`billing_discounts` is a single upserted current-state row per `stripe_discount_id`, exactly like
+every other `billing_*` ledger table -- it was never a history table. That is fine for
+`CustomerDiscountMrrRecalculationService` itself, which only ever recalculates a customer's currently
+affected subscriptions using the discount event's own `effective_at`. It is _not_ fine for
+`activeCustomerDiscounts`, which answers a genuinely historical question: "what customer discount was
+effective at this **other**, possibly older, subscription state's `effective_at`?" A delayed
+`customer.subscription.created` webhook (arrived late, but carrying its own earlier provider second as
+`effective_at`) can be recalculated after a `customer.discount.deleted` or `customer.discount.updated`
+for the _same_ discount has already overwritten the one row `activeCustomerDiscounts` reads.
+
+**Delete.** The original query filtered on `deleted = FALSE`, which answers "is this discount active
+right now", not "was this discount active at `effective_at`". A discount deleted after an older
+subscription's `effective_at` would be wrongly excluded from that subscription's recalculation --
+producing plausible-but-stale MRR, the exact defect ADR-0004/#86 exists to prevent, just triggered by
+`customer.subscription.*` recalculation instead of `customer.discount.*`. Fix: `end_at` is now always
+populated once a discount is deleted (Stripe's own `end`, or -- when Stripe supplies none -- the same
+provider-event-second fallback already used for `effective_at` above, persisted rather than only used
+transiently), and `activeCustomerDiscounts` drops the `deleted` filter entirely in favor of the
+temporal window alone (`start_at <= effective_at < end_at`). A deleted discount is included for any
+`effective_at` before its actual deletion/end instant, and correctly excluded from it onward --
+`deleted` no longer participates in the decision at all.
+
+**Update.** Stripe's own semantics for `customer.discount.updated` are "occurs whenever a customer is
+switched from one coupon to another" -- a genuine change of terms (percent/amount/currency) under the
+same discount id, not a metadata touch. `billing_discounts` keeps only the current coupon's terms; the
+prior coupon's are gone the instant the row is overwritten. If an older subscription's `effective_at`
+predates that switch, the terms that actually applied then are not recoverable from normalized state --
+and ADR-0004/#86 forbid guessing. A new `first_seen_start_at` column (this discount identity's
+earliest-ever `start_at`, frozen at first insert, never touched by a later update) lets
+`activeCustomerDiscounts` detect exactly this: a row it can find (`first_seen_start_at <= effective_at`)
+but whose _current_ terms are provably not the ones in force at that `effective_at`
+(`effective_at < start_at`). Rather than silently applying the wrong (current) terms, or silently
+omitting the discount, that case throws `StripeBillingNormalizationException` -- the same
+explicit-failure precedent this ADR already uses for cross-subscription fixed-amount ambiguity --
+rolling the whole recalculation back atomically and marking the event `FAILED`/`UNSUPPORTED`:
+inspectable and replayable, never a fabricated number.
+
+This does not require reconstructing history from `stripe_webhook_events`: it never claims the old
+terms, only refuses to substitute the new ones for them. Both changes are scoped to
+`activeCustomerDiscounts` only -- `CustomerDiscountMrrRecalculationService`'s own recalculation (which
+always resolves against the event's own `effective_at`, never an older one) and `currentDiscounts`
+(subscription/item-level discounts, always fully re-supplied by the subscription's own payload) are
+unaffected.
+
+**Known limitation.** A discount identity that is switched (update) _before_ any subscription's
+`effective_at` ever needed to resolve against its pre-switch window will never trip the ambiguity
+guard -- and does not need to, because `activeCustomerDiscounts` is only ever asked to resolve
+`effective_at`s that actually occur; this is not a gap, just a note that the guard is a correctness
+backstop for the genuinely out-of-order case, not a general discount-history feature.
+
+### Out-of-order historical evidence (amendment)
+
+The first version of `first_seen_start_at` was set once at insert and never revisited, including when
+a later write to the same discount id was rejected as stale by the version guard. That left a second,
+narrower hole: if the chronologically newer coupon state (`customer.discount.updated`, a later
+`start`) is processed _before_ the chronologically older one for the same discount id, the older
+write's version guard correctly rejects it (current terms must never regress) -- but the rejection
+also discarded the older write's own `start`, which is proof this discount identity existed from at
+least that instant. `first_seen_start_at` stayed pinned at the newer coupon's `start`, so
+`activeCustomerDiscounts` could not even _find_ the row for an older, delayed subscription
+`effective_at` that fell between the two -- silently materializing full-price MRR, the exact
+plausible-but-stale defect this whole ADR exists to prevent, not merely the narrower "wrong terms"
+case the ambiguity guard already caught.
+
+Fix: `BillingLedgerUpsertService.upsertDiscountReportingApplied` now runs two separate statements
+against `billing_discounts` for every discount write, whether accepted or rejected:
+
+1. The existing version-guarded upsert, governing _current state_ only (coupon terms, `start_at`/
+   `end_at`, `deleted`) -- unchanged, and still the sole input to the `applied` flag
+   `CustomerDiscountMrrRecalculationService` uses to skip recalculation for a stale write.
+2. `recordEarliestKnownDiscountStart`, governing _historical evidence_ only: unconditionally widens
+   `first_seen_start_at` down to `LEAST(first_seen_start_at, incoming start)`, independent of the
+   version guard. A write's own `start` is evidence this discount identity existed from that instant
+   regardless of whether its coupon terms won or lost the version race, so discarding it alongside a
+   rejected write is not required by (and directly undermines) the version guard's actual purpose,
+   which is protecting _current terms_ from regressing, not erasing _existence_ evidence.
+
+This only ever widens the window `activeCustomerDiscounts` searches -- it never claims to know what
+the discount's terms were at the newly-discovered earlier instant. If that widened window makes a
+row reachable for an `effective_at` before the row's _current_ `start_at`, the pre-existing ambiguity
+guard (above) still fires and still refuses to substitute the current (possibly newer, possibly
+different) coupon's terms: the event fails explicitly (`FAILED`/`UNSUPPORTED`), never a fabricated
+percentage and never silent full-price MRR. Both statements run in the same transaction and commit or
+roll back together with the rest of that event's write, so the evidence update is exactly as durable,
+tenant-scoped, and replay-safe (`LEAST` is idempotent and order-independent) as the rest of this
+ADR's convergence guarantees.
+
+A discount whose very first accepted write for a given identity is (due to extreme out-of-order
+delivery) already an "update" rather than the original "create" still correctly records
+`first_seen_start_at` from that write's own `start` -- unaffected by this amendment, since there is no
+earlier write to reject in that case.
+
+### Retroactive invalidation (amendment)
+
+Widening `first_seen_start_at` fixes every recalculation from that moment forward, but a subscription
+state can already have been _successfully materialized_ before the evidence arrived: `customer.subscription.created`
+processed first at `T1` (full price, discount unknown), a customer-level discount created/updated later
+at `T2`, then the discount's own original, older write arrives last and loses the version race -- exactly
+the scenario above, except this time `T1`'s MRR was already computed and persisted as a _supported_
+`customer_mrr_snapshots`/`customer_mrr_movements` figure before the correction ever ran. Widening
+`first_seen_start_at` alone does nothing to that already-committed number: nobody re-asks the question
+for `T1` unless something re-triggers it. Left alone, that supported-but-now-provably-unsafe figure is
+exactly the "plausible but stale MRR" this whole ADR exists to prevent -- just reached through a
+timing window (evidence learned _after_ materialization) rather than a missing recalculation trigger.
+
+**Design.** `BillingLedgerUpsertService.upsertDiscountReportingApplied` returns a `DiscountUpsertOutcome`
+record splitting the same two facts ADR-0011 already treats independently, made explicit in the type:
+`currentStateApplied` (did this write win the version race?) and `historicalEvidenceChanged` (did this
+write's own `start` prove the discount existed earlier than previously known, regardless of whether it
+won?). `CustomerDiscountMrrRecalculationService.applyCustomerDiscount` acts on `historicalEvidenceChanged`
+independently of, and before, the `currentStateApplied` staleness early-return -- so a stale write is
+never silently discarded just because its coupon terms lost the race.
+
+When evidence changed, it calls a new `BillingMrrRecalculationPort.invalidateUnprovenHistoricalDiscountWindow(workspaceId,
+stripeCustomerId, stripeDiscountId, windowStart, windowEnd)` for the newly-revealed range
+`[widenedTo, widenedFrom)` (the new, earlier bound to the previous, later one). `BillingMrrRecalculationAdapter`
+implements it entirely with existing, tested primitives, per ADR-0002's "recalculation replaces or
+supersedes derived results without rewriting raw evidence":
+
+1. Find every `revenue_subscription_states` row for this customer with `effective_at` in that window,
+   status `active`/`past_due` (ADR-0004's only MRR-retaining statuses -- any other status contributes
+   zero MRR regardless of discount state, so it was never wrong), whose own persisted discounts do not
+   already include this discount id (i.e. computed without knowledge of it -- exactly the ones a live
+   recalculation right now would resolve differently).
+2. For each one, read back its own persisted items and discounts (never live `billing_subscription_items`
+   or current discount state -- an already-materialized historical state is corrected only from what it
+   itself already proved, never from data that could have changed since), then supersede it (`revenue_subscription_states`
+   allows at most one row per `(subscription, effective_at)`, so this reuses `recalculateSubscription`'s own
+   `clearSupersededState` free-the-slot step) with the same items/status plus an explicit marker discount
+   (`percent_off`/`amount_off`/`currency`/`start_at`/`end_at` all `NULL`). `RevenueCalculationService.normalize`'s
+   own existing, already-tested guard (`percent == amount`, i.e. both absent) throws `UNSUPPORTED_DISCOUNT`
+   for that instant deterministically -- no new calculation rule, no invented percentage.
+3. Batch every correction into one `RevenueCalculationService.recordAndReplay` call, so the customer's
+   full `customer_mrr_snapshots`/`movements` history is deleted and rebuilt once, consistently, from the
+   corrected `revenue_subscription_states`.
+
+**Why this needs no separate "closing" step.** `replay()`'s own state-supersession semantics already
+bound the correction to exactly the ambiguous window: a subscription's state persists forward from its
+own `effective_at` until a _later_ state for that same subscription supersedes it. If the customer's
+discount actually changed at `T2` (as it must have, for this correction to be running at all) and the
+subscription was already `active`/`past_due` at that time, `CustomerDiscountMrrRecalculationService`'s
+existing, unmodified fan-out already inserted a fresh, correctly-computed state at `T2` when that write
+was processed -- so poisoning only `T1`'s own row is naturally superseded by the already-correct `T2`
+row the moment replay reaches it, with no invented timestamp or synthetic "closing" state required.
+
+**Idempotency.** Each correction's `source_billing_reference` is deterministic --
+`HISTORICAL_CORRECTION:{discountId}:{subscriptionId}:{effectiveAt}` -- keyed by the instant being
+corrected, not by any internal row id that changes across supersession. Replaying the same discount
+event that discovered this evidence recomputes the identical reference and no-ops via
+`recordAndReplay`'s own `ON CONFLICT(source_billing_reference) DO NOTHING`, exactly like any other
+duplicate event in this system.
+
+**Consequence for the source subscription event.** Once a correction exists, replaying the _original_
+subscription event that first (and, at the time, correctly) materialized the now-poisoned state will
+itself now fail: `activeCustomerDiscounts`'s pre-existing ambiguity guard sees the same widened
+`first_seen_start_at` and refuses the recalculation, deterministically, on every replay. This is
+intentional, not a regression -- the codebase has no notion of "this event was allowed to succeed once,
+so it must keep succeeding"; every recalculation attempt is always judged against the best evidence
+currently available.
+
+**Genuine limitation.** No historical value is ever invented: a corrected instant becomes explicitly
+`UNSUPPORTED_DISCOUNT`, never a guessed percentage. Cross-currency and cross-tenant scoping are
+inherited unchanged from the existing `workspace_id`/`stripe_customer_id`-scoped queries this reuses.
+
+## Consequences
+
+- Both customer discount events and later subscription events/backfills synchronously materialize the
+  same deterministic customer discount state.
+- No new infrastructure, currency conversion, stacking behavior, or fixed-amount allocation rule is
+  introduced.
+- Duplicate, replayed, stale, and out-of-order inputs retain the ledger and revenue engine's existing
+  convergence and atomic rollback behavior, including a customer discount deleted or switched (update)
+  out of order relative to an older subscription recalculation: the older state either resolves
+  correctly (delete) or fails explicitly rather than silently (update), never plausible-but-stale.
+- `billing_discounts` remains a current-state table, not a history table; two narrow, targeted
+  additions (`end_at` always populated on delete, `first_seen_start_at` frozen at first insert) close
+  the specific historical-resolution gaps `activeCustomerDiscounts` has, without turning the table into
+  a general audit log.
+- Newly discovered historical evidence never leaves a stale-but-supported MRR figure standing:
+  `invalidateUnprovenHistoricalDiscountWindow` supersedes any already-materialized
+  `active`/`past_due` state the evidence proves unsafe with an explicit `UNSUPPORTED_DISCOUNT` marker
+  -- built entirely from existing, tested `revenue` primitives (`clearSupersededState`,
+  `recordAndReplay`, `normalize`'s own discount-validation guard), never a new calculation rule or an
+  invented percentage.
