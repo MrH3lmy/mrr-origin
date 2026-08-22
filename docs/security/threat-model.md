@@ -120,7 +120,7 @@ review; update it whenever a listed control changes.
   (`WorkspaceMemberEmailCaptureService`, `WeeklySummaryDispatchService`) log a workspace ID and a
   static "not configured" message respectively, never a credential or address value.
 - Actuator surface is deliberately minimal (`management.endpoints.web.exposure.include:
-  health,info,prometheus` in `application.yml`, as of #90/P6 observability) — no `env`, `beans`,
+health,info,prometheus` in `application.yml`, as of #90/P6 observability) — no `env`, `beans`,
   `httptrace`, or `heapdump` endpoints are exposed. `/actuator/prometheus` (Micrometer +
   `micrometer-registry-prometheus`, #90) is `permitAll` in `SecurityConfiguration`, the same posture
   as `/actuator/health*`/`/actuator/info` and for the same reason: a Prometheus-compatible scraper is
