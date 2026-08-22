@@ -153,29 +153,29 @@
     },
     {
       "id": 31,
-      "title": "MRR calculation outcome",
+      "title": "MRR calculation invocations",
       "type": "timeseries",
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 25 },
       "targets": [
         {
-          "expr": "sum(rate(mrrorigin_revenue_calculation_result_total[15m])) by (result)",
+          "expr": "sum(rate(mrrorigin_revenue_calculation_invocations_total[15m])) by (result)",
           "legendFormat": "{{result}}"
-        },
-        {
-          "expr": "sum(rate(mrrorigin_revenue_calculation_failure_total[15m]))",
-          "legendFormat": "failure"
         }
       ]
     },
     {
       "id": 32,
-      "title": "Unsupported reason breakdown",
+      "title": "Current supported/unsupported snapshots",
       "type": "timeseries",
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 25 },
       "targets": [
         {
-          "expr": "sum(rate(mrrorigin_revenue_calculation_unsupported_reason_total[1h])) by (reason)",
-          "legendFormat": "{{reason}}"
+          "expr": "sum(mrrorigin_revenue_calculation_supported_snapshots)",
+          "legendFormat": "supported"
+        },
+        {
+          "expr": "sum(mrrorigin_revenue_calculation_unsupported_snapshots) by (reason)",
+          "legendFormat": "unsupported:{{reason}}"
         }
       ]
     },

@@ -9,57 +9,71 @@
 #
 # Every threshold below is chosen for private-beta traffic volume (low, single-digit-workspace
 # scale) and documented inline. Revisit thresholds once real production traffic volume is known.
+#
+# Review-fix design rules applied throughout (see PR #91 review):
+#   - A rate/ratio alert's numerator and denominator are always the same unit (both request-level,
+#     or both event-level) -- never mixing a per-request counter with a per-event counter.
+#   - Every rate/ratio alert carries an explicit minimum-volume floor so a single sample can't move
+#     a ratio past threshold.
+#   - Every "is this failing at all" alert on a Counter uses `increase(...) >= N` for a real N > 1,
+#     never `rate(...) > 0`: a single isolated event stays inside a rolling rate window long enough
+#     to satisfy any `for:` duration shorter than the window, which `rate(...) > 0` cannot tell apart
+#     from a genuinely repeated failure.
 groups:
   - name: mrrorigin-ingestion
     rules:
       - alert: PublicIngestionRejectionRateHigh
         expr: >
           (
-            sum(rate(mrrorigin_ingestion_rejected_total[15m]))
+            sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events",outcome="CLIENT_ERROR"}[15m]))
             /
-            (sum(rate(mrrorigin_ingestion_events_total[15m])) + sum(rate(mrrorigin_ingestion_rejected_total[15m])) + 1e-9)
+            (sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events"}[15m])) + 1e-9)
           ) > 0.2
-          and (sum(rate(mrrorigin_ingestion_events_total[15m])) + sum(rate(mrrorigin_ingestion_rejected_total[15m]))) > 0
+          and sum(increase(http_server_requests_seconds_count{uri="/api/public/v1/events"}[15m])) >= 10
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "Public ingestion is rejecting more than 20% of requests"
           description: >
-            Over the last 15 minutes, more than 20% of public ingestion requests were rejected
-            (invalid key/origin/payload/conflict). A misconfigured integration key rotation or a
-            broken client SDK release are the most common causes. See
-            docs/operations/observability-runbook.md#public-ingestion.
+            Request-level ratio (both sides from http_server_requests_seconds_count, not mixed with
+            the per-event mrrorigin_ingestion_events_total -- a single request can carry many events,
+            so mixing units would misstate the true request rejection rate). Requires at least 10
+            requests in the window so one or two rejections can't trip this on near-zero traffic. A
+            misconfigured integration key rotation or a broken client SDK release are the most common
+            causes. See docs/operations/observability-runbook.md#public-ingestion.
       - alert: PublicIngestionRejectionRateCritical
         expr: >
           (
-            sum(rate(mrrorigin_ingestion_rejected_total[15m]))
+            sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events",outcome="CLIENT_ERROR"}[15m]))
             /
-            (sum(rate(mrrorigin_ingestion_events_total[15m])) + sum(rate(mrrorigin_ingestion_rejected_total[15m])) + 1e-9)
+            (sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events"}[15m])) + 1e-9)
           ) > 0.5
-          and (sum(rate(mrrorigin_ingestion_events_total[15m])) + sum(rate(mrrorigin_ingestion_rejected_total[15m]))) > 0
+          and sum(increase(http_server_requests_seconds_count{uri="/api/public/v1/events"}[15m])) >= 10
         for: 10m
         labels:
           severity: critical
         annotations:
           summary: "Public ingestion is rejecting more than half of all requests"
           description: >
-            Sustained majority-rejection strongly suggests every caller is hitting the same broken
-            condition (e.g. a bad deploy of the allowed-origin list, or mass key revocation), not
-            isolated client misconfiguration. See docs/operations/observability-runbook.md#public-ingestion.
+            Sustained majority-rejection (request-level ratio, >=10 requests in the window) strongly
+            suggests every caller is hitting the same broken condition (e.g. a bad deploy of the
+            allowed-origin list, or mass key revocation), not isolated client misconfiguration. See
+            docs/operations/observability-runbook.md#public-ingestion.
       - alert: PublicIngestionServerErrorRateHigh
         expr: >
-          sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events",outcome="SERVER_ERROR"}[15m])) > 0
+          sum(increase(http_server_requests_seconds_count{uri="/api/public/v1/events",outcome="SERVER_ERROR"}[15m])) >= 3
         for: 10m
         labels:
           severity: critical
         annotations:
-          summary: "Public ingestion endpoint is returning 5xx responses"
+          summary: "Public ingestion endpoint has returned at least 3 5xx responses in 15 minutes"
           description: >
-            Any sustained server-error rate on the public ingestion endpoint means legitimate
-            traffic is being dropped, not just malformed traffic being rejected (4xx). Any nonzero
-            rate for 10 continuous minutes is actionable at this endpoint's expected private-beta
-            volume.
+            A count floor (>=3), not `rate(...) > 0`: a single isolated 5xx would otherwise stay
+            inside the 15m rate window long enough to satisfy any `for:` shorter than 15m, which is
+            indistinguishable from a genuine repeated failure using rate alone. 3 is a low bar given
+            this endpoint's expected private-beta volume -- legitimate traffic being dropped is
+            always actionable.
 
   - name: mrrorigin-stripe-webhooks
     rules:
@@ -103,13 +117,15 @@ groups:
             /
             (sum(rate(mrrorigin_stripe_webhook_processed_total[15m])) + sum(rate(mrrorigin_stripe_webhook_failed_total[15m])) + 1e-9)
           ) > 0.1
-          and (sum(rate(mrrorigin_stripe_webhook_processed_total[15m])) + sum(rate(mrrorigin_stripe_webhook_failed_total[15m]))) > 0
+          and sum(increase(mrrorigin_stripe_webhook_processed_total[15m])) + sum(increase(mrrorigin_stripe_webhook_failed_total[15m])) >= 10
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "More than 10% of processed Stripe webhook events are failing"
           description: >
+            Both sides of the ratio are event-level (mrrorigin_stripe_webhook_{processed,failed}),
+            and the window requires at least 10 total events so a 1-of-2 failure can't read as 50%.
             Check failure_kind: UNSUPPORTED means a payload shape the normalizer doesn't handle
             (investigate before replaying); TRANSIENT means a retriable condition. See
             docs/operations/recovery-runbook.md#stripe-webhook-events-failed-processing-and-replay.
@@ -140,27 +156,34 @@ groups:
   - name: mrrorigin-revenue
     rules:
       - alert: MrrCalculationFailing
-        expr: sum(rate(mrrorigin_revenue_calculation_failure_total[15m])) > 0
-        for: 5m
+        expr: sum(increase(mrrorigin_revenue_calculation_invocations_total{result="failure"}[15m])) >= 2
+        for: 10m
         labels:
           severity: critical
         annotations:
-          summary: "MRR recalculation is throwing exceptions (transaction rollback)"
+          summary: "MRR recalculation has thrown at least 2 exceptions (transaction rollback) in 15 minutes"
           description: >
-            recordAndReplay failed and rolled back -- this is not the documented UnsupportedReason
-            outcome, it's an actual defect or invalid input reaching RevenueCalculationService. Any
-            sustained rate is actionable.
-      - alert: MrrCalculationUnsupportedRateElevated
-        expr: sum(rate(mrrorigin_revenue_calculation_unsupported_reason_total[1h])) > 0
+            A count floor (>=2), not `rate(...) > 0`, so one isolated failure doesn't page. This is
+            not the documented UnsupportedReason outcome (see mrrorigin_revenue_calculation_invocations
+            vs. the *_snapshots gauges below) -- it's an actual defect or invalid input reaching
+            RevenueCalculationService.
+      - alert: MrrCalculationUnsupportedSnapshotsElevated
+        expr: sum(mrrorigin_revenue_calculation_unsupported_snapshots) by (reason) > 10
         for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "MRR recalculation is producing UNSUPPORTED snapshots"
+          summary: "More than 10 currently-persisted MRR snapshots are UNSUPPORTED for one reason"
           description: >
-            Informational, not a bug by itself (unsupported is a documented, intentional outcome —
-            never silently converted to success) but a sustained rate suggests a new Stripe pricing/
-            discount pattern the engine doesn't yet handle. Check the `reason` label.
+            This is a point-in-time DB-backed gauge (current persisted state), not a rate: replay()
+            rebuilds a customer's whole history on every call, so a *counter* here would recount old,
+            unrelated historical instants every time an unrelated later state triggers a fresh replay
+            for the same customer (see docs/operations/observability-runbook.md). A gauge avoids that
+            inflation by reporting what's true right now. 10 is a meaningful floor above whatever
+            small number of already-known-unsupported historical states normally exist; investigate
+            the `reason` label for a new Stripe pricing/discount pattern the engine doesn't handle.
+            Not a bug by itself -- unsupported is a documented, intentional outcome, never silently
+            converted to success.
 
   - name: mrrorigin-attribution
     rules:
@@ -186,13 +209,15 @@ groups:
             An abandoned run this long means attribution results for that scope are visibly stale.
             Escalate per docs/operations/recovery-runbook.md.
       - alert: AttributionRecalculationFailing
-        expr: sum(rate(mrrorigin_attribution_recalculation_failures_total[15m])) > 0
+        expr: sum(increase(mrrorigin_attribution_recalculation_failures_total[15m])) >= 2
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Attribution recalculation batches are throwing exceptions"
-          description: "A sustained nonzero failure rate on runBatch invocations warrants investigation."
+          summary: "Attribution recalculation has thrown at least 2 exceptions in 15 minutes"
+          description: >
+            A count floor (>=2), not `rate(...) > 0`, so one isolated failure doesn't page while a
+            sustained pattern of runBatch invocations throwing still gets investigated.
 
   - name: mrrorigin-reporting
     rules:
@@ -203,22 +228,28 @@ groups:
             /
             (sum(rate(http_server_requests_seconds_count{uri=~"/api/workspaces/.*/reporting/.*"}[15m])) + 1e-9)
           ) > 2
+          and sum(increase(http_server_requests_seconds_count{uri=~"/api/workspaces/.*/reporting/.*"}[15m])) >= 10
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "Average reporting endpoint latency exceeds 2s"
           description: >
-            Founder-facing overview/comparison/movements endpoints averaging over 2 seconds over 15
-            minutes. Check DB query plans and connection-pool saturation first.
+            Requires at least 10 requests in the window so a single slow outlier can't compute a
+            misleading "average". Founder-facing overview/comparison/movements endpoints averaging
+            over 2 seconds over 15 minutes. Check DB query plans and connection-pool saturation first.
       - alert: ReportingErrorRateHigh
-        expr: sum(rate(http_server_requests_seconds_count{uri=~"/api/workspaces/.*/reporting/.*",outcome="SERVER_ERROR"}[15m])) > 0
+        expr: >
+          sum(increase(http_server_requests_seconds_count{uri=~"/api/workspaces/.*/reporting/.*",outcome="SERVER_ERROR"}[15m])) >= 3
         for: 10m
         labels:
           severity: critical
         annotations:
-          summary: "Reporting endpoints are returning 5xx responses"
-          description: "Any sustained server-error rate on founder-facing reporting endpoints is user-visible and actionable."
+          summary: "Reporting endpoints have returned at least 3 5xx responses in 15 minutes"
+          description: >
+            A count floor (>=3), not `rate(...) > 0` -- see PublicIngestionServerErrorRateHigh for the
+            identical reasoning. Any sustained pattern of server errors on founder-facing reporting
+            endpoints is user-visible and actionable.
 
   - name: mrrorigin-scheduled-delivery
     rules:

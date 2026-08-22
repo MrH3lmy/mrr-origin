@@ -16,6 +16,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 import tools.jackson.databind.JsonNode;
@@ -173,7 +175,18 @@ class StripeWebhookIngestionService {
         // all the caller (Stripe) needs to stop retrying. It IS distinguished in the metric below,
         // since "duplicate" vs. "stored" is operationally useful (a spike in duplicates suggests
         // Stripe-side retry storms) without affecting the durable-storage guarantee itself.
-        recordReceived(mode, inserted == 0 ? "duplicate" : processingState == StripeWebhookProcessingState.ORPHANED ? "orphaned" : "stored");
+        String outcome = inserted == 0 ? "duplicate" : processingState == StripeWebhookProcessingState.ORPHANED ? "orphaned" : "stored";
+        // Deferred to after-commit (P6 observability slice, #28, review fix): this INSERT is the
+        // only DB write here today, but recording the metric eagerly would still count a delivery
+        // that never durably committed if this method is ever extended with work after the insert
+        // (or the transaction fails to commit for any other reason) -- see EventIngestionService's
+        // identical reasoning.
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                recordReceived(mode, outcome);
+            }
+        });
     }
 
     private JsonNode parse(byte[] rawBody) {

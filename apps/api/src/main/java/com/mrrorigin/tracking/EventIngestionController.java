@@ -1,6 +1,8 @@
 package com.mrrorigin.tracking;
 
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -25,15 +27,25 @@ public class EventIngestionController {
      * various {@link EventIngestionException} codes into the same small bounded enum
      * {@link TrackingIngestionFailureRecorder} already uses for its diagnostics rows
      * (invalid_key/blocked_origin/invalid_payload) plus {@code conflict} for the batch/visitor/session
-     * conflict codes -- never a raw error message, ingestion key, or origin value.
+     * conflict codes -- never a raw error message, ingestion key, or origin value. Pre-registered at
+     * startup for this exact 4-value vocabulary (review fix, #90): {@link #rejectionReason} maps
+     * every {@link EventIngestionException} code this controller/service can throw
+     * (invalid_ingestion_key, invalid_origin, origin_not_allowed, unsupported_version,
+     * invalid_identify_payload, timestamp_out_of_range, batch_id_conflict, visitor_identity_conflict,
+     * session_visitor_conflict) onto one of these 4 values -- the {@code default} branch is
+     * unreachable defensive coverage for a code added here without updating this mapping, not a
+     * fifth production value, so it is intentionally not pre-registered.
      */
     private static final String REJECTED_METRIC = "mrrorigin.ingestion.rejected";
+
+    private static final List<String> REJECTION_REASONS =
+            List.of("invalid_key", "blocked_origin", "invalid_payload", "conflict");
 
     private final IngestionKeyService keys;
     private final EventIngestionService ingestion;
     private final AllowedDomainService allowedDomains;
     private final TrackingIngestionFailureRecorder failures;
-    private final MeterRegistry meterRegistry;
+    private final Map<String, Counter> rejectedCounters = new ConcurrentHashMap<>();
 
     public EventIngestionController(
             IngestionKeyService keys,
@@ -45,20 +57,24 @@ public class EventIngestionController {
         this.ingestion = ingestion;
         this.allowedDomains = allowedDomains;
         this.failures = failures;
-        this.meterRegistry = meterRegistry;
+        // Pre-registered at startup (rather than created lazily on first increment) -- see
+        // EventIngestionService's identical reasoning.
+        for (String reason : REJECTION_REASONS) {
+            rejectedCounters.put(reason, Counter.builder(REJECTED_METRIC).tag("reason", reason).register(meterRegistry));
+        }
     }
 
     private void recordRejection(String reason) {
-        Counter.builder(REJECTED_METRIC).tag("reason", reason).register(meterRegistry).increment();
+        rejectedCounters.get(reason).increment();
     }
 
     private static String rejectionReason(String code) {
         return switch (code) {
             case "invalid_ingestion_key" -> "invalid_key";
             case "invalid_origin", "origin_not_allowed" -> "blocked_origin";
-            case "unsupported_version", "invalid_identify_payload" -> "invalid_payload";
+            case "unsupported_version", "invalid_identify_payload", "timestamp_out_of_range" -> "invalid_payload";
             case "batch_id_conflict", "visitor_identity_conflict", "session_visitor_conflict" -> "conflict";
-            default -> "other";
+            default -> throw new IllegalStateException("Unmapped EventIngestionException code: " + code);
         };
     }
 

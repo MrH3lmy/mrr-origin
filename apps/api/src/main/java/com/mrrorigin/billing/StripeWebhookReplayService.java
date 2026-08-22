@@ -11,6 +11,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
@@ -77,7 +79,16 @@ class StripeWebhookReplayService {
                 .update()
                 == 1;
         if (replayed) {
-            replayCounter.increment();
+            // Deferred to after-commit (P6 observability slice, #28, review fix): see
+            // EventIngestionService's identical reasoning -- a Micrometer increment made before this
+            // method returns is not part of the DB transaction, so it must not fire until that
+            // transaction has actually committed.
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    replayCounter.increment();
+                }
+            });
             return ReplayOutcome.REPLAYED;
         }
 
@@ -129,7 +140,13 @@ class StripeWebhookReplayService {
                 .query((rs, rowNum) -> UUID.fromString(rs.getString("id")))
                 .list();
         if (!replayedIds.isEmpty()) {
-            replayCounter.increment(replayedIds.size());
+            int replayedCount = replayedIds.size();
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    replayCounter.increment(replayedCount);
+                }
+            });
         }
         return new BatchReplayOutcome(replayedIds);
     }

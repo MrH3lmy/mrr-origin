@@ -1,6 +1,7 @@
 package com.mrrorigin.tracking;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.OffsetDateTime;
@@ -108,5 +109,46 @@ class IngestionMetricsIntegrationTests extends AbstractTrackingIntegrationTest {
         double after = counter("mrrorigin.ingestion.rejected", "reason", "blocked_origin");
 
         assertThat(after).isGreaterThan(before);
+    }
+
+    /**
+     * Review fix: {@code EventIngestionService.ingest()} is {@code @Transactional}. Before the fix,
+     * a later event's failure rolled back the whole batch's DB writes -- including an earlier
+     * event's row that had already been counted as accepted -- while the Micrometer counter
+     * (incremented eagerly, outside the DB transaction) kept the increment. Event 1 below would
+     * succeed in isolation; event 2 reuses a session already bound to a different visitor
+     * ({@code session_visitor_conflict}), forcing the whole request to roll back. The accepted
+     * counter must not move.
+     */
+    @Test
+    void aRolledBackBatchDoesNotLeaveAPhantomAcceptedIncrement() throws Exception {
+        UUID workspaceId = createWorkspace(OWNER);
+        UUID projectId = createProject(workspaceId);
+        String key = issueKey(workspaceId, projectId);
+        allowDomain(workspaceId, projectId, "app.example");
+
+        // Seed session-1, bound to seed-visitor.
+        mockMvc.perform(ingest(key, "https://app.example",
+                        pageViewBatch("seed", "seed-event", "seed-visitor", "2026-08-11T12:00:00Z")))
+                .andExpect(status().isOk());
+
+        double acceptedBefore = counter("mrrorigin.ingestion.events", "result", "accepted");
+
+        String conflicting = """
+                {"version":1,"batchId":"rollback-metrics","events":[
+                  {"eventId":"first","visitorId":"other-visitor","sessionId":"session-2",\
+                   "type":"page_view","occurredAt":"2026-08-11T12:00:01Z","payload":{}},
+                  {"eventId":"second","visitorId":"yet-another-visitor","sessionId":"session-1",\
+                   "type":"page_view","occurredAt":"2026-08-11T12:00:02Z","payload":{}}
+                ]}
+                """;
+
+        mockMvc.perform(ingest(key, "https://app.example", conflicting))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("session_visitor_conflict"));
+
+        double acceptedAfter = counter("mrrorigin.ingestion.events", "result", "accepted");
+        assertThat(acceptedAfter).as("event 'first' rolled back with the rest of the batch; it must not stay counted")
+                .isEqualTo(acceptedBefore);
     }
 }

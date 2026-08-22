@@ -64,7 +64,8 @@ class PrometheusEndpointIntegrationTests {
         assertThat(body).contains("mrrorigin_stripe_webhook_pending");
         assertThat(body).contains("mrrorigin_attribution_recalculation_running");
         assertThat(body).contains("mrrorigin_notification_weekly_summary_deliveries");
-        assertThat(body).contains("mrrorigin_revenue_calculation_result_total");
+        assertThat(body).contains("mrrorigin_revenue_calculation_invocations_total");
+        assertThat(body).contains("mrrorigin_revenue_calculation_supported_snapshots");
     }
 
     @Test

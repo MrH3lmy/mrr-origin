@@ -11,6 +11,8 @@ import io.micrometer.core.instrument.Timer;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Runs {@link AttributionApplicationService#recalculate} across every customer in a project's
@@ -99,10 +101,21 @@ public class AttributionRecalculationService {
         Timer.Sample sample = Timer.start(meterRegistry);
         try {
             BatchOutcome outcome = runBatchTimed(workspaceId, projectId, maxCustomers);
-            (outcome.complete() ? completedBatchCounter : inProgressBatchCounter).increment();
-            if (outcome.customersProcessedThisBatch() > 0) {
-                customersProcessedCounter.increment(outcome.customersProcessedThisBatch());
-            }
+            // Deferred to after-commit (P6 observability slice, #28, review fix): the per-customer
+            // loop and checkpoint advance in runBatchTimed all belong to this same @Transactional
+            // method, so an increment made here -- before runBatch itself returns and the proxy
+            // commits -- is not yet backed by a durable write. See EventIngestionService's identical
+            // reasoning.
+            int customersProcessed = outcome.customersProcessedThisBatch();
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    (outcome.complete() ? completedBatchCounter : inProgressBatchCounter).increment();
+                    if (customersProcessed > 0) {
+                        customersProcessedCounter.increment(customersProcessed);
+                    }
+                }
+            });
             return outcome;
         } catch (RuntimeException failure) {
             failuresCounter.increment();
