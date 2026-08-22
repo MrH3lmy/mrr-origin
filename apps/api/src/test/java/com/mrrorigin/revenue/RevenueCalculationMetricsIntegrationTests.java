@@ -26,7 +26,8 @@ import io.micrometer.core.instrument.MeterRegistry;
  * P6 observability slice (#28/#90): proves {@link RevenueCalculationService}'s invocation-level
  * success/failure counters change under real calculation paths without inflating from
  * {@code replay()}'s full-history rebuild, and that the current-state supported/unsupported gauges
- * ({@link RevenueCalculationSnapshotMetrics}) reflect real persisted state.
+ * ({@link RevenueCalculationSnapshotMetrics}) reflect each customer's *latest* persisted state --
+ * never a monotonically-accumulating historical inventory.
  */
 @SpringBootTest
 @Testcontainers
@@ -81,6 +82,12 @@ class RevenueCalculationMetricsIntegrationTests {
         return spec.query(Long.class).single();
     }
 
+    private void recordState(String customer, String subscription, String at, Item item) {
+        service.recordAndReplay(new SubscriptionState(
+                workspaceId, customer, subscription, OffsetDateTime.parse(at), "active", at + "-" + subscription,
+                List.of(item), List.of()));
+    }
+
     @Test
     void successfulCalculationIncrementsInvocationSuccessCounterOnce() {
         double before = counter("mrrorigin.revenue.calculation.invocations", "result", "success");
@@ -104,78 +111,87 @@ class RevenueCalculationMetricsIntegrationTests {
     }
 
     @Test
-    void unsupportedCurrencyIsVisibleInTheCurrentStateGaugeNotAsAnInflatingCounter() {
+    void unsupportedCurrencyIsVisibleInTheCurrentStateGauge() {
         var badItem = new Item("item", null, 100L, BigDecimal.ONE, "month", 1, false);
         service.recordAndReplay(
                 new SubscriptionState(workspaceId, "bad-cus", "bad-sub", OffsetDateTime.parse("2026-01-01T00:00:00Z"),
                         "active", "evt-metrics-2", List.of(badItem), List.of()));
 
-        long expectedUnsupported = dbCount(
-                "SELECT COUNT(*) FROM customer_mrr_snapshots WHERE calculation_version='mrr-v1' AND supported=false AND unsupported_reason=:r",
-                "r", "UNKNOWN_CURRENCY");
-        assertThat(gauge("mrrorigin.revenue.calculation.unsupported_snapshots", "reason", "unknown_currency"))
-                .isEqualTo(expectedUnsupported);
+        // A fresh customer with a single unsupported instant: exactly one customer is currently
+        // unsupported for this reason, and none are currently supported.
+        assertThat(gauge("mrrorigin.revenue.calculation.unsupported_snapshots", "reason", "unknown_currency")).isEqualTo(1);
+        assertThat(gauge("mrrorigin.revenue.calculation.supported_snapshots")).isEqualTo(0);
     }
 
     /**
      * Review fix, blocking finding 2/4: {@code replay()} rebuilds a customer's entire historical
-     * snapshot series on every {@code recordAndReplay} call (see its Javadoc). Before the fix, a
-     * counter incremented inside {@code saveSnapshot}/{@code saveUnsupported} was re-triggered for
-     * every old, unrelated historical instant on every later call for the same customer -- T1's
-     * supported snapshot and T2's unsupported snapshot would both get re-counted when T3 (an
-     * unrelated later state) forces a full replay. Proves: (1) the invocation counter only ever
-     * increments once per {@code recordAndReplay} call, never once per historical snapshot replay()
-     * happens to touch; (2) the current-state gauges match a direct, independent DB count after the
-     * full replay, rather than "3x" from having recomputed T1 and T2 twice more.
+     * snapshot series on every {@code recordAndReplay} call (see its Javadoc) -- a counter
+     * incremented inside {@code saveSnapshot}/{@code saveUnsupported} would re-trigger for every old,
+     * unrelated historical instant every time a later state for the same customer forces a fresh
+     * replay. Proves the invocation counter increments exactly once per call, never once per
+     * historical snapshot {@code replay()} happens to touch: 3 calls for the same customer/
+     * subscription (each one replaying everything before it) still produce exactly 3 increments.
      */
     @Test
-    void unrelatedLaterStateTriggeringFullReplayDoesNotRecountEarlierHistoricalOutcomes() {
+    void repeatedReplayForTheSameCustomerNeverInflatesTheInvocationCounter() {
         String customer = "replay-no-inflate";
-        var supportedItem = new Item("item", "USD", 1000L, BigDecimal.ONE, "month", 1, false);
-        var unsupportedItem = new Item("item2", null, 500L, BigDecimal.ONE, "month", 1, false);
+        var supported = new Item("item", "USD", 1000L, BigDecimal.ONE, "month", 1, false);
+        var unsupported = new Item("item", null, 500L, BigDecimal.ONE, "month", 1, false);
+        var supportedAgain = new Item("item", "USD", 2000L, BigDecimal.ONE, "month", 1, false);
 
         double successBefore = counter("mrrorigin.revenue.calculation.invocations", "result", "success");
 
-        // T1: supported.
-        service.recordAndReplay(new SubscriptionState(
-                workspaceId, customer, "sub-1", OffsetDateTime.parse("2026-01-01T00:00:00Z"), "active", "t1",
-                List.of(supportedItem), List.of()));
+        recordState(customer, "sub-1", "2026-01-01T00:00:00Z", supported); // T1
         assertThat(counter("mrrorigin.revenue.calculation.invocations", "result", "success")).isEqualTo(successBefore + 1);
 
-        // T2: unsupported (different subscription, same customer) -- replay() already rebuilds the
-        // whole history here, re-touching T1.
-        service.recordAndReplay(new SubscriptionState(
-                workspaceId, customer, "sub-2", OffsetDateTime.parse("2026-02-01T00:00:00Z"), "active", "t2",
-                List.of(unsupportedItem), List.of()));
+        // T2 replaces sub-1's state -- replay() rebuilds T1 too, alongside it.
+        recordState(customer, "sub-1", "2026-02-01T00:00:00Z", unsupported);
         assertThat(counter("mrrorigin.revenue.calculation.invocations", "result", "success")).isEqualTo(successBefore + 2);
 
-        // T3: an unrelated third state for the SAME customer, forcing replay() to recompute T1 and
-        // T2 yet again alongside it.
-        service.recordAndReplay(new SubscriptionState(
-                workspaceId, customer, "sub-3", OffsetDateTime.parse("2026-03-01T00:00:00Z"), "active", "t3",
-                List.of(supportedItem), List.of()));
+        // T3 is a further, unrelated change to the same subscription -- replay() rebuilds T1 and T2
+        // yet again alongside it.
+        recordState(customer, "sub-1", "2026-03-01T00:00:00Z", supportedAgain);
 
-        // The invocation counter increments exactly once per call -- 3 calls, 3 increments -- never
-        // inflated by how many historical instants each call's replay() happened to touch.
+        // Exactly 3 calls, exactly 3 increments -- never inflated by how many historical instants
+        // each call's replay() happened to touch.
         assertThat(counter("mrrorigin.revenue.calculation.invocations", "result", "success")).isEqualTo(successBefore + 3);
+    }
 
-        // The gauges reflect exactly the customer's final persisted history, matching an
-        // independent direct DB count -- never a "recounted" multiple of what's actually there.
-        long expectedSupported = dbCount(
-                "SELECT COUNT(*) FROM customer_mrr_snapshots WHERE calculation_version='mrr-v1' AND supported=true AND workspace_id=:w AND stripe_customer_id=:c",
-                "w", workspaceId, "c", customer);
-        long expectedUnsupported = dbCount(
-                "SELECT COUNT(*) FROM customer_mrr_snapshots WHERE calculation_version='mrr-v1' AND supported=false AND unsupported_reason='UNKNOWN_CURRENCY' AND workspace_id=:w AND stripe_customer_id=:c",
-                "w", workspaceId, "c", customer);
-        assertThat(expectedSupported).isGreaterThan(0);
-        assertThat(expectedUnsupported).isGreaterThan(0);
+    /**
+     * Review fix (second round): {@code customer_mrr_snapshots} is itself an append-only history, so
+     * a naive {@code COUNT(*) WHERE supported = false} would accumulate a customer's old unsupported
+     * row forever, even after they recover -- keeping an operational "is anything unsupported right
+     * now" alert firing long after the fact. Proves the gauge instead reflects only each customer's
+     * *latest* persisted state: T1 unsupported, T2 (same customer/subscription) supported, the
+     * historical T1 row still exists untouched, but the current-state gauge has moved to 0.
+     */
+    @Test
+    void aCustomerRecoveringFromUnsupportedIsNoLongerCountedInTheCurrentStateGauge() {
+        String customer = "recovers-from-unsupported";
+        var badItem = new Item("item", null, 100L, BigDecimal.ONE, "month", 1, false);
+        var goodItem = new Item("item", "USD", 1000L, BigDecimal.ONE, "month", 1, false);
 
-        long totalSupportedGaugeBefore = dbCount(
-                "SELECT COUNT(*) FROM customer_mrr_snapshots WHERE calculation_version='mrr-v1' AND supported=true");
-        long totalUnsupportedGaugeBefore = dbCount(
-                "SELECT COUNT(*) FROM customer_mrr_snapshots WHERE calculation_version='mrr-v1' AND supported=false AND unsupported_reason='UNKNOWN_CURRENCY'");
-        assertThat(gauge("mrrorigin.revenue.calculation.supported_snapshots")).isEqualTo(totalSupportedGaugeBefore);
-        assertThat(gauge("mrrorigin.revenue.calculation.unsupported_snapshots", "reason", "unknown_currency"))
-                .isEqualTo(totalUnsupportedGaugeBefore);
+        // T1: unsupported.
+        recordState(customer, "sub-1", "2026-01-01T00:00:00Z", badItem);
+        assertThat(gauge("mrrorigin.revenue.calculation.unsupported_snapshots", "reason", "unknown_currency")).isEqualTo(1);
+        assertThat(gauge("mrrorigin.revenue.calculation.supported_snapshots")).isEqualTo(0);
+
+        long historicalUnsupportedRows = dbCount(
+                "SELECT COUNT(*) FROM customer_mrr_snapshots WHERE workspace_id=:w AND stripe_customer_id=:c AND supported=false",
+                "w", workspaceId, "c", customer);
+        assertThat(historicalUnsupportedRows).isEqualTo(1);
+
+        // T2: the SAME customer/subscription later becomes supported.
+        recordState(customer, "sub-1", "2026-02-01T00:00:00Z", goodItem);
+
+        // The historical T1 row is untouched by the recovery.
+        long historicalUnsupportedRowsAfterRecovery = dbCount(
+                "SELECT COUNT(*) FROM customer_mrr_snapshots WHERE workspace_id=:w AND stripe_customer_id=:c AND supported=false",
+                "w", workspaceId, "c", customer);
+        assertThat(historicalUnsupportedRowsAfterRecovery).isEqualTo(1);
+
+        // But the operational current-state gauge reflects the recovery, not the stale historical row.
+        assertThat(gauge("mrrorigin.revenue.calculation.unsupported_snapshots", "reason", "unknown_currency")).isEqualTo(0);
+        assertThat(gauge("mrrorigin.revenue.calculation.supported_snapshots")).isEqualTo(1);
     }
 }
