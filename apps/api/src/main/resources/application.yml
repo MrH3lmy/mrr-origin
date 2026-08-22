@@ -67,8 +67,17 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # P6 observability slice (#28): adds `prometheus` for Prometheus-format metrics scraping.
+        # Never widen this beyond an explicit, reviewed list -- see docs/security/threat-model.md #4 and
+        # docs/operations/observability-runbook.md for why env/beans/heapdump/etc. must never be
+        # exposed and why /actuator/prometheus is permitAll + relies on deployment-level network
+        # isolation rather than JWT auth (a Prometheus scraper cannot present a user JWT).
+        include: health,info,prometheus
   endpoint:
     health:
       probes:
+        enabled: true
+  prometheus:
+    metrics:
+      export:
         enabled: true

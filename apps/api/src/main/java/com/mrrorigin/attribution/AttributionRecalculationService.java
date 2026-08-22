@@ -5,6 +5,9 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -45,14 +48,29 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Service
 public class AttributionRecalculationService {
+
+    /**
+     * Batch-outcome metrics (P6 observability slice, #28). {@code outcome} (completed/in_progress) is
+     * a bounded enum; {@code mrrorigin.attribution.recalculation.customers_processed} and {@code
+     * .failures} carry no tags at all -- none of these ever include a workspace/project/customer id.
+     */
+    private static final String BATCHES_METRIC = "mrrorigin.attribution.recalculation.batches";
+
+    private static final String CUSTOMERS_PROCESSED_METRIC = "mrrorigin.attribution.recalculation.customers_processed";
+    private static final String FAILURES_METRIC = "mrrorigin.attribution.recalculation.failures";
+    private static final String BATCH_DURATION_METRIC = "mrrorigin.attribution.recalculation.batch.duration";
+
     private final JdbcClient db;
     private final AttributionApplicationService attribution;
     private final Clock clock;
+    private final MeterRegistry meterRegistry;
 
-    public AttributionRecalculationService(JdbcClient db, AttributionApplicationService attribution, Clock clock) {
+    public AttributionRecalculationService(
+            JdbcClient db, AttributionApplicationService attribution, Clock clock, MeterRegistry meterRegistry) {
         this.db = db;
         this.attribution = attribution;
         this.clock = clock;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -65,6 +83,28 @@ public class AttributionRecalculationService {
      */
     @Transactional
     public BatchOutcome runBatch(UUID workspaceId, UUID projectId, int maxCustomers) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            BatchOutcome outcome = runBatchTimed(workspaceId, projectId, maxCustomers);
+            Counter.builder(BATCHES_METRIC)
+                    .tag("outcome", outcome.complete() ? "completed" : "in_progress")
+                    .register(meterRegistry)
+                    .increment();
+            if (outcome.customersProcessedThisBatch() > 0) {
+                Counter.builder(CUSTOMERS_PROCESSED_METRIC)
+                        .register(meterRegistry)
+                        .increment(outcome.customersProcessedThisBatch());
+            }
+            return outcome;
+        } catch (RuntimeException failure) {
+            Counter.builder(FAILURES_METRIC).register(meterRegistry).increment();
+            throw failure;
+        } finally {
+            sample.stop(Timer.builder(BATCH_DURATION_METRIC).register(meterRegistry));
+        }
+    }
+
+    private BatchOutcome runBatchTimed(UUID workspaceId, UUID projectId, int maxCustomers) {
         require(workspaceId, projectId);
         if (maxCustomers <= 0) throw new IllegalArgumentException("maxCustomers must be positive");
         Run run = loadOrCreateRunForUpdate(workspaceId, projectId);

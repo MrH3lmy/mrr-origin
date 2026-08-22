@@ -4,6 +4,8 @@ import java.util.Map;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -18,20 +20,46 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/public/v1/events")
 public class EventIngestionController {
+    /**
+     * Request-level rejection counter (P6 observability slice, #28). {@code reason} groups the
+     * various {@link EventIngestionException} codes into the same small bounded enum
+     * {@link TrackingIngestionFailureRecorder} already uses for its diagnostics rows
+     * (invalid_key/blocked_origin/invalid_payload) plus {@code conflict} for the batch/visitor/session
+     * conflict codes -- never a raw error message, ingestion key, or origin value.
+     */
+    private static final String REJECTED_METRIC = "mrrorigin.ingestion.rejected";
+
     private final IngestionKeyService keys;
     private final EventIngestionService ingestion;
     private final AllowedDomainService allowedDomains;
     private final TrackingIngestionFailureRecorder failures;
+    private final MeterRegistry meterRegistry;
 
     public EventIngestionController(
             IngestionKeyService keys,
             EventIngestionService ingestion,
             AllowedDomainService allowedDomains,
-            TrackingIngestionFailureRecorder failures) {
+            TrackingIngestionFailureRecorder failures,
+            MeterRegistry meterRegistry) {
         this.keys = keys;
         this.ingestion = ingestion;
         this.allowedDomains = allowedDomains;
         this.failures = failures;
+        this.meterRegistry = meterRegistry;
+    }
+
+    private void recordRejection(String reason) {
+        Counter.builder(REJECTED_METRIC).tag("reason", reason).register(meterRegistry).increment();
+    }
+
+    private static String rejectionReason(String code) {
+        return switch (code) {
+            case "invalid_ingestion_key" -> "invalid_key";
+            case "invalid_origin", "origin_not_allowed" -> "blocked_origin";
+            case "unsupported_version", "invalid_identify_payload" -> "invalid_payload";
+            case "batch_id_conflict", "visitor_identity_conflict", "session_visitor_conflict" -> "conflict";
+            default -> "other";
+        };
     }
 
     @PostMapping
@@ -63,11 +91,13 @@ public class EventIngestionController {
 
     @ExceptionHandler(EventIngestionException.class)
     ResponseEntity<Map<String, String>> ingestionError(EventIngestionException error) {
+        recordRejection(rejectionReason(error.code()));
         return ResponseEntity.status(error.status()).body(Map.of("code", error.code(), "message", error.getMessage()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     ResponseEntity<Map<String, String>> validationError(HttpServletRequest request) {
+        recordRejection("invalid_payload");
         recordInvalidPayloadBestEffort(request);
         return ResponseEntity.badRequest().body(Map.of("code", "invalid_envelope", "message", "Envelope validation failed"));
     }
@@ -75,9 +105,11 @@ public class EventIngestionController {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     ResponseEntity<Map<String, String>> unreadableBody(HttpMessageNotReadableException error, HttpServletRequest request) {
         if (IngestionBodyLimitFilter.causedByBodyLimit(error)) {
+            recordRejection("invalid_payload");
             return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
                     .body(Map.of("code", "request_too_large", "message", "Request body exceeds 1048576 bytes"));
         }
+        recordRejection("invalid_payload");
         recordInvalidPayloadBestEffort(request);
         return ResponseEntity.badRequest().body(Map.of("code", "invalid_envelope", "message", "Envelope is not valid JSON"));
     }

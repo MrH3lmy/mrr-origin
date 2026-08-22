@@ -5,6 +5,8 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
@@ -38,10 +40,15 @@ class StripeWebhookReplayService {
     /** Mirrors StripeWebhookNormalizationService.MAX_BATCH_SIZE; kept independent since these are separate bounds. */
     private static final int MAX_BATCH_SIZE = 100;
 
-    private final JdbcClient jdbc;
+    /** Replay-attempt counter (P6 observability slice, #28); untagged, aggregate across every tenant. */
+    private static final String REPLAY_METRIC = "mrrorigin.stripe.webhook.replay";
 
-    StripeWebhookReplayService(JdbcClient jdbc) {
+    private final JdbcClient jdbc;
+    private final MeterRegistry meterRegistry;
+
+    StripeWebhookReplayService(JdbcClient jdbc, MeterRegistry meterRegistry) {
         this.jdbc = jdbc;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -69,6 +76,7 @@ class StripeWebhookReplayService {
                 .update()
                 == 1;
         if (replayed) {
+            Counter.builder(REPLAY_METRIC).register(meterRegistry).increment();
             return ReplayOutcome.REPLAYED;
         }
 
@@ -119,6 +127,9 @@ class StripeWebhookReplayService {
                 .param("now", now)
                 .query((rs, rowNum) -> UUID.fromString(rs.getString("id")))
                 .list();
+        if (!replayedIds.isEmpty()) {
+            Counter.builder(REPLAY_METRIC).register(meterRegistry).increment(replayedIds.size());
+        }
         return new BatchReplayOutcome(replayedIds);
     }
 
