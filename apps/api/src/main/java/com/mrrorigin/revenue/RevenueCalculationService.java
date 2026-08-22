@@ -2,21 +2,61 @@ package com.mrrorigin.revenue;
 
 import static java.math.RoundingMode.HALF_UP;
 import com.mrrorigin.revenue.RevenueModels.*;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.*;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class RevenueCalculationService {
  public static final String CALCULATION_VERSION="mrr-v1";
  private static final Set<String> ZERO=Set.of("trialing","incomplete","incomplete_expired","unpaid","paused","canceled");
+ // P6 observability slice (#28, review fix): invocation-level result is a small bounded enum
+ // (success/failure) counted once per recordAndReplay call -- never once per historical snapshot
+ // replay() happens to touch. Per-snapshot supported/unsupported counts are NOT counters: replay()
+ // rebuilds a customer's *entire* history on every call (see its Javadoc), so a counter incremented
+ // inside saveSnapshot/saveUnsupported would recount every old, unchanged historical instant on
+ // every unrelated later state for the same customer -- unusable for an alert claiming a *new*
+ // unsupported pattern appeared. RevenueCalculationSnapshotMetrics instead exposes the CURRENT
+ // persisted supported/unsupported snapshot counts as DB-backed gauges, immune to replay-count
+ // inflation because a gauge reports what's true right now, not how many times it was recomputed.
+ private static final String INVOCATIONS_METRIC="mrrorigin.revenue.calculation.invocations";
+ private static final String DURATION_METRIC="mrrorigin.revenue.calculation.duration";
  private final JdbcClient db;
- public RevenueCalculationService(JdbcClient db){this.db=db;}
+ private final MeterRegistry meterRegistry;
+ // Pre-registered at startup (rather than created lazily on first increment) so these report an
+ // explicit 0, not simply absent, until something actually happens -- standard Prometheus counter
+ // practice.
+ private final Counter invocationSuccessCounter;
+ private final Counter invocationFailureCounter;
+ private final Timer durationTimer;
+ public RevenueCalculationService(JdbcClient db,MeterRegistry meterRegistry){
+  this.db=db;
+  this.meterRegistry=meterRegistry;
+  this.invocationSuccessCounter=Counter.builder(INVOCATIONS_METRIC).tag("result","success").register(meterRegistry);
+  this.invocationFailureCounter=Counter.builder(INVOCATIONS_METRIC).tag("result","failure").register(meterRegistry);
+  this.durationTimer=Timer.builder(DURATION_METRIC).register(meterRegistry);
+ }
  @Transactional public void recordAndReplay(SubscriptionState state){recordAndReplay(List.of(state));}
  @Transactional public void recordAndReplay(List<SubscriptionState> states){
+  Timer.Sample sample=Timer.start(meterRegistry);
+  try{
+   recordAndReplayTimed(states);
+   // Deferred to after-commit, once per invocation -- not once per historical snapshot -- so this
+   // never inflates with replay() (see the class-level metrics comment above).
+   afterCommit(invocationSuccessCounter::increment);
+  }
+  catch(RuntimeException failure){invocationFailureCounter.increment();throw failure;}
+  finally{sample.stop(durationTimer);}
+ }
+ private void recordAndReplayTimed(List<SubscriptionState> states){
   if(states.isEmpty())return; UUID w=states.getFirst().workspaceId();String c=states.getFirst().customerId();
   if(w==null||c==null||c.isBlank())throw new IllegalArgumentException("workspace and customer required");
   for(var s:states)if(!w.equals(s.workspaceId())||!c.equals(s.customerId()))throw new IllegalArgumentException("one tenant/customer per batch");
@@ -31,6 +71,11 @@ public class RevenueCalculationService {
   for(var d:s.discounts()){required(d.sourceReference());db.sql("INSERT INTO revenue_subscription_state_discounts(id,workspace_id,state_id,source_discount_reference,source_item_reference,percent_off,amount_off_minor,currency,start_at,end_at,customer_level) VALUES(:id,:w,:s,:ref,:item,:pct,:amt,:cur,:start,:end,:customer)").param("id",UUID.randomUUID()).param("w",s.workspaceId()).param("s",id).param("ref",d.sourceReference()).param("item",d.itemReference()).param("pct",d.percentOff()).param("amt",d.amountOffMinor()).param("cur",d.currency()).param("start",d.startAt()).param("end",d.endAt()).param("customer",d.customerLevel()).update();}
  }
  private void lockCustomer(UUID w,String c){db.sql("SELECT pg_advisory_xact_lock(hashtext(:w),hashtext(:c))").param("w",w.toString()).param("c",c).query((r,n)->0).single();}
+ // Runs `action` only if this method's surrounding @Transactional call actually commits (P6
+ // observability slice, #28, review fix): a Micrometer increment made before that method returns
+ // is not itself part of the DB transaction, so an eager increment would survive a later rollback
+ // within the same call and over-report work that was never durably persisted.
+ private static void afterCommit(Runnable action){TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization(){@Override public void afterCommit(){action.run();}});}
  private void replay(UUID w,String c){
   var all=history(w,c);db.sql("DELETE FROM customer_mrr_movements WHERE workspace_id=:w AND stripe_customer_id=:c AND calculation_version=:v").param("w",w).param("c",c).param("v",CALCULATION_VERSION).update();db.sql("DELETE FROM customer_mrr_snapshots WHERE workspace_id=:w AND stripe_customer_id=:c AND calculation_version=:v").param("w",w).param("c",c).param("v",CALCULATION_VERSION).update();
   Map<String,State> current=new HashMap<>();Map<String,Long> before=new TreeMap<>();Set<String> ever=new HashSet<>();int p=0;

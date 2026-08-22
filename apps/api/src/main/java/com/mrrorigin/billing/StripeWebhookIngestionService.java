@@ -6,12 +6,18 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 import tools.jackson.databind.JsonNode;
@@ -38,23 +44,58 @@ class StripeWebhookIngestionService {
     private static final int MAX_EVENT_TYPE_LENGTH = 255;
     private static final int MAX_API_VERSION_LENGTH = 32;
 
+    /**
+     * Raw-delivery receipt counter (P6 observability slice, #28). {@code mode} (test/live) and
+     * {@code outcome} (stored/duplicate/orphaned) are the only tags -- both small fixed enums, never a
+     * Stripe event/account id. {@code orphaned} means the event's Stripe account matched no known,
+     * active connection (see the class Javadoc); {@code duplicate} means Stripe redelivered an event
+     * already durably stored, detected by the {@code ON CONFLICT DO NOTHING} affecting zero rows.
+     */
+    private static final String RECEIVED_METRIC = "mrrorigin.stripe.webhook.received";
+
+    private static final List<String> OUTCOMES = List.of("stored", "duplicate", "orphaned");
+
     private final StripeConnectionRepository connections;
     private final StripeConnectProperties properties;
     private final StripeWebhookSignatureVerifier verifier;
     private final ObjectMapper objectMapper;
     private final JdbcClient jdbc;
+    private final Map<String, Counter> receivedCounters = new ConcurrentHashMap<>();
 
     StripeWebhookIngestionService(
             StripeConnectionRepository connections,
             StripeConnectProperties properties,
             StripeWebhookSignatureVerifier verifier,
             ObjectMapper objectMapper,
-            JdbcClient jdbc) {
+            JdbcClient jdbc,
+            MeterRegistry meterRegistry) {
         this.connections = connections;
         this.properties = properties;
         this.verifier = verifier;
         this.objectMapper = objectMapper;
         this.jdbc = jdbc;
+        // Pre-registered at startup (rather than created lazily on first increment) so this metric
+        // reports an explicit 0 -- not simply absent -- until something actually happens; standard
+        // Prometheus counter practice, and what lets an operator distinguish "no traffic yet" from
+        // "this metric was never wired up."
+        for (StripeConnectionMode mode : StripeConnectionMode.values()) {
+            for (String outcome : OUTCOMES) {
+                receivedCounters.put(
+                        key(mode, outcome),
+                        Counter.builder(RECEIVED_METRIC)
+                                .tag("mode", mode.name().toLowerCase())
+                                .tag("outcome", outcome)
+                                .register(meterRegistry));
+            }
+        }
+    }
+
+    private static String key(StripeConnectionMode mode, String outcome) {
+        return mode.name() + ":" + outcome;
+    }
+
+    private void recordReceived(StripeConnectionMode mode, String outcome) {
+        receivedCounters.get(key(mode, outcome)).increment();
     }
 
     void ingest(StripeConnectionMode mode, byte[] rawBody, String signatureHeader) {
@@ -102,7 +143,7 @@ class StripeWebhookIngestionService {
         // persistence context/transaction in an unreliable state for anything after it). Exactly
         // one of any number of concurrent identical deliveries inserts a row; every other one sees
         // 0 rows affected and simply acknowledges without reprocessing.
-        jdbc.sql(
+        int inserted = jdbc.sql(
                         """
                         INSERT INTO stripe_webhook_events
                             (id, stripe_event_id, stripe_account_id, mode, connection_id, workspace_id,
@@ -131,7 +172,21 @@ class StripeWebhookIngestionService {
                 .update();
         // Rows-affected (0 for an already-stored duplicate, 1 for a fresh insert) is intentionally
         // not distinguished in the response: both cases mean the event is durably stored, which is
-        // all the caller (Stripe) needs to stop retrying.
+        // all the caller (Stripe) needs to stop retrying. It IS distinguished in the metric below,
+        // since "duplicate" vs. "stored" is operationally useful (a spike in duplicates suggests
+        // Stripe-side retry storms) without affecting the durable-storage guarantee itself.
+        String outcome = inserted == 0 ? "duplicate" : processingState == StripeWebhookProcessingState.ORPHANED ? "orphaned" : "stored";
+        // Deferred to after-commit (P6 observability slice, #28, review fix): this INSERT is the
+        // only DB write here today, but recording the metric eagerly would still count a delivery
+        // that never durably committed if this method is ever extended with work after the insert
+        // (or the transaction fails to commit for any other reason) -- see EventIngestionService's
+        // identical reasoning.
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                recordReceived(mode, outcome);
+            }
+        });
     }
 
     private JsonNode parse(byte[] rawBody) {

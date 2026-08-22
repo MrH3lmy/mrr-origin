@@ -14,10 +14,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.MapperFeature;
 import tools.jackson.databind.ObjectMapper;
@@ -29,14 +33,24 @@ import com.mrrorigin.identity.IdentityLinkingService;
 public class EventIngestionService {
     private static final HexFormat HEX = HexFormat.of();
 
+    /**
+     * Per-event ingestion outcome counter (P6 observability slice, #28). {@code result} is a bounded
+     * enum (accepted/duplicate) -- never a workspace/project/customer id or any client-supplied value --
+     * so this metric is safe to aggregate across every tenant. See
+     * docs/operations/observability-runbook.md for the full SLI catalog.
+     */
+    private static final String EVENTS_METRIC = "mrrorigin.ingestion.events";
+
     private final JdbcClient jdbc;
     private final ObjectMapper canonicalMapper;
     private final Clock clock;
     private final IdentityLinkingService identities;
     private final TrackingVerificationService verification;
+    private final Counter acceptedEvents;
+    private final Counter duplicateEvents;
 
     public EventIngestionService(JdbcClient jdbc, ObjectMapper objectMapper, Clock clock,
-            IdentityLinkingService identities, TrackingVerificationService verification) {
+            IdentityLinkingService identities, TrackingVerificationService verification, MeterRegistry meterRegistry) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.identities = identities;
@@ -45,6 +59,8 @@ public class EventIngestionService {
                 .enable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
                 .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
                 .build();
+        this.acceptedEvents = Counter.builder(EVENTS_METRIC).tag("result", "accepted").register(meterRegistry);
+        this.duplicateEvents = Counter.builder(EVENTS_METRIC).tag("result", "duplicate").register(meterRegistry);
     }
 
     @Transactional
@@ -83,8 +99,11 @@ public class EventIngestionService {
                 .update();
 
         List<EventIngestionResponse.EventResult> results = new ArrayList<>();
+        int acceptedCount = 0;
+        int duplicateCount = 0;
         for (EventIngestionRequest.Event event : request.events()) {
             if (eventExists(project.projectId(), event.eventId())) {
+                duplicateCount++;
                 results.add(new EventIngestionResponse.EventResult(
                         event.eventId(), EventIngestionResponse.Status.DUPLICATE));
                 continue;
@@ -106,6 +125,7 @@ public class EventIngestionService {
                         TrackingVerificationService.verificationToken(event.payload()),
                         event.eventId());
             }
+            acceptedCount++;
             results.add(new EventIngestionResponse.EventResult(
                     event.eventId(), EventIngestionResponse.Status.ACCEPTED));
         }
@@ -120,6 +140,27 @@ public class EventIngestionService {
                 .param("workspaceId", project.workspaceId())
                 .param("projectId", project.projectId())
                 .update();
+        // Deferred to after-commit (P6 observability slice, #28, review fix): a later event in this
+        // same batch can still throw (identity/session conflict) after earlier events already
+        // computed as accepted/duplicate, rolling back the whole @Transactional method -- including
+        // every row this loop wrote. A Micrometer counter is not part of that DB transaction, so an
+        // eager increment survives a rollback and would over-report work that was never durably
+        // persisted. Registering only fires afterCommit(); a rollback simply never triggers it.
+        if (acceptedCount > 0 || duplicateCount > 0) {
+            int finalAcceptedCount = acceptedCount;
+            int finalDuplicateCount = duplicateCount;
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    if (finalAcceptedCount > 0) {
+                        acceptedEvents.increment(finalAcceptedCount);
+                    }
+                    if (finalDuplicateCount > 0) {
+                        duplicateEvents.increment(finalDuplicateCount);
+                    }
+                }
+            });
+        }
         return response;
     }
 

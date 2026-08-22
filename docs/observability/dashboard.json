@@ -1,0 +1,284 @@
+{
+  "title": "MRR Origin - Operational Health (Private Beta)",
+  "description": "Minimal private-beta operational dashboard answering 'is Origin MRR healthy right now?' at a glance. This is a checked-in dashboard DEFINITION only -- see docs/operations/observability-runbook.md. No Grafana instance is provisioned by this repository; import this JSON into any Grafana pointed at a Prometheus-compatible backend scraping /actuator/prometheus.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "utc",
+  "time": { "from": "now-6h", "to": "now" },
+  "tags": ["mrrorigin", "private-beta", "p6"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "API",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "title": "API request rate",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count[5m])) by (uri, status)",
+          "legendFormat": "{{uri}} {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "API error rate (5xx)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{outcome=\"SERVER_ERROR\"}[5m])) by (uri)",
+          "legendFormat": "{{uri}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "API p95 latency",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket[5m])) by (le, uri))",
+          "legendFormat": "{{uri}}"
+        }
+      ]
+    },
+
+    {
+      "id": 10,
+      "title": "Public ingestion",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 }
+    },
+    {
+      "id": 11,
+      "title": "Accepted vs. rejected",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "expr": "sum(rate(mrrorigin_ingestion_events_total[5m])) by (result)",
+          "legendFormat": "events:{{result}}"
+        },
+        {
+          "expr": "sum(rate(mrrorigin_ingestion_rejected_total[5m])) by (reason)",
+          "legendFormat": "rejected:{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Ingestion request latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 9 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{uri=\"/api/public/v1/events\"}[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+
+    {
+      "id": 20,
+      "title": "Stripe",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }
+    },
+    {
+      "id": 21,
+      "title": "Webhook throughput (received / processed / failed)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 17 },
+      "targets": [
+        {
+          "expr": "sum(rate(mrrorigin_stripe_webhook_received_total[5m])) by (outcome)",
+          "legendFormat": "received:{{outcome}}"
+        },
+        {
+          "expr": "sum(rate(mrrorigin_stripe_webhook_processed_total[5m])) by (result)",
+          "legendFormat": "processed:{{result}}"
+        },
+        {
+          "expr": "sum(rate(mrrorigin_stripe_webhook_failed_total[5m])) by (failure_kind)",
+          "legendFormat": "failed:{{failure_kind}}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Pending backlog / oldest pending age",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 17 },
+      "targets": [
+        {
+          "expr": "sum(mrrorigin_stripe_webhook_pending) by (mode)",
+          "legendFormat": "pending:{{mode}}"
+        },
+        {
+          "expr": "max(mrrorigin_stripe_webhook_oldest_pending_age_seconds) by (mode)",
+          "legendFormat": "oldest_age_s:{{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Backfill incomplete / stalled age",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 17 },
+      "targets": [
+        {
+          "expr": "sum(mrrorigin_stripe_backfill_incomplete) by (mode)",
+          "legendFormat": "incomplete:{{mode}}"
+        },
+        {
+          "expr": "max(mrrorigin_stripe_backfill_stalled_age_seconds) by (mode)",
+          "legendFormat": "stalled_age_s:{{mode}}"
+        }
+      ]
+    },
+
+    {
+      "id": 30,
+      "title": "Revenue",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }
+    },
+    {
+      "id": 31,
+      "title": "MRR calculation invocations",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 25 },
+      "targets": [
+        {
+          "expr": "sum(rate(mrrorigin_revenue_calculation_invocations_total[15m])) by (result)",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "title": "Current supported/unsupported snapshots",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 25 },
+      "targets": [
+        {
+          "expr": "sum(mrrorigin_revenue_calculation_supported_snapshots)",
+          "legendFormat": "supported"
+        },
+        {
+          "expr": "sum(mrrorigin_revenue_calculation_unsupported_snapshots) by (reason)",
+          "legendFormat": "unsupported:{{reason}}"
+        }
+      ]
+    },
+
+    {
+      "id": 40,
+      "title": "Attribution",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 }
+    },
+    {
+      "id": 41,
+      "title": "Active / stale recalculation runs",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 33 },
+      "targets": [
+        {
+          "expr": "sum(mrrorigin_attribution_recalculation_running)",
+          "legendFormat": "running"
+        },
+        {
+          "expr": "sum(mrrorigin_attribution_recalculation_stale)",
+          "legendFormat": "stale"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "title": "Batch throughput / duration (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 33 },
+      "targets": [
+        {
+          "expr": "sum(rate(mrrorigin_attribution_recalculation_customers_processed_total[15m]))",
+          "legendFormat": "customers/s"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(mrrorigin_attribution_recalculation_batch_duration_seconds_bucket[15m])) by (le))",
+          "legendFormat": "batch p95"
+        }
+      ]
+    },
+
+    {
+      "id": 50,
+      "title": "Reporting",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 }
+    },
+    {
+      "id": 51,
+      "title": "Reporting latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 41 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{uri=~\"/api/workspaces/.*/reporting/.*\"}[15m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "title": "Reporting errors",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 41 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{uri=~\"/api/workspaces/.*/reporting/.*\",outcome=\"SERVER_ERROR\"}[15m]))",
+          "legendFormat": "5xx/s"
+        }
+      ]
+    },
+
+    {
+      "id": 60,
+      "title": "Delivery",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 }
+    },
+    {
+      "id": 61,
+      "title": "Weekly summary delivery state",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 49 },
+      "targets": [
+        {
+          "expr": "sum(mrrorigin_notification_weekly_summary_deliveries) by (status)",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 62,
+      "title": "Stale SENDING leases",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 49 },
+      "targets": [
+        {
+          "expr": "sum(mrrorigin_notification_weekly_summary_stale_lease)",
+          "legendFormat": "stale_lease"
+        }
+      ]
+    }
+  ]
+}

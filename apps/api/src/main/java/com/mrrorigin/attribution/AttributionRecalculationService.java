@@ -5,9 +5,14 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Runs {@link AttributionApplicationService#recalculate} across every customer in a project's
@@ -45,14 +50,42 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Service
 public class AttributionRecalculationService {
+
+    /**
+     * Batch-outcome metrics (P6 observability slice, #28). {@code outcome} (completed/in_progress) is
+     * a bounded enum; {@code mrrorigin.attribution.recalculation.customers_processed} and {@code
+     * .failures} carry no tags at all -- none of these ever include a workspace/project/customer id.
+     */
+    private static final String BATCHES_METRIC = "mrrorigin.attribution.recalculation.batches";
+
+    private static final String CUSTOMERS_PROCESSED_METRIC = "mrrorigin.attribution.recalculation.customers_processed";
+    private static final String FAILURES_METRIC = "mrrorigin.attribution.recalculation.failures";
+    private static final String BATCH_DURATION_METRIC = "mrrorigin.attribution.recalculation.batch.duration";
+
     private final JdbcClient db;
     private final AttributionApplicationService attribution;
     private final Clock clock;
+    private final MeterRegistry meterRegistry;
+    // Pre-registered at startup (rather than created lazily on first increment) so these report an
+    // explicit 0, not simply absent, until something actually happens -- standard Prometheus counter
+    // practice.
+    private final Counter completedBatchCounter;
+    private final Counter inProgressBatchCounter;
+    private final Counter customersProcessedCounter;
+    private final Counter failuresCounter;
+    private final Timer batchDurationTimer;
 
-    public AttributionRecalculationService(JdbcClient db, AttributionApplicationService attribution, Clock clock) {
+    public AttributionRecalculationService(
+            JdbcClient db, AttributionApplicationService attribution, Clock clock, MeterRegistry meterRegistry) {
         this.db = db;
         this.attribution = attribution;
         this.clock = clock;
+        this.meterRegistry = meterRegistry;
+        this.completedBatchCounter = Counter.builder(BATCHES_METRIC).tag("outcome", "completed").register(meterRegistry);
+        this.inProgressBatchCounter = Counter.builder(BATCHES_METRIC).tag("outcome", "in_progress").register(meterRegistry);
+        this.customersProcessedCounter = Counter.builder(CUSTOMERS_PROCESSED_METRIC).register(meterRegistry);
+        this.failuresCounter = Counter.builder(FAILURES_METRIC).register(meterRegistry);
+        this.batchDurationTimer = Timer.builder(BATCH_DURATION_METRIC).register(meterRegistry);
     }
 
     /**
@@ -65,6 +98,34 @@ public class AttributionRecalculationService {
      */
     @Transactional
     public BatchOutcome runBatch(UUID workspaceId, UUID projectId, int maxCustomers) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            BatchOutcome outcome = runBatchTimed(workspaceId, projectId, maxCustomers);
+            // Deferred to after-commit (P6 observability slice, #28, review fix): the per-customer
+            // loop and checkpoint advance in runBatchTimed all belong to this same @Transactional
+            // method, so an increment made here -- before runBatch itself returns and the proxy
+            // commits -- is not yet backed by a durable write. See EventIngestionService's identical
+            // reasoning.
+            int customersProcessed = outcome.customersProcessedThisBatch();
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    (outcome.complete() ? completedBatchCounter : inProgressBatchCounter).increment();
+                    if (customersProcessed > 0) {
+                        customersProcessedCounter.increment(customersProcessed);
+                    }
+                }
+            });
+            return outcome;
+        } catch (RuntimeException failure) {
+            failuresCounter.increment();
+            throw failure;
+        } finally {
+            sample.stop(batchDurationTimer);
+        }
+    }
+
+    private BatchOutcome runBatchTimed(UUID workspaceId, UUID projectId, int maxCustomers) {
         require(workspaceId, projectId);
         if (maxCustomers <= 0) throw new IllegalArgumentException("maxCustomers must be positive");
         Run run = loadOrCreateRunForUpdate(workspaceId, projectId);

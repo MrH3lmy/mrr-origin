@@ -119,8 +119,19 @@ review; update it whenever a listed control changes.
   none in `apps/api/src/main`; the only two `log.warn` call sites touching those terms
   (`WorkspaceMemberEmailCaptureService`, `WeeklySummaryDispatchService`) log a workspace ID and a
   static "not configured" message respectively, never a credential or address value.
-- Actuator surface is deliberately minimal (`management.endpoints.web.exposure.include: health,info`
-  in `application.yml`) — no `env`, `beans`, `httptrace`, or `heapdump` endpoints are exposed.
+- Actuator surface is deliberately minimal (`management.endpoints.web.exposure.include:
+health,info,prometheus` in `application.yml`, as of #90/P6 observability) — no `env`, `beans`,
+  `httptrace`, or `heapdump` endpoints are exposed. `/actuator/prometheus` (Micrometer +
+  `micrometer-registry-prometheus`, #90) is `permitAll` in `SecurityConfiguration`, the same posture
+  as `/actuator/health*`/`/actuator/info` and for the same reason: a Prometheus-compatible scraper is
+  not a workspace member and this system has no operator/service-account JWT identity to give it (see
+  the next section). No hardcoded monitoring secret was introduced to work around this; the
+  access-control boundary for this endpoint in production is deployment-level network isolation,
+  documented but not enforced in code. Every custom `mrrorigin.*` meter this endpoint exposes is
+  tagged only with small fixed enums (result/outcome/reason/mode/status/failure_kind) and aggregated
+  across every tenant — never a workspace/project/customer/Stripe-object id, email, or JWT subject
+  (enforced by a regression test). See `docs/operations/observability-runbook.md` for the full metric
+  catalog, alert rules, and dashboard definition.
 
 **Gaps / follow-ups:**
 
@@ -137,6 +148,13 @@ review; update it whenever a listed control changes.
   `StripeConnectionService` changes are visible in normal application data (row history) but not in
   a dedicated audit trail the way exports and customer-link repairs (`CustomerLinkRepairAuditService`)
   are. Not fixed in this PR; noted for a future slice if/when it becomes a real support-tooling need.
+- **`/actuator/prometheus` (#90) is `permitAll` with no application-level authentication**, relying
+  entirely on deployment-level network isolation (the scrape target must not be reachable from the
+  public internet) as its access-control boundary. This is the same category of gap as "operator
+  access... outside this codebase's authorization model" above, and is tracked on the private-beta
+  infrastructure checklist alongside it, not fixed in application code -- there is no
+  operator/service-account identity in this system's JWT-based auth model to authenticate a scraper
+  against, and this PR does not introduce a hardcoded shared secret to work around that.
 
 ## 5. Workspace data export and deletion
 

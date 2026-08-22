@@ -5,10 +5,14 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
@@ -38,10 +42,16 @@ class StripeWebhookReplayService {
     /** Mirrors StripeWebhookNormalizationService.MAX_BATCH_SIZE; kept independent since these are separate bounds. */
     private static final int MAX_BATCH_SIZE = 100;
 
-    private final JdbcClient jdbc;
+    /** Replay-attempt counter (P6 observability slice, #28); untagged, aggregate across every tenant. */
+    private static final String REPLAY_METRIC = "mrrorigin.stripe.webhook.replay";
 
-    StripeWebhookReplayService(JdbcClient jdbc) {
+    private final JdbcClient jdbc;
+    private final Counter replayCounter;
+
+    StripeWebhookReplayService(JdbcClient jdbc, MeterRegistry meterRegistry) {
         this.jdbc = jdbc;
+        // Pre-registered at startup -- see StripeWebhookIngestionService's identical reasoning.
+        this.replayCounter = Counter.builder(REPLAY_METRIC).register(meterRegistry);
     }
 
     /**
@@ -69,6 +79,16 @@ class StripeWebhookReplayService {
                 .update()
                 == 1;
         if (replayed) {
+            // Deferred to after-commit (P6 observability slice, #28, review fix): see
+            // EventIngestionService's identical reasoning -- a Micrometer increment made before this
+            // method returns is not part of the DB transaction, so it must not fire until that
+            // transaction has actually committed.
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    replayCounter.increment();
+                }
+            });
             return ReplayOutcome.REPLAYED;
         }
 
@@ -119,6 +139,15 @@ class StripeWebhookReplayService {
                 .param("now", now)
                 .query((rs, rowNum) -> UUID.fromString(rs.getString("id")))
                 .list();
+        if (!replayedIds.isEmpty()) {
+            int replayedCount = replayedIds.size();
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    replayCounter.increment(replayedCount);
+                }
+            });
+        }
         return new BatchReplayOutcome(replayedIds);
     }
 

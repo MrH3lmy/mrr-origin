@@ -1,0 +1,278 @@
+# Prometheus alert rules for MRR Origin's private-beta operational readiness (P6, #28/#90).
+#
+# These rules consume ONLY metrics this application itself exposes at /actuator/prometheus (see
+# docs/operations/observability-runbook.md for the full SLI catalog and metric-to-alert mapping).
+# They are a checked-in DEFINITION, not a running alert: the repository does not provision
+# Prometheus/Alertmanager. Deploying a compatible backend that loads this file and evaluates it
+# against a scrape of /actuator/prometheus is an infrastructure/deployment decision outside this
+# application's scope.
+#
+# Every threshold below is chosen for private-beta traffic volume (low, single-digit-workspace
+# scale) and documented inline. Revisit thresholds once real production traffic volume is known.
+#
+# Review-fix design rules applied throughout (see PR #91 review):
+#   - A rate/ratio alert's numerator and denominator are always the same unit (both request-level,
+#     or both event-level) -- never mixing a per-request counter with a per-event counter.
+#   - Every rate/ratio alert carries an explicit minimum-volume floor so a single sample can't move
+#     a ratio past threshold.
+#   - Every "is this failing at all" alert on a Counter uses `increase(...) >= N` for a real N > 1,
+#     never `rate(...) > 0`: a single isolated event stays inside a rolling rate window long enough
+#     to satisfy any `for:` duration shorter than the window, which `rate(...) > 0` cannot tell apart
+#     from a genuinely repeated failure.
+groups:
+  - name: mrrorigin-ingestion
+    rules:
+      - alert: PublicIngestionRejectionRateHigh
+        expr: >
+          (
+            sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events",outcome="CLIENT_ERROR"}[15m]))
+            /
+            (sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events"}[15m])) + 1e-9)
+          ) > 0.2
+          and sum(increase(http_server_requests_seconds_count{uri="/api/public/v1/events"}[15m])) >= 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Public ingestion is rejecting more than 20% of requests"
+          description: >
+            Request-level ratio (both sides from http_server_requests_seconds_count, not mixed with
+            the per-event mrrorigin_ingestion_events_total -- a single request can carry many events,
+            so mixing units would misstate the true request rejection rate). Requires at least 10
+            requests in the window so one or two rejections can't trip this on near-zero traffic. A
+            misconfigured integration key rotation or a broken client SDK release are the most common
+            causes. See docs/operations/observability-runbook.md#public-ingestion.
+      - alert: PublicIngestionRejectionRateCritical
+        expr: >
+          (
+            sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events",outcome="CLIENT_ERROR"}[15m]))
+            /
+            (sum(rate(http_server_requests_seconds_count{uri="/api/public/v1/events"}[15m])) + 1e-9)
+          ) > 0.5
+          and sum(increase(http_server_requests_seconds_count{uri="/api/public/v1/events"}[15m])) >= 10
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Public ingestion is rejecting more than half of all requests"
+          description: >
+            Sustained majority-rejection (request-level ratio, >=10 requests in the window) strongly
+            suggests every caller is hitting the same broken condition (e.g. a bad deploy of the
+            allowed-origin list, or mass key revocation), not isolated client misconfiguration. See
+            docs/operations/observability-runbook.md#public-ingestion.
+      - alert: PublicIngestionServerErrorRateHigh
+        expr: >
+          sum(increase(http_server_requests_seconds_count{uri="/api/public/v1/events",outcome="SERVER_ERROR"}[15m])) >= 3
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Public ingestion endpoint has returned at least 3 5xx responses in 15 minutes"
+          description: >
+            A count floor (>=3), not `rate(...) > 0`: a single isolated 5xx would otherwise stay
+            inside the 15m rate window long enough to satisfy any `for:` shorter than 15m, which is
+            indistinguishable from a genuine repeated failure using rate alone. 3 is a low bar given
+            this endpoint's expected private-beta volume -- legitimate traffic being dropped is
+            always actionable.
+
+  - name: mrrorigin-stripe-webhooks
+    rules:
+      - alert: StripeWebhookBacklogNotDraining
+        expr: sum(mrrorigin_stripe_webhook_pending) by (mode) > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stripe webhook PENDING backlog has stayed above 50 for 15 minutes"
+          description: >
+            A pipeline can have zero processing failures while still being completely stalled (no
+            worker draining PENDING events). 50 is well above expected private-beta per-tick volume.
+            See docs/operations/observability-runbook.md#stripe-webhook-pipeline and
+            docs/operations/recovery-runbook.md#stripe-webhook-events-failed-processing-and-replay.
+      - alert: StripeWebhookOldestPendingEventTooOld
+        expr: max(mrrorigin_stripe_webhook_oldest_pending_age_seconds) by (mode) > 3600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The oldest PENDING Stripe webhook event is over 1 hour old"
+          description: >
+            Age of the oldest unprocessed event is the real staleness signal (a pipeline can be
+            "empty" of failures yet not running at all). 1 hour is generous for private-beta volume
+            but catches a genuinely stopped worker within an operator's normal check-in cadence.
+      - alert: StripeWebhookOldestPendingEventCritical
+        expr: max(mrrorigin_stripe_webhook_oldest_pending_age_seconds) by (mode) > 21600
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The oldest PENDING Stripe webhook event is over 6 hours old"
+          description: >
+            6 hours of zero forward progress on the webhook pipeline means real billing/MRR data is
+            not being normalized; escalate immediately per docs/operations/recovery-runbook.md.
+      - alert: StripeWebhookFailureRateHigh
+        expr: >
+          (
+            sum(rate(mrrorigin_stripe_webhook_failed_total[15m]))
+            /
+            (sum(rate(mrrorigin_stripe_webhook_processed_total[15m])) + sum(rate(mrrorigin_stripe_webhook_failed_total[15m])) + 1e-9)
+          ) > 0.1
+          and sum(increase(mrrorigin_stripe_webhook_processed_total[15m])) + sum(increase(mrrorigin_stripe_webhook_failed_total[15m])) >= 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10% of processed Stripe webhook events are failing"
+          description: >
+            Both sides of the ratio are event-level (mrrorigin_stripe_webhook_{processed,failed}),
+            and the window requires at least 10 total events so a 1-of-2 failure can't read as 50%.
+            Check failure_kind: UNSUPPORTED means a payload shape the normalizer doesn't handle
+            (investigate before replaying); TRANSIENT means a retriable condition. See
+            docs/operations/recovery-runbook.md#stripe-webhook-events-failed-processing-and-replay.
+
+  - name: mrrorigin-stripe-backfill
+    rules:
+      - alert: StripeBackfillStalled
+        expr: max(mrrorigin_stripe_backfill_stalled_age_seconds) by (mode) > 21600 and sum(mrrorigin_stripe_backfill_incomplete) by (mode) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An eligible Stripe connection's backfill has not advanced in over 6 hours"
+          description: >
+            A connection's checkpoint (stripe_connections.sync_checkpoint) has not moved forward in
+            over 6 hours while still incomplete. See docs/operations/recovery-runbook.md#stripe-backfill-interrupted-or-stuck-initial-sync.
+      - alert: StripeBackfillStalledCritical
+        expr: max(mrrorigin_stripe_backfill_stalled_age_seconds) by (mode) > 86400 and sum(mrrorigin_stripe_backfill_incomplete) by (mode) > 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "An eligible Stripe connection's backfill has not advanced in over 24 hours"
+          description: >
+            24 hours matches StripeBillingHealthService.STALE_THRESHOLD, the same bound already used
+            to mark per-workspace billing health STALE. Resume per docs/operations/recovery-runbook.md.
+
+  - name: mrrorigin-revenue
+    rules:
+      - alert: MrrCalculationFailing
+        expr: sum(increase(mrrorigin_revenue_calculation_invocations_total{result="failure"}[15m])) >= 2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MRR recalculation has thrown at least 2 exceptions (transaction rollback) in 15 minutes"
+          description: >
+            A count floor (>=2), not `rate(...) > 0`, so one isolated failure doesn't page. This is
+            not the documented UnsupportedReason outcome (see mrrorigin_revenue_calculation_invocations
+            vs. the *_snapshots gauges below) -- it's an actual defect or invalid input reaching
+            RevenueCalculationService.
+      - alert: MrrCalculationUnsupportedSnapshotsElevated
+        expr: sum(mrrorigin_revenue_calculation_unsupported_snapshots) by (reason) > 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10 currently-persisted MRR snapshots are UNSUPPORTED for one reason"
+          description: >
+            This is a point-in-time DB-backed gauge (current persisted state), not a rate: replay()
+            rebuilds a customer's whole history on every call, so a *counter* here would recount old,
+            unrelated historical instants every time an unrelated later state triggers a fresh replay
+            for the same customer (see docs/operations/observability-runbook.md). A gauge avoids that
+            inflation by reporting what's true right now. 10 is a meaningful floor above whatever
+            small number of already-known-unsupported historical states normally exist; investigate
+            the `reason` label for a new Stripe pricing/discount pattern the engine doesn't handle.
+            Not a bug by itself -- unsupported is a documented, intentional outcome, never silently
+            converted to success.
+
+  - name: mrrorigin-attribution
+    rules:
+      - alert: AttributionRecalculationStale
+        expr: sum(mrrorigin_attribution_recalculation_stale) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A RUNNING attribution recalculation has not advanced in over 1 hour"
+          description: >
+            Threshold matches AttributionRecalculationQueueMetrics.STALE_THRESHOLD. No scheduler
+            automatically resumes this today (#84 is an operator HTTP surface only) -- an operator
+            must call the resume endpoint. See docs/operations/recovery-runbook.md#attribution-recalculation-interrupted-or-retried-batch-runs.
+      - alert: AttributionRecalculationStaleCritical
+        expr: sum(mrrorigin_attribution_recalculation_stale) > 0
+        for: 6h
+        labels:
+          severity: critical
+        annotations:
+          summary: "A RUNNING attribution recalculation has not advanced in over 6 hours"
+          description: >
+            An abandoned run this long means attribution results for that scope are visibly stale.
+            Escalate per docs/operations/recovery-runbook.md.
+      - alert: AttributionRecalculationFailing
+        expr: sum(increase(mrrorigin_attribution_recalculation_failures_total[15m])) >= 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Attribution recalculation has thrown at least 2 exceptions in 15 minutes"
+          description: >
+            A count floor (>=2), not `rate(...) > 0`, so one isolated failure doesn't page while a
+            sustained pattern of runBatch invocations throwing still gets investigated.
+
+  - name: mrrorigin-reporting
+    rules:
+      - alert: ReportingLatencyDegraded
+        expr: >
+          (
+            sum(rate(http_server_requests_seconds_sum{uri=~"/api/workspaces/.*/reporting/.*"}[15m]))
+            /
+            (sum(rate(http_server_requests_seconds_count{uri=~"/api/workspaces/.*/reporting/.*"}[15m])) + 1e-9)
+          ) > 2
+          and sum(increase(http_server_requests_seconds_count{uri=~"/api/workspaces/.*/reporting/.*"}[15m])) >= 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Average reporting endpoint latency exceeds 2s"
+          description: >
+            Requires at least 10 requests in the window so a single slow outlier can't compute a
+            misleading "average". Founder-facing overview/comparison/movements endpoints averaging
+            over 2 seconds over 15 minutes. Check DB query plans and connection-pool saturation first.
+      - alert: ReportingErrorRateHigh
+        expr: >
+          sum(increase(http_server_requests_seconds_count{uri=~"/api/workspaces/.*/reporting/.*",outcome="SERVER_ERROR"}[15m])) >= 3
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reporting endpoints have returned at least 3 5xx responses in 15 minutes"
+          description: >
+            A count floor (>=3), not `rate(...) > 0` -- see PublicIngestionServerErrorRateHigh for the
+            identical reasoning. Any sustained pattern of server errors on founder-facing reporting
+            endpoints is user-visible and actionable.
+
+  - name: mrrorigin-scheduled-delivery
+    rules:
+      - alert: WeeklySummaryDeliveryStaleLease
+        expr: sum(mrrorigin_notification_weekly_summary_stale_lease) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Weekly-summary deliveries have an expired SENDING lease not yet reclaimed"
+          description: >
+            A SENDING row past its lease is normally reclaimed on the next scheduled tick
+            (WeeklySummaryDispatchService runs every 5 minutes by default); 15 minutes of a
+            persistent stale lease suggests the dispatch tick itself has stopped running. See
+            docs/operations/recovery-runbook.md#weekly-summary-deliveries-interrupted-or-stuck-leases.
+      - alert: WeeklySummaryDeliveryPermanentFailuresElevated
+        expr: sum(mrrorigin_notification_weekly_summary_deliveries{status="permanently_failed"}) > 5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5 weekly-summary deliveries are PERMANENTLY_FAILED"
+          description: >
+            Check lastOutcomeAmbiguous before replaying -- an ambiguous provider outcome must be
+            confirmed against Postmark's own delivery logs first. See
+            docs/operations/recovery-runbook.md#weekly-summary-deliveries-interrupted-or-stuck-leases.
