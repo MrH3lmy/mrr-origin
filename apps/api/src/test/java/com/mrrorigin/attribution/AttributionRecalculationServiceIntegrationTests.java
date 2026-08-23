@@ -53,6 +53,14 @@ class AttributionRecalculationServiceIntegrationTests {
         project(project, workspace, "one.example");
     }
 
+    // #92 review fix: runBatch itself must enforce the same upper bound the controller and scheduler
+    // config validate against (AttributionRecalculationService.MAX_BATCH_SIZE), not just at those edges.
+    @Test void runBatchRejectsMaxCustomersAboveTheSharedUpperBound() {
+        assertThatThrownBy(() -> recalculation.runBatch(workspace, project, AttributionRecalculationService.MAX_BATCH_SIZE + 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(String.valueOf(AttributionRecalculationService.MAX_BATCH_SIZE));
+    }
+
     @Test void resumesAcrossInterruptedBatchesWithoutDuplicatingActiveResults() {
         for (int i = 0; i < 5; i++) customer("cus-" + i, true);
 

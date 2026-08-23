@@ -18,9 +18,10 @@ import io.micrometer.core.instrument.MeterRegistry;
  * updated_at}, the same column {@link AttributionRecalculationService#runBatch} advances on every
  * successful batch commit: a run can only be genuinely stuck (not just between operator-triggered
  * {@code resume} calls) if that column hasn't moved in longer than any reasonable gap between
- * batches. There is no scheduler driving {@code resume} automatically today (#84 is an operator/HTTP
- * surface only, per its own Javadoc) -- this metric does not invent one; it only reports what the
- * persisted checkpoint already shows, for an operator to act on via the recovery runbook.
+ * batches. {@link AttributionRecalculationScheduler} (#92) now drives {@code runBatch} automatically
+ * on a bounded schedule, but a run can still go genuinely stale (a crash, a persistently failing
+ * scope, or the scheduler disabled) -- this metric still reports exactly what the persisted
+ * checkpoint shows, for an operator to act on via the recovery runbook either way.
  */
 @Component
 class AttributionRecalculationQueueMetrics {

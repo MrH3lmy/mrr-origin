@@ -9,10 +9,11 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * {@code @EnableScheduling} drives #59's weekly-summary dispatch tick ({@code
- * WeeklySummaryDispatchService}) -- the only in-process scheduled job in this codebase. Per
- * ARCHITECTURE.md, horizontal safety across multiple instances comes from the DB-backed lease/
- * idempotency design in that service's repository, not from anything scheduling-framework-level.
+ * {@code @EnableScheduling} drives every in-process scheduled job in this codebase: #59's
+ * weekly-summary dispatch/retention ticks, workspace tombstone purge, and #92's bounded Stripe
+ * webhook normalization and attribution recalculation drivers. Per ARCHITECTURE.md, horizontal safety
+ * across multiple instances comes from each job's own DB-backed lease/claim/checkpoint design, never
+ * from anything scheduling-framework-level.
  */
 @SpringBootApplication
 @ConfigurationPropertiesScan

@@ -30,6 +30,28 @@ mrrorigin:
     rate-limit:
       # #65: DB-backed per-ingestion-key ceiling on the public ingestion endpoint.
       requests-per-minute: ${INGESTION_RATE_LIMIT_PER_MINUTE:60}
+  billing:
+    webhook-normalization:
+      # #92: bounded background driver for StripeWebhookNormalizationService.processBatch. Safe under
+      # multiple replicas/overlapping ticks -- see that service's claim-lease Javadoc. Conservative
+      # private-beta defaults: 50 events/batch, at most 10 batches (500 events) per tick, every 30s.
+      enabled: ${STRIPE_WEBHOOK_NORMALIZATION_SCHEDULER_ENABLED:true}
+      batch-size: ${STRIPE_WEBHOOK_NORMALIZATION_BATCH_SIZE:50}
+      max-batches-per-tick: ${STRIPE_WEBHOOK_NORMALIZATION_MAX_BATCHES_PER_TICK:10}
+      fixed-delay: ${STRIPE_WEBHOOK_NORMALIZATION_FIXED_DELAY:PT30S}
+      initial-delay: ${STRIPE_WEBHOOK_NORMALIZATION_INITIAL_DELAY:PT30S}
+  attribution:
+    recalculation:
+      scheduler:
+        # #92: bounded background driver for AttributionRecalculationService.runBatch. One bounded
+        # batch per outstanding (workspace, project) scope per tick; never restarts a COMPLETED sweep
+        # (see AttributionRecalculationService#pendingScopes). Conservative private-beta defaults: at
+        # most 100 customers per scope, 20 scopes per tick, every minute.
+        enabled: ${ATTRIBUTION_RECALCULATION_SCHEDULER_ENABLED:true}
+        max-customers-per-scope: ${ATTRIBUTION_RECALCULATION_MAX_CUSTOMERS_PER_SCOPE:100}
+        max-scopes-per-tick: ${ATTRIBUTION_RECALCULATION_MAX_SCOPES_PER_TICK:20}
+        fixed-delay: ${ATTRIBUTION_RECALCULATION_SCHEDULER_FIXED_DELAY:PT1M}
+        initial-delay: ${ATTRIBUTION_RECALCULATION_SCHEDULER_INITIAL_DELAY:PT1M}
   stripe:
     connect:
       # Per ADR-0003, these are the platform's own restricted OAuth client/secret keys -- never a
