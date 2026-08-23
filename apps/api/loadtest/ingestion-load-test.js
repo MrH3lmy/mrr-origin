@@ -12,6 +12,7 @@ import http from "k6/http";
 import { check } from "k6";
 import { Counter, Rate, Trend } from "k6/metrics";
 import exec from "k6/execution";
+import { crypto } from "k6/experimental/webcrypto";
 
 const BASE_URL = __ENV.MRRORIGIN_BASE_URL || "http://localhost:8080";
 const KEY_COUNT = 10;
@@ -74,8 +75,12 @@ export const options = {
   },
 };
 
+// crypto.randomUUID() (k6/experimental/webcrypto), not Math.random() -- these ids are only load-test
+// fixture data with no security stakes here, but CodeQL's insecure-randomness check flags
+// identifier-shaped fields (sessionId, externalUserId) generated from Math.random() regardless of
+// context, and a real UUID is also a more realistic id shape than a Math.random()-derived one anyway.
 function randomId(prefix) {
-  return `${prefix}_${exec.scenario.iterationInTest}_${Math.floor(Math.random() * 1e9)}`;
+  return `${prefix}_${exec.scenario.iterationInTest}_${crypto.randomUUID()}`;
 }
 
 function pageviewEvent() {
