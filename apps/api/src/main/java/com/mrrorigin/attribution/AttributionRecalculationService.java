@@ -237,11 +237,46 @@ public class AttributionRecalculationService {
                 .param("limit", limit).query(String.class).list();
     }
 
+    /**
+     * Up to {@code limit} (workspace, project) scopes -- within this project's recalculation scope per
+     * {@link #candidateCustomers} -- that do not yet have a {@code COMPLETED} run for the current
+     * {@link AttributionV1Engine#MODEL_VERSION} (#92). A scope with no run row at all (never started)
+     * and a scope whose run is still {@code RUNNING} both qualify; a {@code COMPLETED} scope never
+     * does, so a caller (e.g. {@code AttributionRecalculationScheduler}) driving every returned scope
+     * through one {@link #runBatch} call can never automatically resume/restart a completed sweep --
+     * that stays possible only through the explicit {@link #restart} operator action.
+     */
+    List<Scope> pendingScopes(int limit) {
+        if (limit <= 0) throw new IllegalArgumentException("limit must be positive");
+        return db.sql(
+                        """
+                        SELECT scope.workspace_id, scope.project_id
+                        FROM (
+                          SELECT DISTINCT workspace_id, project_id FROM stripe_customer_links WHERE superseded_at IS NULL
+                          UNION
+                          SELECT DISTINCT r.workspace_id, r.project_id
+                          FROM customer_attribution_results r
+                        ) scope
+                        LEFT JOIN attribution_recalculation_runs run
+                          ON run.workspace_id = scope.workspace_id AND run.project_id = scope.project_id
+                          AND run.model_version = :v
+                        WHERE run.status IS NULL OR run.status <> 'COMPLETED'
+                        ORDER BY scope.workspace_id, scope.project_id
+                        LIMIT :limit
+                        """)
+                .param("v", AttributionV1Engine.MODEL_VERSION)
+                .param("limit", limit)
+                .query((r, n) -> new Scope(r.getObject(1, UUID.class), r.getObject(2, UUID.class)))
+                .list();
+    }
+
     private static void require(UUID workspaceId, UUID projectId) {
         if (workspaceId == null || projectId == null) throw new IllegalArgumentException("workspace and project are required");
     }
 
     public record Run(UUID id, String status, String cursor, long processed) {}
+
+    record Scope(UUID workspaceId, UUID projectId) {}
 
     public record BatchOutcome(int customersProcessedThisBatch, boolean complete, String cursorCustomerId, long totalCustomersProcessed) {}
 }

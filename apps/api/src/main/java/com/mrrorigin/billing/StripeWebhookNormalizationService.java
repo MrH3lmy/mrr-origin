@@ -61,7 +61,7 @@ class StripeWebhookNormalizationService {
      * a crash mid-event simply costs waiting out the rest of this window before retry.
      */
     private static final Duration LEASE_DURATION = Duration.ofMinutes(5);
-    private static final int MAX_BATCH_SIZE = 100;
+    static final int MAX_BATCH_SIZE = 100;
 
     /** Event types #12 normalizes; every other type is acknowledged (PROCESSED) with no ledger effect. */
     private static final Set<String> CUSTOMER_EVENTS = Set.of("customer.created", "customer.updated", "customer.deleted");

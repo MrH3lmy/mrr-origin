@@ -14,6 +14,48 @@ mechanisms below are designed to be safely retried. Do **not** generalize that g
 external provider call whose outcome is unknown: weekly-summary delivery has an explicit ambiguous-
 outcome case that must be checked with the provider before replaying.
 
+## Automatic background processing (#92)
+
+Stripe webhook normalization and attribution recalculation now make automatic progress in a running
+application instance -- an operator should not normally need to call any endpoint in the next two
+sections for routine backlog drain. Two bounded, `@Scheduled` drivers exist:
+
+- **`StripeWebhookNormalizationScheduler`** (`com.mrrorigin.billing`) ticks every
+  `mrrorigin.billing.webhook-normalization.fixed-delay` (default `PT30S`) and calls the existing
+  `StripeWebhookNormalizationService.processBatch` up to `max-batches-per-tick` times (default 10, at
+  `batch-size` events each, default 50 -- so up to 500 events/tick). A backlog larger than that bound
+  is finished by the next tick.
+- **`AttributionRecalculationScheduler`** (`com.mrrorigin.attribution`) ticks every
+  `mrrorigin.attribution.recalculation.scheduler.fixed-delay` (default `PT1M`), discovers up to
+  `max-scopes-per-tick` (default 20) `(workspace, project)` scopes that are not yet `COMPLETED`
+  (`AttributionRecalculationService#pendingScopes`), and calls the existing `runBatch` **exactly once**
+  per scope, bounded to `max-customers-per-scope` (default 100). A scope that is already `COMPLETED` is
+  excluded from discovery entirely, so this driver can never automatically restart a completed sweep --
+  restart remains the explicit operator action documented below.
+
+**Multi-replica / concurrency safety**: neither scheduler introduces any new locking. Both rely
+entirely on the same DB-backed claim/lease (`StripeWebhookNormalizationService`'s
+`SELECT ... FOR UPDATE SKIP LOCKED` + lease fencing) and row-lock (`AttributionRecalculationService`'s
+`SELECT ... FOR UPDATE` on the run row) mechanisms this runbook already documents below -- two
+application replicas, or two overlapping ticks in the same replica, safely divide work instead of
+racing, exactly as if two operators had called the manual endpoints concurrently.
+
+**Every endpoint documented in the rest of this runbook is unchanged and remains available.** The
+scheduler is additive automation on top of the same mechanisms, not a replacement for them:
+
+- Disable a misbehaving driver without a code change by setting
+  `mrrorigin.billing.webhook-normalization.enabled` or
+  `mrrorigin.attribution.recalculation.scheduler.enabled` to `false` (requires a redeploy/restart --
+  there is no runtime toggle endpoint) and fall back to the manual `resume`/`replay-failed` calls below
+  while investigating.
+- A scope/backlog that isn't draining despite the scheduler running (check application logs for
+  repeated tick failures first) is diagnosed and recovered exactly as described in the next two
+  sections -- the scheduler calls the same `processBatch`/`runBatch` methods those sections already
+  cover, so nothing about failure classification, replay eligibility, or restart semantics changes.
+- The scheduler never calls `restart`. If a `COMPLETED` sweep needs to be redone (e.g. late
+  `identify()` calls), that is still exclusively an explicit operator action via the `restart` endpoint
+  documented below.
+
 ## Stripe backfill: interrupted or stuck initial sync
 
 **How it works.** `stripe_connections.sync_checkpoint` stores `{phase, cursor}` as JSON
