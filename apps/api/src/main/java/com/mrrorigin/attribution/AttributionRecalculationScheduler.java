@@ -26,10 +26,23 @@ import org.springframework.stereotype.Service;
  * customers -- one bounded batch per scope per tick, never an internal loop to completion. A scope
  * that has already reached {@code COMPLETED} is excluded by {@code pendingScopes} itself, so this
  * driver can never automatically restart a completed sweep; restart stays an explicit operator action
- * via PR #89's endpoint. More outstanding scopes than {@code maxScopesPerTick} are picked up by the
- * next {@code fixedDelay}-scheduled tick. A failure recalculating one scope is caught and logged so it
- * cannot block the tick's bounded work on other scopes; {@code runBatch}'s own transaction still rolls
- * back on failure, so no partial or duplicate result is ever persisted for the failed scope.
+ * via PR #89's endpoint. A failure recalculating one scope is caught and logged so it cannot block the
+ * tick's bounded work on other scopes; {@code runBatch}'s own transaction still rolls back on failure,
+ * so no partial or duplicate result is ever persisted for the failed scope.
+ *
+ * <p><b>Known fairness limitation, not fixed here.</b> {@code pendingScopes} orders candidates
+ * deterministically by {@code (workspace_id, project_id)} and applies {@code maxScopesPerTick} as a
+ * plain {@code LIMIT} -- it does not rotate, round-robin, or otherwise prioritize by staleness. When
+ * the number of outstanding scopes exceeds {@code maxScopesPerTick}, a scope sorting after the current
+ * window is <em>not</em> guaranteed to be picked up by "the next tick": it is only reached once enough
+ * higher-sorting scopes ahead of it have reached {@code COMPLETED} and dropped out of contention. A
+ * scope that never converges (e.g. a batch that fails every single tick) keeps occupying its slot in
+ * that ordering indefinitely, which can starve every scope sorting after it for as long as the backlog
+ * stays above {@code maxScopesPerTick}. This is a real limitation, not just a theoretical one, and is
+ * intentionally not addressed by widening this driver into a fairness/priority scheduler -- the
+ * existing {@code AttributionRecalculationQueueMetrics} staleness gauge/alert and the operator
+ * {@code status}/{@code resume}/{@code restart} endpoints (PR #89) remain the correct, already-tested
+ * escape hatch for a genuinely stuck scope, exactly as before this scheduler existed.
  */
 @Service
 class AttributionRecalculationScheduler {

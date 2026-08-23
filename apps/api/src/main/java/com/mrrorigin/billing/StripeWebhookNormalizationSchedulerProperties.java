@@ -6,7 +6,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * Operator-configurable bounds for {@link StripeWebhookNormalizationScheduler} (#92). Defaults are
  * conservative private-beta values: 50 events per {@code processBatch} call, at most 10 calls per
  * tick (500 events/tick ceiling), ticking every 30 seconds. {@code enabled} lets an operator turn the
- * driver off without a redeploy, e.g. while investigating a suspected normalization bug.
+ * driver off, e.g. while investigating a suspected normalization bug -- like every property here, it
+ * is bound once at application startup, so disabling it requires a redeploy/restart, not a live
+ * runtime toggle.
  */
 @ConfigurationProperties(prefix = "mrrorigin.billing.webhook-normalization")
 public record StripeWebhookNormalizationSchedulerProperties(Boolean enabled, Integer batchSize, Integer maxBatchesPerTick) {

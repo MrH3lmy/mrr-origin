@@ -221,9 +221,12 @@ calculation.unsupported_snapshots` counts each customer's _current_ latest-known
 ## Automatic background processing (#92)
 
 Both gaps flagged below as "Known limitations" when this runbook was first written are closed. Two
-bounded, database-lease/checkpoint-safe `@Scheduled` drivers now exist, matching every SLI/alert in
-this document to a normal, expected steady state of "backlog drains on its own within one scheduling
-interval" rather than "an operator must intervene for routine progress":
+bounded, database-lease/checkpoint-safe `@Scheduled` drivers now exist, so the normal, expected steady
+state for every SLI/alert in this document is "backlog drains on its own across scheduling intervals"
+rather than "an operator must intervene for routine progress" -- with one caveat for the attribution
+driver's scope fan-out (a known, documented fairness limitation, not a new alert -- see the recovery
+runbook's "Known fairness limitation" note and the existing `AttributionRecalculationStale` alert
+below, which already covers a scope stuck this way).
 
 - **`StripeWebhookNormalizationScheduler`** (`com.mrrorigin.billing`) calls the existing
   `StripeWebhookNormalizationService.processBatch` on a fixed delay, up to a bounded number of batches
@@ -234,8 +237,10 @@ interval" rather than "an operator must intervene for routine progress":
   project) scope that is not yet `COMPLETED` (`AttributionRecalculationService#pendingScopes`) and
   calls the existing `runBatch` exactly once per scope per tick. Configuration
   (`mrrorigin.attribution.recalculation.scheduler.*`): `enabled` (default `true`),
-  `max-customers-per-scope` (default 100, matching PR #89's controller default),
-  `max-scopes-per-tick` (default 20), `fixed-delay`/`initial-delay` (default `PT1M` each).
+  `max-customers-per-scope` (default 100, matching PR #89's controller default, capped at 500 --
+  `AttributionRecalculationService.MAX_BATCH_SIZE`, the single bound both the controller and this
+  scheduler validate against), `max-scopes-per-tick` (default 20), `fixed-delay`/`initial-delay`
+  (default `PT1M` each).
 
 Neither driver adds any new locking, orchestration platform, or business semantics: both rely entirely
 on the pre-existing DB-backed claim/lease (webhook) and `SELECT ... FOR UPDATE` row-lock (attribution)

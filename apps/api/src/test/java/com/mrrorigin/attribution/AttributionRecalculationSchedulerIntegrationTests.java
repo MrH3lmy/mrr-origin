@@ -90,6 +90,44 @@ class AttributionRecalculationSchedulerIntegrationTests {
         assertThat(countResults()).isEqualTo(15);
     }
 
+    // #92 review fix: pendingScopes must not rely solely on the candidate-customer union
+    // (stripe_customer_links / customer_attribution_results). An existing non-COMPLETED run row is,
+    // on its own, sufficient to keep a scope discoverable -- otherwise a RUNNING run whose links have
+    // since all been unlinked and which has never committed a result (e.g. every batch so far failed
+    // before commit) would silently disappear from discovery and stay RUNNING forever.
+    @Test
+    void aRunningScopeWithNoRemainingLinksOrResultsIsStillDiscoveredAndConvergesToCompleted() {
+        UUID orphanedProject = UUID.randomUUID();
+        project(orphanedProject, workspace, "orphaned.example");
+        // Directly insert a RUNNING run row for a scope with zero candidate customers -- no
+        // stripe_customer_links row, no customer_attribution_results row, nothing for
+        // candidateCustomers' own union to ever find on its own.
+        OffsetDateTime now = OffsetDateTime.now();
+        db.sql("""
+                INSERT INTO attribution_recalculation_runs
+                  (id,workspace_id,project_id,model_version,status,cursor_customer_id,customers_processed,started_at,updated_at)
+                VALUES(:id,:w,:p,:v,'RUNNING',NULL,0,:now,:now)
+                """)
+                .param("id", UUID.randomUUID()).param("w", workspace).param("p", orphanedProject)
+                .param("v", AttributionV1Engine.MODEL_VERSION).param("now", now).update();
+
+        var scheduler = new AttributionRecalculationScheduler(
+                recalculation, new AttributionRecalculationSchedulerProperties(true, 10, 10));
+        AttributionRecalculationScheduler.DriveOutcome outcome = scheduler.driveOutstandingScopes();
+
+        assertThat(outcome.scopesConsidered()).isEqualTo(1);
+        assertThat(outcome.scopesAdvanced()).isEqualTo(1);
+        assertThat(recalculation.status(workspace, orphanedProject)).get()
+                .satisfies(run -> {
+                    assertThat(run.status()).isEqualTo("COMPLETED");
+                    assertThat(run.processed()).isZero();
+                });
+
+        // Converged -- no longer discoverable, and repeated ticks are safe no-ops (not re-discovered,
+        // not restarted).
+        assertThat(scheduler.driveOutstandingScopes().scopesConsidered()).isZero();
+    }
+
     @Test
     void oneTickCallsRunBatchExactlyOnceEvenWhenAScopeHasMoreWorkThanOneBatchCanFinish() {
         for (int c = 0; c < 5; c++) {

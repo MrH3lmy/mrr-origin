@@ -29,9 +29,26 @@ sections for routine backlog drain. Two bounded, `@Scheduled` drivers exist:
   `mrrorigin.attribution.recalculation.scheduler.fixed-delay` (default `PT1M`), discovers up to
   `max-scopes-per-tick` (default 20) `(workspace, project)` scopes that are not yet `COMPLETED`
   (`AttributionRecalculationService#pendingScopes`), and calls the existing `runBatch` **exactly once**
-  per scope, bounded to `max-customers-per-scope` (default 100). A scope that is already `COMPLETED` is
-  excluded from discovery entirely, so this driver can never automatically restart a completed sweep --
-  restart remains the explicit operator action documented below.
+  per scope, bounded to `max-customers-per-scope` (default 100, capped at 500 -- the same
+  `AttributionRecalculationService.MAX_BATCH_SIZE` the `resume` endpoint below validates against, so
+  both callers enforce the identical bound). A scope qualifies for discovery either because it has
+  outstanding candidate customers, or because an `attribution_recalculation_runs` row for it already
+  exists and isn't `COMPLETED` -- the second condition exists specifically so a `RUNNING` run whose
+  links have since all been unlinked, and which hasn't yet committed a result, stays discoverable
+  instead of silently going stale forever. A scope that is already `COMPLETED` is excluded from
+  discovery entirely, so this driver can never automatically restart a completed sweep -- restart
+  remains the explicit operator action documented below.
+
+**Known fairness limitation**: scope discovery orders deterministically by `(workspace_id,
+project_id)` and applies `max-scopes-per-tick` as a plain limit -- it does not rotate or prioritize by
+staleness. If the number of outstanding scopes exceeds that limit, a scope sorting after the current
+window is **not** guaranteed to be picked up by "the next tick": it only gets a turn once enough
+higher-sorting scopes ahead of it complete and drop out of contention. A scope that never converges
+(failing every attempt) can occupy its slot indefinitely and starve everything sorting after it while
+the backlog stays above the limit. This is a known, accepted limitation, not something this driver
+works around automatically -- the staleness gauge/alert below and the manual `resume`/`restart`
+endpoints are the correct escape hatch for a scope stuck this way, exactly as before this scheduler
+existed.
 
 **Multi-replica / concurrency safety**: neither scheduler introduces any new locking. Both rely
 entirely on the same DB-backed claim/lease (`StripeWebhookNormalizationService`'s

@@ -52,6 +52,15 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 public class AttributionRecalculationService {
 
     /**
+     * Upper bound on {@code maxCustomers} for a single {@link #runBatch} call, shared by every caller
+     * -- {@link AttributionRecalculationController}'s {@code resume} endpoint and {@link
+     * AttributionRecalculationSchedulerProperties} both validate against this same constant rather than
+     * each hardcoding their own 500, so the real enforcement lives in exactly one place: here, inside
+     * the service itself, not just at the edges that happen to call it.
+     */
+    static final int MAX_BATCH_SIZE = 500;
+
+    /**
      * Batch-outcome metrics (P6 observability slice, #28). {@code outcome} (completed/in_progress) is
      * a bounded enum; {@code mrrorigin.attribution.recalculation.customers_processed} and {@code
      * .failures} carry no tags at all -- none of these ever include a workspace/project/customer id.
@@ -127,7 +136,9 @@ public class AttributionRecalculationService {
 
     private BatchOutcome runBatchTimed(UUID workspaceId, UUID projectId, int maxCustomers) {
         require(workspaceId, projectId);
-        if (maxCustomers <= 0) throw new IllegalArgumentException("maxCustomers must be positive");
+        if (maxCustomers <= 0 || maxCustomers > MAX_BATCH_SIZE) {
+            throw new IllegalArgumentException("maxCustomers must be between 1 and " + MAX_BATCH_SIZE);
+        }
         Run run = loadOrCreateRunForUpdate(workspaceId, projectId);
         if (run.status().equals("COMPLETED")) {
             return new BatchOutcome(0, true, run.cursor(), run.processed());
@@ -238,13 +249,21 @@ public class AttributionRecalculationService {
     }
 
     /**
-     * Up to {@code limit} (workspace, project) scopes -- within this project's recalculation scope per
-     * {@link #candidateCustomers} -- that do not yet have a {@code COMPLETED} run for the current
-     * {@link AttributionV1Engine#MODEL_VERSION} (#92). A scope with no run row at all (never started)
-     * and a scope whose run is still {@code RUNNING} both qualify; a {@code COMPLETED} scope never
-     * does, so a caller (e.g. {@code AttributionRecalculationScheduler}) driving every returned scope
-     * through one {@link #runBatch} call can never automatically resume/restart a completed sweep --
-     * that stays possible only through the explicit {@link #restart} operator action.
+     * Up to {@code limit} (workspace, project) scopes that do not yet have a {@code COMPLETED} run for
+     * the current {@link AttributionV1Engine#MODEL_VERSION} (#92). A scope qualifies either because it
+     * is within {@link #candidateCustomers}' scope definition (an active {@code stripe_customer_links}
+     * row, or an already-recorded {@code customer_attribution_results} row) -- exactly as before -- or,
+     * independently, because an {@code attribution_recalculation_runs} row already exists for it and is
+     * not {@code COMPLETED}. That second condition closes a gap the first one alone would miss: a
+     * {@code RUNNING} run whose links have since all been superseded and which has not yet committed
+     * any result (e.g. its very first batch keeps failing) would otherwise have an empty candidate
+     * scope and disappear from this query entirely, leaving it {@code RUNNING} forever with nothing
+     * ever driving it again -- an existing run row is now always, on its own, enough to keep a scope
+     * discoverable regardless of what its candidate set currently looks like. A {@code COMPLETED} scope
+     * never qualifies under either condition, so a caller (e.g. {@code AttributionRecalculationScheduler})
+     * driving every returned scope through one {@link #runBatch} call can never automatically
+     * resume/restart a completed sweep -- that stays possible only through the explicit {@link #restart}
+     * operator action.
      */
     List<Scope> pendingScopes(int limit) {
         if (limit <= 0) throw new IllegalArgumentException("limit must be positive");
@@ -256,6 +275,10 @@ public class AttributionRecalculationService {
                           UNION
                           SELECT DISTINCT r.workspace_id, r.project_id
                           FROM customer_attribution_results r
+                          UNION
+                          SELECT run.workspace_id, run.project_id
+                          FROM attribution_recalculation_runs run
+                          WHERE run.model_version = :v AND run.status <> 'COMPLETED'
                         ) scope
                         LEFT JOIN attribution_recalculation_runs run
                           ON run.workspace_id = scope.workspace_id AND run.project_id = scope.project_id

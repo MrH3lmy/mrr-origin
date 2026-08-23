@@ -38,7 +38,10 @@ import com.mrrorigin.workspace.WorkspaceContext;
 public class AttributionRecalculationController {
 
     private static final int DEFAULT_MAX_CUSTOMERS = 100;
-    private static final int MAX_MAX_CUSTOMERS = 500;
+    // Shared with AttributionRecalculationSchedulerProperties -- see
+    // AttributionRecalculationService.MAX_BATCH_SIZE's Javadoc for why this is the one place the
+    // bound is actually enforced, not just here at the HTTP edge.
+    private static final int MAX_MAX_CUSTOMERS = AttributionRecalculationService.MAX_BATCH_SIZE;
 
     private final WorkspaceContext workspaceContext;
     private final AttributionProjectAccess projectAccess;
