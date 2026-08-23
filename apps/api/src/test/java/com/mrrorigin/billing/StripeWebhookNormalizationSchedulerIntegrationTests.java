@@ -64,7 +64,10 @@ class StripeWebhookNormalizationSchedulerIntegrationTests extends AbstractBillin
 
         StripeWebhookNormalizationScheduler.DrainOutcome second = scheduler.drain();
         assertThat(second.fetched()).isEqualTo(5);
-        assertThat(second.batchesRun()).isEqualTo(1);
+        // The remaining backlog (5) exactly equals batchSize, so the first batch call in this tick
+        // returns a full batch (not yet detectably "drained"); one further batch call returning 0
+        // confirms it. Still bounded by maxBatchesPerTick (2), just not short-circuited to 1 here.
+        assertThat(second.batchesRun()).isEqualTo(2);
         assertThat(pendingCount(workspaceId)).isZero();
         assertThat(processedCount(workspaceId)).isEqualTo(total);
     }
@@ -145,26 +148,58 @@ class StripeWebhookNormalizationSchedulerIntegrationTests extends AbstractBillin
     // ---- Retry/replay idempotency --------------------------------------------------------------
 
     @Test
-    void replayedEventDrainedByALaterTickCreatesNoDuplicateLedgerRow() {
+    void repeatedReplayCyclesDrainedByLaterTicksConvergeWithoutDuplicatingLedgerRows() {
         UUID workspaceId = createWorkspace();
         UUID connectionId = insertActiveConnection(workspaceId, "acct_replay", StripeConnectionMode.TEST);
+        String customer = BillingFixtures.customer("cus_replay_idem", "usd", BASE.getEpochSecond(), false, null);
         insertPendingWebhookEvent(
-                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_replay_idem", "customer.created",
-                BASE, BillingFixtures.customer("cus_replay_idem", "usd", BASE.getEpochSecond(), false, null));
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_replay_idem_cust", "customer.created", BASE, customer);
+        // References an unseeded price, so this event fails TRANSIENT (BillingMrrRecalculationAdapter
+        // .requireResolvedPrices) every tick until the price is seeded -- deterministic, no Stripe API
+        // call involved.
+        String item = BillingFixtures.subscriptionItem("si_replay_idem", "price_replay_idem_unresolved", 1);
+        String subscription = BillingFixtures.subscription(
+                "sub_replay_idem", "cus_replay_idem", "active", "usd", BASE.getEpochSecond(),
+                BASE.plusSeconds(2_592_000).getEpochSecond(), false, null, null, item, null);
+        insertPendingWebhookEvent(
+                connectionId, workspaceId, StripeConnectionMode.TEST, "evt_replay_idem_sub", "customer.subscription.created",
+                BASE.plusSeconds(1), subscription);
 
         var scheduler = new StripeWebhookNormalizationScheduler(
                 normalizationService, new StripeWebhookNormalizationSchedulerProperties(true, 50, 10));
         scheduler.drain();
-        assertThat(processedCount(workspaceId)).isEqualTo(1);
+        UUID subEventId = eventIdFor(workspaceId, "evt_replay_idem_sub");
+        assertThat(processingState(subEventId)).isEqualTo("FAILED");
 
-        UUID eventId = eventIdFor(workspaceId, "evt_replay_idem");
-        StripeWebhookReplayService replay = replayService;
-        assertThat(replay.replayEvent(workspaceId, eventId)).isEqualTo(StripeWebhookReplayService.ReplayOutcome.REPLAYED);
-
+        // First replay/retry cycle: still fails, because the price is still unresolved.
+        assertThat(replayService.replayEvent(workspaceId, subEventId)).isEqualTo(StripeWebhookReplayService.ReplayOutcome.REPLAYED);
         scheduler.drain();
-        assertThat(processingState(eventId)).isEqualTo("PROCESSED");
-        assertThat(jdbc().sql("SELECT COUNT(*) FROM billing_customers WHERE workspace_id = :w")
+        assertThat(processingState(subEventId)).isEqualTo("FAILED");
+        assertThat(replayCount(subEventId)).isEqualTo(1);
+
+        // Second replay/retry cycle: still fails, same reason -- proves repeated retries stay safe,
+        // not just a single retry.
+        assertThat(replayService.replayEvent(workspaceId, subEventId)).isEqualTo(StripeWebhookReplayService.ReplayOutcome.REPLAYED);
+        scheduler.drain();
+        assertThat(processingState(subEventId)).isEqualTo("FAILED");
+        assertThat(replayCount(subEventId)).isEqualTo(2);
+        assertThat(subscriptionSnapshot(workspaceId, "sub_replay_idem")).isEmpty();
+
+        // Fix the underlying condition, then a third replay/retry cycle finally succeeds.
+        seedPrice(workspaceId, "price_replay_idem_unresolved");
+        assertThat(replayService.replayEvent(workspaceId, subEventId)).isEqualTo(StripeWebhookReplayService.ReplayOutcome.REPLAYED);
+        scheduler.drain();
+        assertThat(processingState(subEventId)).isEqualTo("PROCESSED");
+        assertThat(subscriptionSnapshot(workspaceId, "sub_replay_idem")).isPresent();
+        assertThat(subscriptionItemSnapshots(workspaceId, "sub_replay_idem")).hasSize(1);
+
+        // Replaying an already-PROCESSED event is a safe idempotent no-op, not a duplicate attempt.
+        assertThat(replayService.replayEvent(workspaceId, subEventId))
+                .isEqualTo(StripeWebhookReplayService.ReplayOutcome.NOT_ELIGIBLE);
+        scheduler.drain();
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM billing_subscriptions WHERE workspace_id = :w AND stripe_subscription_id = :s")
                         .param("w", workspaceId)
+                        .param("s", "sub_replay_idem")
                         .query(Integer.class)
                         .single())
                 .isEqualTo(1);
@@ -296,6 +331,13 @@ class StripeWebhookNormalizationSchedulerIntegrationTests extends AbstractBillin
         return jdbc().sql("SELECT failure_kind FROM stripe_webhook_events WHERE id = :id")
                 .param("id", eventId)
                 .query(String.class)
+                .single();
+    }
+
+    private int replayCount(UUID eventId) {
+        return jdbc().sql("SELECT replay_count FROM stripe_webhook_events WHERE id = :id")
+                .param("id", eventId)
+                .query(Integer.class)
                 .single();
     }
 }

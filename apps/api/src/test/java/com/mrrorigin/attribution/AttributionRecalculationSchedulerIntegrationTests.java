@@ -252,13 +252,15 @@ class AttributionRecalculationSchedulerIntegrationTests {
         // Healthy project (already set up in @BeforeEach): normal customer.
         customer(project, "cus-healthy", true);
 
-        // Poisoned project: a customer whose link has a disabled evidence source, which makes
-        // AttributionApplicationService#calculate throw IllegalStateException, rolling back the
-        // whole runBatch transaction for that scope (see AttributionApplicationService#recalculate's
-        // @Transactional boundary) -- no partial/duplicate result is ever persisted for it.
+        // Poisoned project: a customer whose link uses the schema-valid but not-yet-approved-for-
+        // production 'STRIPE_METADATA' evidence source (see V8's chk_stripe_customer_links_evidence_source
+        // constraint, which allows 'EXPLICIT_API' and 'STRIPE_METADATA'). AttributionApplicationService
+        // #calculate only accepts 'EXPLICIT_API' today and throws IllegalStateException for the other,
+        // rolling back the whole runBatch transaction for that scope (see #recalculate's @Transactional
+        // boundary) -- no partial/duplicate result is ever persisted for it.
         UUID poisonedProject = UUID.randomUUID();
         project(poisonedProject, workspace, "poisoned.example");
-        customer(poisonedProject, "cus-poisoned", "DISABLED_SOURCE");
+        customer(poisonedProject, "cus-poisoned", "STRIPE_METADATA");
 
         var scheduler = new AttributionRecalculationScheduler(
                 recalculation, new AttributionRecalculationSchedulerProperties(true, 10, 10));
