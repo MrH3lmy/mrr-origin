@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -221,7 +223,7 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
                            OR (workspace_id = :w AND stripe_event_id LIKE 'evt_%_price_0')
                         """)
                 .param("w", workspace)
-                .param("leaseStart", crashedLeaseStart)
+                .param("leaseStart", OffsetDateTime.ofInstant(crashedLeaseStart, ZoneOffset.UTC))
                 .update();
 
         DrainResult recovery = drainConcurrently(2, 25, 10);
