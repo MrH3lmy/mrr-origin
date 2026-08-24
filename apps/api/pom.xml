@@ -19,6 +19,10 @@
 
     <properties>
         <java.version>21</java.version>
+        <!-- #93: load tests (JUnit5 @Tag("load")) are excluded from the default `mvn verify`/`mvn test`
+             run: a 1,000+-event backlog test is legitimately slow and not something every PR should pay
+             for. Run them deliberately with `-Dexcluded.groups=` (see docs/operations/load-readiness.md). -->
+        <excluded.groups>load</excluded.groups>
     </properties>
 
     <dependencies>
@@ -117,6 +121,13 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludedGroups>${excluded.groups}</excludedGroups>
+                </configuration>
             </plugin>
         </plugins>
     </build>
