@@ -30,15 +30,16 @@ const ORIGINS = Array.from(
   (_, i) => `https://loadtest${i}.example.com`,
 );
 
-// #93's four phases, as documented durations from test start (seconds). Review fix: a k6
-// `ramping-arrival-rate` stage ramps LINEARLY from the previous stage's rate to its own `target` over
-// its full `duration` -- a single `{ target: 10, duration: '10m' }` stage following a rate-3 stage is
-// therefore a 3->10 ramp across the whole 10 minutes, never actually constant at 10. Every phase below
-// is instead built from a short ramp-in stage followed by a hold stage at the same target for the
-// remainder of the phase, so sustained/burst/recovery are genuinely flat for (the vast majority of)
-// their documented duration, not still transitioning throughout it. Warm-up is deliberately left as a
-// single ramping stage -- gradually ramping up *is* its documented purpose ("let connection pools/JIT/
-// caches settle"), unlike the other three phases, which must hold a constant, provable rate.
+// #93's four phases. Review fix (round 2): each of sustained/burst/recovery is now its own
+// `constant-arrival-rate` scenario with an exact `duration` and no ramp -- that executor opens VUs
+// immediately to hit the configured rate from its first tick, so the full documented duration is held
+// constant, not "duration minus a ramp-in transition" (the previous ramp-in+hold approximation this
+// replaces). Warm-up remains a single `ramping-arrival-rate` scenario (0 -> WARMUP_RATE over its whole
+// duration) since gradually ramping up from 0 *is* its documented purpose. Scenarios are sequenced via
+// `startTime` rather than stages within one scenario, which also means every request's
+// `exec.scenario.name` directly identifies which phase produced it -- phase classification below is
+// driven by the actual executor that scheduled the request, not reconstructed from wall-clock elapsed
+// time.
 const WARMUP_RATE = 3; // ~25% of the sustained allowance
 const SUSTAINED_RATE = 10; // 60 req/min/key * 10 keys = 10 req/s -- the configured default allowance
 const BURST_RATE = 30; // 3x the per-key allowance
@@ -48,44 +49,28 @@ const WARMUP_DURATION = 120; // 2m
 const SUSTAINED_DURATION = 600; // 10m
 const BURST_DURATION = 60; // 60s
 const RECOVERY_DURATION = 120; // 2m
-const RAMP_IN_DURATION = 10; // seconds spent transitioning into each of sustained/burst/recovery
 
-// Phase boundaries (seconds elapsed since test start) used to classify each request's outcome. Kept
-// at the clean documented phase durations (not the internal ramp/hold split above) -- a few seconds of
-// rate transition at a phase's own start is an expected, unavoidable artifact of changing arrival
-// rates at all, not evidence the phase itself isn't held constant.
-const PHASE_END = {
-  warmup: WARMUP_DURATION,
-  sustained: WARMUP_DURATION + SUSTAINED_DURATION,
-  burst: WARMUP_DURATION + SUSTAINED_DURATION + BURST_DURATION,
-  recovery:
-    WARMUP_DURATION + SUSTAINED_DURATION + BURST_DURATION + RECOVERY_DURATION,
-};
-
-function currentPhase(elapsedSeconds) {
-  if (elapsedSeconds < PHASE_END.warmup) return "warmup";
-  if (elapsedSeconds < PHASE_END.sustained) return "sustained";
-  if (elapsedSeconds < PHASE_END.burst) return "burst";
-  return "recovery";
-}
+const SUSTAINED_START = WARMUP_DURATION;
+const BURST_START = SUSTAINED_START + SUSTAINED_DURATION;
+const RECOVERY_START = BURST_START + BURST_DURATION;
 
 // Global metrics (every request, every phase).
 const acceptedDuration = new Trend("mrr_ingestion_accepted_duration", true);
 const serverErrorRate = new Rate("mrr_ingestion_server_error_rate");
 const acceptedCount = new Counter("mrr_ingestion_accepted_total");
 // Exact count of events actually sent in accepted requests (not requests themselves -- 1-5
-// events/request) -- review fix: the tenant-isolation verification script compares this exact number
-// against `tracking_event_envelopes` row counts, replacing what was an "accepted requests x average
-// events/request" eyeball estimate with a deterministic reconciliation. This script never
-// intentionally sends a genuine duplicate or invalid payload, so accepted-events-persisted is the one
-// reconciliation dimension that applies here.
+// events/request) -- the tenant-isolation/reconciliation verification script compares this exact
+// number against the *delta* in `tracking_event_envelopes` row counts for this run, replacing what was
+// originally an "accepted requests x average events/request" eyeball estimate with a deterministic
+// reconciliation. This script never intentionally sends a genuine duplicate or invalid payload, so
+// accepted-events-persisted is the one reconciliation dimension that applies here.
 const acceptedEventsTotal = new Counter("mrr_ingestion_accepted_events_total");
 const unexpectedStatusCount = new Counter(
   "mrr_ingestion_unexpected_status_total",
 );
 
-// Phase-scoped metrics -- review fix: without these, the test could pass even if sustained traffic was
-// unexpectedly throttled, burst never actually produced a single 429, or recovery stayed throttled.
+// Phase-scoped metrics -- without these, the test could pass even if sustained traffic was unexpectedly
+// throttled, burst never actually produced a single 429, or recovery stayed throttled.
 const sustainedUnexpectedThrottle = new Counter(
   "mrr_ingestion_sustained_unexpected_throttle_total",
 );
@@ -100,36 +85,40 @@ const recoverySuccessRate = new Rate("mrr_ingestion_recovery_success_rate");
 
 export const options = {
   scenarios: {
-    ingestion_workload: {
+    warmup: {
       executor: "ramping-arrival-rate",
       startRate: 0,
       timeUnit: "1s",
-      preAllocatedVUs: 50,
-      maxVUs: 200,
-      stages: [
-        // Phase 1: warm-up -- an intentional ramp from 0 to the warm-up rate (see comment above).
-        { target: WARMUP_RATE, duration: `${WARMUP_DURATION}s` },
-        // Phase 2: sustained at the configured default allowance, genuinely flat for ~98% of its
-        // 10-minute duration.
-        { target: SUSTAINED_RATE, duration: `${RAMP_IN_DURATION}s` },
-        {
-          target: SUSTAINED_RATE,
-          duration: `${SUSTAINED_DURATION - RAMP_IN_DURATION}s`,
-        },
-        // Phase 3: burst/throttle, 3x over the per-key allowance, flat for the rest of its 60s.
-        { target: BURST_RATE, duration: `${RAMP_IN_DURATION}s` },
-        {
-          target: BURST_RATE,
-          duration: `${BURST_DURATION - RAMP_IN_DURATION}s`,
-        },
-        // Phase 4: recovery -- back to the sustained rate, flat for the rest of its 2 minutes, proving
-        // ingestion recovers once the fixed window permits it again.
-        { target: RECOVERY_RATE, duration: `${RAMP_IN_DURATION}s` },
-        {
-          target: RECOVERY_RATE,
-          duration: `${RECOVERY_DURATION - RAMP_IN_DURATION}s`,
-        },
-      ],
+      preAllocatedVUs: 15,
+      maxVUs: 60,
+      stages: [{ target: WARMUP_RATE, duration: `${WARMUP_DURATION}s` }],
+    },
+    sustained: {
+      executor: "constant-arrival-rate",
+      rate: SUSTAINED_RATE,
+      timeUnit: "1s",
+      duration: `${SUSTAINED_DURATION}s`,
+      preAllocatedVUs: 30,
+      maxVUs: 100,
+      startTime: `${SUSTAINED_START}s`,
+    },
+    burst: {
+      executor: "constant-arrival-rate",
+      rate: BURST_RATE,
+      timeUnit: "1s",
+      duration: `${BURST_DURATION}s`,
+      preAllocatedVUs: 60,
+      maxVUs: 150,
+      startTime: `${BURST_START}s`,
+    },
+    recovery: {
+      executor: "constant-arrival-rate",
+      rate: RECOVERY_RATE,
+      timeUnit: "1s",
+      duration: `${RECOVERY_DURATION}s`,
+      preAllocatedVUs: 30,
+      maxVUs: 100,
+      startTime: `${RECOVERY_START}s`,
     },
   },
   thresholds: {
@@ -161,15 +150,21 @@ export const options = {
 // fixture data with no security stakes here, but CodeQL's insecure-randomness check flags
 // identifier-shaped fields (sessionId, externalUserId) generated from Math.random() regardless of
 // context, and a real UUID is also a more realistic id shape than a Math.random()-derived one anyway.
-function randomId(prefix) {
-  return `${prefix}_${exec.scenario.iterationInTest}_${crypto.randomUUID()}`;
+//
+// Review fix: every id is tagged with `_w<tenantIndex>_`, the index of the ingestion key/workspace the
+// request carrying this id is actually sent under. `verify-ingestion-tenant-isolation.sql` decodes this
+// tag from the persisted external id and asserts it matches the workspace the row landed in -- proving
+// request-A-routed-to-tenant-A, not just "every row is internally FK-consistent with whatever project
+// it happens to reference" (which a consistent misrouting bug would still satisfy).
+function randomId(prefix, tenantIndex) {
+  return `${prefix}_w${tenantIndex}_${exec.scenario.iterationInTest}_${crypto.randomUUID()}`;
 }
 
-function pageviewEvent() {
+function pageviewEvent(tenantIndex) {
   return {
-    eventId: randomId("evt"),
-    visitorId: randomId("vis"),
-    sessionId: randomId("ses"),
+    eventId: randomId("evt", tenantIndex),
+    visitorId: randomId("vis", tenantIndex),
+    sessionId: randomId("ses", tenantIndex),
     type: "pageview",
     occurredAt: new Date().toISOString(),
     payload: {
@@ -182,46 +177,44 @@ function pageviewEvent() {
   };
 }
 
-function identifyEvent(visitorId) {
+function identifyEvent(visitorId, tenantIndex) {
   return {
-    eventId: randomId("evt"),
+    eventId: randomId("evt", tenantIndex),
     visitorId,
     type: "identify",
     occurredAt: new Date().toISOString(),
-    payload: { externalUserId: randomId("user") },
+    payload: { externalUserId: randomId("user", tenantIndex) },
   };
 }
 
 /** 1-5 events/request, weighted mix of anonymous pageview and identify traffic (#93's "normal payload mix"). */
-function buildBatch() {
+function buildBatch(tenantIndex) {
   const eventCount = 1 + Math.floor(Math.random() * 5);
-  const visitorId = randomId("vis");
+  const visitorId = randomId("vis", tenantIndex);
   const events = [];
   for (let i = 0; i < eventCount; i++) {
     events.push(
       i === eventCount - 1 && Math.random() < 0.2
-        ? identifyEvent(visitorId)
-        : pageviewEvent(),
+        ? identifyEvent(visitorId, tenantIndex)
+        : pageviewEvent(tenantIndex),
     );
   }
   return {
-    body: { version: 1, batchId: randomId("batch"), events },
+    body: { version: 1, batchId: randomId("batch", tenantIndex), events },
     eventCount,
   };
 }
 
-export function setup() {
-  return { startTimeMs: Date.now() };
-}
-
-export default function (data) {
-  const elapsedSeconds = (Date.now() - data.startTimeMs) / 1000;
-  const phase = currentPhase(elapsedSeconds);
+export default function () {
+  // The scenario that scheduled this request identifies its phase directly -- see the scenarios
+  // comment above for why this replaced elapsed-time-based classification.
+  const phase = exec.scenario.name;
 
   // Round-robins evenly across the 10 seeded keys, matching #93's "requests spread evenly across all
-  // 10 tenants."
+  // 10 tenants." This same index is embedded into every generated id (see randomId above) so the
+  // verification script can prove routing, not just internal consistency.
   const keyIndex = exec.scenario.iterationInTest % KEY_COUNT;
-  const built = buildBatch();
+  const built = buildBatch(keyIndex);
   const res = http.post(
     `${BASE_URL}/api/public/v1/events`,
     JSON.stringify(built.body),

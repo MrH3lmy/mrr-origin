@@ -36,21 +36,27 @@ Document the exact configuration used for the reference run here once it has act
 
 10 independent workspaces/projects, one active ingestion key per project, requests spread evenly
 across all 10 tenants, 1-5 events/request with a weighted anonymous-`pageview`/`identify` mix (not one
-trivial repeated JSON body). Four phases in one k6 `ramping-arrival-rate` scenario:
+trivial repeated JSON body). Four phases, each its own k6 scenario, sequenced back-to-back via
+`startTime`:
 
-| Phase             | Duration | Target rate                                                                                            | Purpose                                                            |
-| ----------------- | -------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| 1. Warm-up        | 2 min    | ~3 req/s (~25% of sustained), ramping                                                                  | Let connection pools/JIT/caches settle                             |
-| 2. Sustained      | 10 min   | 10 req/s (60 req/min/key x 10 keys -- the configured default allowance), held flat after a 10s ramp-in | Prove steady-state latency/error targets                           |
-| 3. Burst/throttle | 60 s     | 30 req/s (3x the per-key allowance), held flat after a 10s ramp-in                                     | Prove rate limiting stays controlled (429s), not 5xx/DB contention |
-| 4. Recovery       | 2 min    | 10 req/s, held flat after a 10s ramp-in                                                                | Prove ingestion recovers once the fixed window permits it          |
+| Phase             | Duration | Target rate                                                             | Executor                | Purpose                                                            |
+| ----------------- | -------- | ----------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------ |
+| 1. Warm-up        | 2 min    | 0 -> 3 req/s (~25% of sustained), ramping                               | `ramping-arrival-rate`  | Let connection pools/JIT/caches settle                             |
+| 2. Sustained      | 10 min   | 10 req/s (60 req/min/key x 10 keys -- the configured default allowance) | `constant-arrival-rate` | Prove steady-state latency/error targets                           |
+| 3. Burst/throttle | 60 s     | 30 req/s (3x the per-key allowance)                                     | `constant-arrival-rate` | Prove rate limiting stays controlled (429s), not 5xx/DB contention |
+| 4. Recovery       | 2 min    | 10 req/s                                                                | `constant-arrival-rate` | Prove ingestion recovers once the fixed window permits it          |
 
-`ramping-arrival-rate` interpolates linearly from the previous stage's rate to a stage's `target` over
-that stage's entire `duration` -- a single stage per phase would therefore still be transitioning
-throughout the whole phase, never actually holding the documented rate. Each of sustained/burst/
-recovery is built from a short 10s ramp-in stage followed by a hold stage at the same target for the
-remainder of the phase, so each is genuinely flat for the large majority of its documented duration.
-Warm-up is deliberately left as a single ramping stage -- gradually ramping up from 0 _is_ its purpose.
+Sustained/burst/recovery are each `constant-arrival-rate` scenarios with an exact `duration` and no
+ramp -- that executor opens VUs immediately to hit the configured rate from its first tick, so the
+full documented duration is held constant. (An earlier revision approximated this with a single
+`ramping-arrival-rate` scenario and a short ramp-in stage per phase; a `ramping-arrival-rate` stage
+interpolates linearly from the previous rate to its `target` over the stage's whole duration, so that
+approach was still transitioning for part of each phase, not holding the rate for its full documented
+length.) Warm-up is deliberately left as a single ramping stage -- gradually ramping up from 0 _is_ its
+purpose. Sequencing phases as separate scenarios (via `startTime`) also means every request's
+`exec.scenario.name` directly identifies which phase produced it, so phase classification (below) is
+driven by the actual executor that scheduled the request, not reconstructed from wall-clock elapsed
+time.
 
 ### Pass/fail targets
 
@@ -66,8 +72,8 @@ Warm-up is deliberately left as a single ramping stage -- gradually ramping up f
 
 A single global "429s don't count as errors" threshold cannot distinguish "burst correctly throttled"
 from "nothing was ever throttled at all" or "sustained traffic was throttled when it shouldn't have
-been." `ingestion-load-test.js` classifies every request by elapsed time into its phase and asserts,
-per phase:
+been." `ingestion-load-test.js` classifies every request by its originating k6 scenario
+(`exec.scenario.name`) into its phase and asserts, per phase:
 
 - **Sustained** (`mrr_ingestion_sustained_unexpected_throttle_total <= 5`): sustained traffic sits at
   the exact configured allowance, so a little boundary/timing jitter producing an occasional 429 is
@@ -89,13 +95,15 @@ MRRORIGIN_BASE_URL=http://localhost:8080 \
 ./run-ingestion-load-test.sh
 ```
 
-This seeds the 10 fixtures (idempotent, safe to re-run), runs the ~15-minute k6 scenario, extracts the
-exact `mrr_ingestion_accepted_events_total` count from the k6 summary JSON via `jq`, and passes it into
-the tenant-isolation verification script as `-v expected_events=<n>` for a deterministic reconciliation
-(see below). The k6 summary JSON is written to `apps/api/loadtest/results/` (git-ignored -- copy the
-numbers you want to keep into this document, do not commit the raw file, per #93's "do not commit huge
-raw result files" instruction). Requires `psql`, `k6`, and `jq` on `PATH`; the script checks for all
-three up front and fails fast with a clear message if one is missing.
+This seeds the 10 fixtures (idempotent, safe to re-run), captures a pre-run baseline event count,
+runs the ~15-minute k6 scenario, extracts the exact `mrr_ingestion_accepted_events_total` count from the
+k6 summary JSON via `jq`, and passes both the baseline and that count into the tenant-isolation/
+reconciliation verification script as `-v baseline_events=<n> -v expected_events=<n>` for a
+deterministic, rerun-safe reconciliation (see below). The k6 summary JSON is written to
+`apps/api/loadtest/results/` (git-ignored -- copy the numbers you want to keep into this document, do
+not commit the raw file, per #93's "do not commit huge raw result files" instruction). Requires `psql`,
+`k6`, and `jq` on `PATH`; the script checks for all three up front and fails fast with a clear message
+if one is missing.
 
 ### Interpreting 429s vs failures
 
@@ -106,15 +114,42 @@ or any response outside `{2xx, 429}` against this script's own valid seeded fixt
 problem. `docs/operations/observability-runbook.md`'s `PublicIngestionRejectionRateHigh`/
 `PublicIngestionServerErrorRateHigh` alerts are the production-facing versions of these same signals.
 
-### Tenant isolation and reconciliation are enforced, not eyeballed
+### Tenant isolation/routing and reconciliation are enforced, not eyeballed
 
-`verify-ingestion-tenant-isolation.sql` wraps the cross-workspace mismatch check in a `DO $$ ...
-RAISE EXCEPTION ... END $$;` block and the event-count reconciliation in a second one, so a violation
-of either aborts the script with a non-zero exit under `-v ON_ERROR_STOP=1` -- a CI-usable pass/fail
-signal, not a printed table a human has to notice. The reconciliation check compares the exact
-`tracking_event_envelopes` row count for load-test workspaces against `:expected_events`, the precise
-number of events k6 actually sent in accepted requests (`mrr_ingestion_accepted_events_total`), not an
-"accepted requests x average events/request" estimate.
+`verify-ingestion-tenant-isolation.sql` wraps every check in a `DO $$ ... RAISE EXCEPTION ...
+END $$;` block, so a violation of any of them aborts the script with a non-zero exit under
+`-v ON_ERROR_STOP=1` -- a CI-usable pass/fail signal, not a printed table a human has to notice. It
+performs three distinct checks, each catching a different bug class:
+
+1. **Tenant-routing proof.** `fk_*_project` foreign keys only prove a row is internally consistent
+   with whatever project it references -- a bug that consistently routes key/origin A's requests into
+   project/workspace B would still produce rows that are perfectly consistent with B, and pass an
+   FK-only check. To prove routing itself, `ingestion-load-test.js` tags every client-generated id
+   (`visitorId`/`sessionId`/`eventId`, persisted verbatim as `external_visitor_id`/
+   `external_session_id`/`external_event_id`) with `_w<N>_`, the index of the ingestion key the request
+   carrying that id actually used. The verification script decodes that tag from each stored id and
+   hard-asserts it matches the workspace the row is actually stored under.
+2. **Explicit workspace/project consistency check.** The application-level restatement of the schema's
+   own `fk_*_project` relationship (redundant with the constraint, but explicit).
+3. **Deterministic, rerun-safe event reconciliation.** Because the seed script is idempotent and
+   intentionally preserves prior runs' data, comparing this run's exact accepted-event count against
+   the _total_ `tracking_event_envelopes` row count would make a second run against the same database
+   fail even when it behaved perfectly. The script instead compares this run's own delta (current total
+   minus the `:baseline_events` count captured immediately before the run) against `:expected_events`,
+   the precise number of events k6 actually sent in accepted requests
+   (`mrr_ingestion_accepted_events_total`) -- not an "accepted requests x average events/request"
+   estimate, and not a cumulative total that punishes reruns.
+
+psql's `:name` variable interpolation is not performed inside a dollar-quoted (`$$...$$`) PL/pgSQL
+body, so `expected_events BIGINT := :expected_events;` written directly inside a `DO` block would send
+the literal, unparseable text `:expected_events` to the server. The script instead interpolates both
+`-v` values into a plain top-level `INSERT` (not dollar-quoted, so unambiguous) into a temp table, and
+every `DO` block below reads them back with ordinary SQL. That `INSERT` also serves as the script's own
+cheap proof that `-v baseline_events=...`/`-v expected_events=...` actually reached the server: an
+unset variable makes the `INSERT` fail immediately with a clear error (verified locally against a real
+Postgres instance, including the pass case, the tenant-routing-violation failure case, the
+reconciliation-mismatch failure case, the rerun/nonzero-baseline case, and the missing-variable case --
+all behaved as intended).
 
 ### Observed results
 
