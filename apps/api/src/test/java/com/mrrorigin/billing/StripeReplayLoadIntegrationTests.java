@@ -145,22 +145,29 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
 
     @Test
     void concurrentProcessingConvergesToTheSameNormalizedStateAsASerialReferenceRun() {
-        UUID concurrentWorkspace = createWorkspace();
-        UUID concurrentConnection = insertActiveConnection(concurrentWorkspace, "acct_load_conv_concurrent", StripeConnectionMode.TEST);
+        // Genuine serial-vs-concurrent isolation, by sequencing rather than by filtering:
+        // StripeWebhookNormalizationService.claimBatch claims PENDING rows globally, exactly like real
+        // replicas do -- that shared-backlog behavior is the whole point of the load test, so it must
+        // not be special-cased for this one test. Instead, the serial reference workspace is fully
+        // seeded AND fully drained (backlog confirmed empty) before the concurrent workspace's events
+        // are seeded at all, so the two runs never coexist in the shared PENDING backlog and cannot
+        // race or share workers with each other.
         UUID serialWorkspace = createWorkspace();
         UUID serialConnection = insertActiveConnection(serialWorkspace, "acct_load_conv_serial", StripeConnectionMode.TEST);
-
         int slots = 5;
         for (int slot = 0; slot < slots; slot++) {
-            seedCustomerLifecycle(concurrentConnection, concurrentWorkspace, slot);
             seedCustomerLifecycle(serialConnection, serialWorkspace, slot);
         }
+        drainSerially();
+        assertThat(pendingOrFailedCount()).isZero();
 
-        drainConcurrently(3, 25, 10, concurrentWorkspace);
-        drainSerially(serialWorkspace);
-
-        assertThat(pendingOrFailedCountForWorkspace(concurrentWorkspace)).isZero();
-        assertThat(pendingOrFailedCountForWorkspace(serialWorkspace)).isZero();
+        UUID concurrentWorkspace = createWorkspace();
+        UUID concurrentConnection = insertActiveConnection(concurrentWorkspace, "acct_load_conv_concurrent", StripeConnectionMode.TEST);
+        for (int slot = 0; slot < slots; slot++) {
+            seedCustomerLifecycle(concurrentConnection, concurrentWorkspace, slot);
+        }
+        drainConcurrently(3, 25, 10);
+        assertThat(pendingOrFailedCount()).isZero();
 
         for (int slot = 0; slot < slots; slot++) {
             String customerId = "cus_load_" + slot;
@@ -217,7 +224,7 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
                 .param("leaseStart", crashedLeaseStart)
                 .update();
 
-        DrainResult recovery = drainConcurrently(2, 25, 10, workspace);
+        DrainResult recovery = drainConcurrently(2, 25, 10);
 
         assertThat(pendingOrFailedCountForWorkspace(workspace)).isZero();
         assertThat(countWhere("billing_customers", workspace)).isEqualTo(slots);
@@ -293,11 +300,6 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
     // ---- concurrent/serial drain helpers --------------------------------------------------------
 
     private DrainResult drainConcurrently(int replicaCount, int batchSize, int maxBatchesPerTick) {
-        return drainConcurrently(replicaCount, batchSize, maxBatchesPerTick, null);
-    }
-
-    /** {@code onlyLogWorkspace} is documentation only -- every replica drains the whole shared backlog, exactly like real replicas would. */
-    private DrainResult drainConcurrently(int replicaCount, int batchSize, int maxBatchesPerTick, UUID onlyLogWorkspace) {
         List<StripeWebhookNormalizationScheduler> replicas = IntStream.range(0, replicaCount)
                 .mapToObj(i -> new StripeWebhookNormalizationScheduler(
                         normalizationService, new StripeWebhookNormalizationSchedulerProperties(true, batchSize, maxBatchesPerTick)))
@@ -335,7 +337,7 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
         return new DrainResult(processed.get(), failed.get());
     }
 
-    private void drainSerially(UUID workspace) {
+    private void drainSerially() {
         var scheduler = new StripeWebhookNormalizationScheduler(
                 normalizationService, new StripeWebhookNormalizationSchedulerProperties(true, 25, 10));
         int fetched;

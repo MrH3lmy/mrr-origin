@@ -38,12 +38,19 @@ Document the exact configuration used for the reference run here once it has act
 across all 10 tenants, 1-5 events/request with a weighted anonymous-`pageview`/`identify` mix (not one
 trivial repeated JSON body). Four phases in one k6 `ramping-arrival-rate` scenario:
 
-| Phase             | Duration | Target rate                                                             | Purpose                                                            |
-| ----------------- | -------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| 1. Warm-up        | 2 min    | ~3 req/s (~25% of sustained)                                            | Let connection pools/JIT/caches settle                             |
-| 2. Sustained      | 10 min   | 10 req/s (60 req/min/key x 10 keys -- the configured default allowance) | Prove steady-state latency/error targets                           |
-| 3. Burst/throttle | 60 s     | 30 req/s (3x the per-key allowance)                                     | Prove rate limiting stays controlled (429s), not 5xx/DB contention |
-| 4. Recovery       | 2 min    | 10 req/s                                                                | Prove ingestion recovers once the fixed window permits it          |
+| Phase             | Duration | Target rate                                                                                            | Purpose                                                            |
+| ----------------- | -------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| 1. Warm-up        | 2 min    | ~3 req/s (~25% of sustained), ramping                                                                  | Let connection pools/JIT/caches settle                             |
+| 2. Sustained      | 10 min   | 10 req/s (60 req/min/key x 10 keys -- the configured default allowance), held flat after a 10s ramp-in | Prove steady-state latency/error targets                           |
+| 3. Burst/throttle | 60 s     | 30 req/s (3x the per-key allowance), held flat after a 10s ramp-in                                     | Prove rate limiting stays controlled (429s), not 5xx/DB contention |
+| 4. Recovery       | 2 min    | 10 req/s, held flat after a 10s ramp-in                                                                | Prove ingestion recovers once the fixed window permits it          |
+
+`ramping-arrival-rate` interpolates linearly from the previous stage's rate to a stage's `target` over
+that stage's entire `duration` -- a single stage per phase would therefore still be transitioning
+throughout the whole phase, never actually holding the documented rate. Each of sustained/burst/
+recovery is built from a short 10s ramp-in stage followed by a hold stage at the same target for the
+remainder of the phase, so each is genuinely flat for the large majority of its documented duration.
+Warm-up is deliberately left as a single ramping stage -- gradually ramping up from 0 _is_ its purpose.
 
 ### Pass/fail targets
 
@@ -55,6 +62,24 @@ trivial repeated JSON body). Four phases in one k6 `ramping-arrival-rate` scenar
 - No cross-tenant rows, identity links, sessions, or events are created.
 - Accepted/duplicate/rejected counts in persistence/metrics reconcile with the generated workload.
 
+### Phase-specific proof (not just a global 429-tolerant threshold)
+
+A single global "429s don't count as errors" threshold cannot distinguish "burst correctly throttled"
+from "nothing was ever throttled at all" or "sustained traffic was throttled when it shouldn't have
+been." `ingestion-load-test.js` classifies every request by elapsed time into its phase and asserts,
+per phase:
+
+- **Sustained** (`mrr_ingestion_sustained_unexpected_throttle_total <= 5`): sustained traffic sits at
+  the exact configured allowance, so a little boundary/timing jitter producing an occasional 429 is
+  tolerable, but more than a handful indicates real unexpected throttling.
+- **Burst**: `mrr_ingestion_burst_throttled_total` must be greater than zero -- a script/environment bug
+  that silently never exceeds the allowance would otherwise let this whole scenario pass without ever
+  proving throttling happens. `mrr_ingestion_burst_missing_retry_after_total` must be zero (every 429
+  carries `Retry-After`), and `mrr_ingestion_burst_unexpected_5xx_total` must be zero (burst never
+  degrades into 5xx/DB contention).
+- **Recovery** (`mrr_ingestion_recovery_success_rate > 0.95`): ingestion actually returns to successful
+  2xx once the fixed window clears, not just "no crash."
+
 ### How to run it
 
 ```bash
@@ -64,10 +89,13 @@ MRRORIGIN_BASE_URL=http://localhost:8080 \
 ./run-ingestion-load-test.sh
 ```
 
-This seeds the 10 fixtures (idempotent, safe to re-run), runs the ~15-minute k6 scenario, and then
-runs the tenant-isolation verification query. The k6 summary JSON is written to
-`apps/api/loadtest/results/` (git-ignored -- copy the numbers you want to keep into this document, do
-not commit the raw file, per #93's "do not commit huge raw result files" instruction).
+This seeds the 10 fixtures (idempotent, safe to re-run), runs the ~15-minute k6 scenario, extracts the
+exact `mrr_ingestion_accepted_events_total` count from the k6 summary JSON via `jq`, and passes it into
+the tenant-isolation verification script as `-v expected_events=<n>` for a deterministic reconciliation
+(see below). The k6 summary JSON is written to `apps/api/loadtest/results/` (git-ignored -- copy the
+numbers you want to keep into this document, do not commit the raw file, per #93's "do not commit huge
+raw result files" instruction). Requires `psql`, `k6`, and `jq` on `PATH`; the script checks for all
+three up front and fails fast with a clear message if one is missing.
 
 ### Interpreting 429s vs failures
 
@@ -77,6 +105,16 @@ script's own `mrr_ingestion_server_error_rate` threshold does not count 429s as 
 or any response outside `{2xx, 429}` against this script's own valid seeded fixtures, indicates a real
 problem. `docs/operations/observability-runbook.md`'s `PublicIngestionRejectionRateHigh`/
 `PublicIngestionServerErrorRateHigh` alerts are the production-facing versions of these same signals.
+
+### Tenant isolation and reconciliation are enforced, not eyeballed
+
+`verify-ingestion-tenant-isolation.sql` wraps the cross-workspace mismatch check in a `DO $$ ...
+RAISE EXCEPTION ... END $$;` block and the event-count reconciliation in a second one, so a violation
+of either aborts the script with a non-zero exit under `-v ON_ERROR_STOP=1` -- a CI-usable pass/fail
+signal, not a printed table a human has to notice. The reconciliation check compares the exact
+`tracking_event_envelopes` row count for load-test workspaces against `:expected_events`, the precise
+number of events k6 actually sent in accepted requests (`mrr_ingestion_accepted_events_total`), not an
+"accepted requests x average events/request" estimate.
 
 ### Observed results
 
@@ -116,8 +154,13 @@ re-enters the real claim -> normalize -> apply pipeline, not a bypassed shortcut
 ledger table's row count must be unchanged afterward.
 
 **Convergence proof**: a second, smaller, structurally-identical backlog is drained serially
-(single-threaded, one `processBatch` call at a time) as the reference. Every corresponding tenant
-pair's normalized snapshot must be byte-identical between the concurrent and serial runs.
+(single-threaded, one `processBatch` call at a time) as the reference. The two runs are isolated by
+sequencing, not by a production-code filter: the serial-reference workspace is fully seeded and fully
+drained (backlog confirmed empty) before the concurrent workspace's events are seeded at all, since
+`StripeWebhookNormalizationService.claimBatch` claims `PENDING` rows globally -- exactly like real
+replicas do -- and that shared-backlog behavior is the whole point of the load test, so it is not
+special-cased for this comparison. Every corresponding tenant pair's normalized snapshot must be
+byte-identical between the concurrent and serial runs.
 
 **Failure/recovery pressure**: a subset of rows has `last_attempted_at` directly backdated past
 `StripeWebhookNormalizationService`'s 5-minute lease window -- exactly the persisted state a row would

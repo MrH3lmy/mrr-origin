@@ -30,36 +30,105 @@ const ORIGINS = Array.from(
   (_, i) => `https://loadtest${i}.example.com`,
 );
 
-// Custom metrics so thresholds can be scoped exactly the way #93 states them (accepted-request
-// latency only; server-error rate; every response must be an expected outcome).
+// #93's four phases, as documented durations from test start (seconds). Review fix: a k6
+// `ramping-arrival-rate` stage ramps LINEARLY from the previous stage's rate to its own `target` over
+// its full `duration` -- a single `{ target: 10, duration: '10m' }` stage following a rate-3 stage is
+// therefore a 3->10 ramp across the whole 10 minutes, never actually constant at 10. Every phase below
+// is instead built from a short ramp-in stage followed by a hold stage at the same target for the
+// remainder of the phase, so sustained/burst/recovery are genuinely flat for (the vast majority of)
+// their documented duration, not still transitioning throughout it. Warm-up is deliberately left as a
+// single ramping stage -- gradually ramping up *is* its documented purpose ("let connection pools/JIT/
+// caches settle"), unlike the other three phases, which must hold a constant, provable rate.
+const WARMUP_RATE = 3; // ~25% of the sustained allowance
+const SUSTAINED_RATE = 10; // 60 req/min/key * 10 keys = 10 req/s -- the configured default allowance
+const BURST_RATE = 30; // 3x the per-key allowance
+const RECOVERY_RATE = SUSTAINED_RATE;
+
+const WARMUP_DURATION = 120; // 2m
+const SUSTAINED_DURATION = 600; // 10m
+const BURST_DURATION = 60; // 60s
+const RECOVERY_DURATION = 120; // 2m
+const RAMP_IN_DURATION = 10; // seconds spent transitioning into each of sustained/burst/recovery
+
+// Phase boundaries (seconds elapsed since test start) used to classify each request's outcome. Kept
+// at the clean documented phase durations (not the internal ramp/hold split above) -- a few seconds of
+// rate transition at a phase's own start is an expected, unavoidable artifact of changing arrival
+// rates at all, not evidence the phase itself isn't held constant.
+const PHASE_END = {
+  warmup: WARMUP_DURATION,
+  sustained: WARMUP_DURATION + SUSTAINED_DURATION,
+  burst: WARMUP_DURATION + SUSTAINED_DURATION + BURST_DURATION,
+  recovery:
+    WARMUP_DURATION + SUSTAINED_DURATION + BURST_DURATION + RECOVERY_DURATION,
+};
+
+function currentPhase(elapsedSeconds) {
+  if (elapsedSeconds < PHASE_END.warmup) return "warmup";
+  if (elapsedSeconds < PHASE_END.sustained) return "sustained";
+  if (elapsedSeconds < PHASE_END.burst) return "burst";
+  return "recovery";
+}
+
+// Global metrics (every request, every phase).
 const acceptedDuration = new Trend("mrr_ingestion_accepted_duration", true);
 const serverErrorRate = new Rate("mrr_ingestion_server_error_rate");
-const rateLimitedCount = new Counter("mrr_ingestion_rate_limited_total");
 const acceptedCount = new Counter("mrr_ingestion_accepted_total");
+// Exact count of events actually sent in accepted requests (not requests themselves -- 1-5
+// events/request) -- review fix: the tenant-isolation verification script compares this exact number
+// against `tracking_event_envelopes` row counts, replacing what was an "accepted requests x average
+// events/request" eyeball estimate with a deterministic reconciliation. This script never
+// intentionally sends a genuine duplicate or invalid payload, so accepted-events-persisted is the one
+// reconciliation dimension that applies here.
+const acceptedEventsTotal = new Counter("mrr_ingestion_accepted_events_total");
 const unexpectedStatusCount = new Counter(
   "mrr_ingestion_unexpected_status_total",
 );
+
+// Phase-scoped metrics -- review fix: without these, the test could pass even if sustained traffic was
+// unexpectedly throttled, burst never actually produced a single 429, or recovery stayed throttled.
+const sustainedUnexpectedThrottle = new Counter(
+  "mrr_ingestion_sustained_unexpected_throttle_total",
+);
+const burstThrottled = new Counter("mrr_ingestion_burst_throttled_total");
+const burstMissingRetryAfter = new Counter(
+  "mrr_ingestion_burst_missing_retry_after_total",
+);
+const burstUnexpected5xx = new Counter(
+  "mrr_ingestion_burst_unexpected_5xx_total",
+);
+const recoverySuccessRate = new Rate("mrr_ingestion_recovery_success_rate");
 
 export const options = {
   scenarios: {
     ingestion_workload: {
       executor: "ramping-arrival-rate",
-      startRate: 3,
+      startRate: 0,
       timeUnit: "1s",
       preAllocatedVUs: 50,
       maxVUs: 200,
       stages: [
-        // Phase 1: warm-up, ~25% of the 10 req/s aggregate allowance (issue: "2 minutes at ~25%
-        // target traffic").
-        { target: 3, duration: "2m" },
-        // Phase 2: sustained at the configured default allowance -- 60 req/min/key * 10 keys = 10 req/s.
-        { target: 10, duration: "10m" },
-        // Phase 3: burst/throttle, 3x over the per-key allowance, to prove rate limiting stays
-        // controlled (429s) rather than degrading into 5xx/DB contention.
-        { target: 30, duration: "60s" },
-        // Phase 4: recovery -- back to the sustained rate, proving ingestion recovers once the fixed
-        // window permits it again.
-        { target: 10, duration: "2m" },
+        // Phase 1: warm-up -- an intentional ramp from 0 to the warm-up rate (see comment above).
+        { target: WARMUP_RATE, duration: `${WARMUP_DURATION}s` },
+        // Phase 2: sustained at the configured default allowance, genuinely flat for ~98% of its
+        // 10-minute duration.
+        { target: SUSTAINED_RATE, duration: `${RAMP_IN_DURATION}s` },
+        {
+          target: SUSTAINED_RATE,
+          duration: `${SUSTAINED_DURATION - RAMP_IN_DURATION}s`,
+        },
+        // Phase 3: burst/throttle, 3x over the per-key allowance, flat for the rest of its 60s.
+        { target: BURST_RATE, duration: `${RAMP_IN_DURATION}s` },
+        {
+          target: BURST_RATE,
+          duration: `${BURST_DURATION - RAMP_IN_DURATION}s`,
+        },
+        // Phase 4: recovery -- back to the sustained rate, flat for the rest of its 2 minutes, proving
+        // ingestion recovers once the fixed window permits it again.
+        { target: RECOVERY_RATE, duration: `${RAMP_IN_DURATION}s` },
+        {
+          target: RECOVERY_RATE,
+          duration: `${RECOVERY_DURATION - RAMP_IN_DURATION}s`,
+        },
       ],
     },
   },
@@ -72,6 +141,19 @@ export const options = {
     // sends valid keys/origins/payloads against its own seeded fixtures, so any 4xx indicates a script
     // or fixture bug) or an unhandled status.
     mrr_ingestion_unexpected_status_total: ["count==0"],
+    // Sustained traffic sits at the exact configured allowance, so a little boundary/timing jitter
+    // producing an occasional 429 is tolerable; anything more indicates real unexpected throttling.
+    mrr_ingestion_sustained_unexpected_throttle_total: ["count<=5"],
+    // The burst phase must actually produce throttling -- a script/environment bug that silently never
+    // exceeds the allowance would otherwise let this whole scenario pass without ever proving #93's
+    // "excess requests are rejected as 429" requirement.
+    mrr_ingestion_burst_throttled_total: ["count>0"],
+    // Every 429 must carry Retry-After (IngestionRateLimitInterceptor's documented contract).
+    mrr_ingestion_burst_missing_retry_after_total: ["count==0"],
+    // Burst must degrade into controlled 429s, never 5xx/DB contention -- #93's explicit target.
+    mrr_ingestion_burst_unexpected_5xx_total: ["count==0"],
+    // Ingestion must actually recover once the fixed window clears.
+    mrr_ingestion_recovery_success_rate: ["rate>0.95"],
   },
 };
 
@@ -122,30 +204,45 @@ function buildBatch() {
         : pageviewEvent(),
     );
   }
-  return { version: 1, batchId: randomId("batch"), events };
+  return {
+    body: { version: 1, batchId: randomId("batch"), events },
+    eventCount,
+  };
 }
 
-export default function () {
+export function setup() {
+  return { startTimeMs: Date.now() };
+}
+
+export default function (data) {
+  const elapsedSeconds = (Date.now() - data.startTimeMs) / 1000;
+  const phase = currentPhase(elapsedSeconds);
+
   // Round-robins evenly across the 10 seeded keys, matching #93's "requests spread evenly across all
   // 10 tenants."
   const keyIndex = exec.scenario.iterationInTest % KEY_COUNT;
-  const payload = JSON.stringify(buildBatch());
-  const res = http.post(`${BASE_URL}/api/public/v1/events`, payload, {
-    headers: {
-      "Content-Type": "application/json",
-      "X-Ingestion-Key": KEYS[keyIndex],
-      Origin: ORIGINS[keyIndex],
+  const built = buildBatch();
+  const res = http.post(
+    `${BASE_URL}/api/public/v1/events`,
+    JSON.stringify(built.body),
+    {
+      headers: {
+        "Content-Type": "application/json",
+        "X-Ingestion-Key": KEYS[keyIndex],
+        Origin: ORIGINS[keyIndex],
+      },
     },
-  });
+  );
 
-  if (res.status >= 200 && res.status < 300) {
+  const accepted = res.status >= 200 && res.status < 300;
+  if (accepted) {
     acceptedCount.add(1);
+    acceptedEventsTotal.add(built.eventCount);
     acceptedDuration.add(res.timings.duration);
     serverErrorRate.add(false);
   } else if (res.status === 429) {
     // Expected during the burst phase -- IngestionRateLimitInterceptor's documented contract, not a
     // failure.
-    rateLimitedCount.add(1);
     serverErrorRate.add(false);
   } else if (res.status >= 500) {
     serverErrorRate.add(true);
@@ -156,8 +253,22 @@ export default function () {
     unexpectedStatusCount.add(1);
   }
 
+  if (phase === "sustained" && res.status === 429) {
+    sustainedUnexpectedThrottle.add(1);
+  } else if (phase === "burst") {
+    if (res.status === 429) {
+      burstThrottled.add(1);
+      if (!res.headers["Retry-After"]) {
+        burstMissingRetryAfter.add(1);
+      }
+    } else if (res.status >= 500) {
+      burstUnexpected5xx.add(1);
+    }
+  } else if (phase === "recovery") {
+    recoverySuccessRate.add(accepted);
+  }
+
   check(res, {
-    "status is 2xx or 429": (r) =>
-      (r.status >= 200 && r.status < 300) || r.status === 429,
+    "status is 2xx or 429": (r) => accepted || r.status === 429,
   });
 }
