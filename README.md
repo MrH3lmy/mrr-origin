@@ -58,6 +58,7 @@ cd ../.. && pnpm check
 - [Contributing guide](CONTRIBUTING.md)
 - [Local authentication](docs/local-authentication.md)
 - [Security policy](SECURITY.md)
+- [Private beta operating framework](docs/private-beta/README.md)
 
 GitHub issues are the executable backlog. Every implementation PR should reference exactly one primary issue and update documentation when it changes a product or architecture decision.
 
