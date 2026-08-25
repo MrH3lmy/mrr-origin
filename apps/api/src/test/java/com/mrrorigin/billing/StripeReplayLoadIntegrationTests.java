@@ -1,9 +1,12 @@
 package com.mrrorigin.billing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -167,6 +170,15 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
             seedCustomerLifecycle(concurrentConnection, concurrentWorkspace, slot);
         }
         drainConcurrently(3, 25, 10);
+        // Architect decision on #93, 2026-08-24: StripeWebhookNormalizationService.markFailed
+        // classifies any non-StripeBillingNormalizationException as TRANSIENT (StripeWebhookFailureKind)
+        // -- "the same event may succeed on a later replay alone" -- so asserting zero pending/failed
+        // immediately after one concurrent pass with no requeue is stricter than the application's own
+        // documented replay contract. This bounded, TRANSIENT-only requeue-and-retry is that contract
+        // exercised for real, not a relaxed assertion: a non-TRANSIENT failure (a genuine normalization
+        // bug) still fails the test immediately, and a round that makes no progress still fails loudly
+        // rather than looping forever.
+        convergeThroughBoundedTransientReplay(concurrentWorkspace, 3, 25, 10);
         assertThat(pendingOrFailedCount()).isZero();
 
         for (int slot = 0; slot < slots; slot++) {
@@ -210,28 +222,73 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
         }
         int total = slots * EVENTS_PER_CUSTOMER;
 
-        // Half the backlog is claimed-and-abandoned (simulated crash); the other half is left genuinely
-        // PENDING, exactly like a real partial outage where some in-flight work is stuck and the rest
-        // simply hasn't been picked up yet.
-        Instant crashedLeaseStart = Instant.now().minus(Duration.ofMinutes(6));
-        jdbc().sql("""
-                        UPDATE stripe_webhook_events
-                        SET last_attempted_at = :leaseStart, attempt_count = 1
-                        WHERE workspace_id = :w AND stripe_event_id LIKE 'evt_%_cust_0'
-                           OR (workspace_id = :w AND stripe_event_id LIKE 'evt_%_price_0')
-                        """)
-                .param("w", workspace)
-                .param("leaseStart", crashedLeaseStart)
-                .update();
+        // 5 of this workspace's 55 events (not "half", a corrected count per #93 architect review) are
+        // stamped as claimed-but-abandoned (simulated crash); the rest of the backlog is left genuinely
+        // untouched (last_attempted_at NULL), like a real partial outage where some in-flight work is
+        // stuck and the rest simply hasn't been picked up yet. Deliberately the terminal
+        // customer.discount.created event of each slot (WAVE2_BASE.plusSeconds(8), the latest
+        // receivedAt in the chain, seedCustomerLifecycle's own comment on WAVE2_BASE) -- nothing else
+        // in the seeded fixture set depends on it, unlike e.g. customer.created/price.created, which the
+        // subscription/invoice/charge chain for every slot requires normalized first. Leasing those
+        // instead would make claimBatch's ORDER BY received_at ASC hand dependent events to workers
+        // before their prerequisite rows exist, producing real (not lease-related) processing failures
+        // and defeating the point of this test -- confirmed by hitting exactly that while drafting this.
+        List<String> leasedEventIds = leasedSubsetEventIds(workspace, slots);
+        assertThat(leasedEventIds).hasSize(slots);
 
-        DrainResult recovery = drainConcurrently(2, 25, 10);
+        // First prove the lease boundary itself is enforced, not merely that *something* eventually
+        // reclaims an already-expired timestamp (which would pass even with claimBatch's
+        // `last_attempted_at < leaseCutoff` condition removed entirely): stamp a lease that started
+        // moments ago, well inside StripeWebhookNormalizationService's 5-minute LEASE_DURATION, and
+        // confirm a drain leaves that subset alone while still completing everything else.
+        stampLease(workspace, leasedEventIds, Instant.now().minus(Duration.ofMinutes(1)));
+        drainConcurrently(2, 25, 10);
+        // The same concurrent-claim TRANSIENT contention convergeThroughBoundedTransientReplay handles
+        // for the convergence test can also hit the *other* 50 events here, unrelated to the lease
+        // boundary this step is proving -- bounded-retry those away first so the assertions below check
+        // lease semantics specifically, not incidentally fail on a pre-existing, already-reported,
+        // unfixed race. This never touches the 5 intentionally-still-PENDING leased rows: it only ever
+        // requeues rows that are actually FAILED, and claimBatch's lease boundary keeps those 5 PENDING
+        // throughout this step.
+        retryTransientFailuresToZero(workspace, 2, 25, 10);
+        assertThat(pendingOrFailedCountForWorkspace(workspace))
+                .as("only the recently-leased subset should still be outstanding -- its lease has not expired yet")
+                .isEqualTo(leasedEventIds.size());
+        assertThat(processedCountForWorkspace(workspace)).isEqualTo(total - leasedEventIds.size());
 
-        assertThat(pendingOrFailedCountForWorkspace(workspace)).isZero();
+        // Now simulate the crash actually going stale: backdate the same rows' lease past
+        // LEASE_DURATION -- exactly the persisted state a row would be in if the worker that claimed it
+        // crashed before finishing -- without waiting 5 real minutes or throwing a bypass exception
+        // around the claim boundary.
+        stampLease(workspace, leasedEventIds, Instant.now().minus(Duration.ofMinutes(6)));
+        drainConcurrently(2, 25, 10);
+        convergeThroughBoundedTransientReplay(workspace, 2, 25, 10);
+
         assertThat(countWhere("billing_customers", workspace)).isEqualTo(slots);
         assertThat(countWhere("billing_prices", workspace)).isEqualTo(slots);
         assertThat(countWhere("billing_subscriptions", workspace)).isEqualTo(slots);
-        assertThat(recovery.processed()).isGreaterThan(0);
         assertThat(processedCountForWorkspace(workspace)).isEqualTo(total);
+    }
+
+    private List<String> leasedSubsetEventIds(UUID workspace, int slots) {
+        List<String> ids = new ArrayList<>();
+        for (int slot = 0; slot < slots; slot++) {
+            ids.add("evt_" + workspace + "_discount_" + slot);
+        }
+        return ids;
+    }
+
+    private void stampLease(UUID workspace, List<String> eventIds, Instant leaseStart) {
+        int updated = jdbc().sql("""
+                        UPDATE stripe_webhook_events
+                        SET last_attempted_at = :leaseStart, attempt_count = attempt_count + 1
+                        WHERE workspace_id = :w AND stripe_event_id IN (:eventIds)
+                        """)
+                .param("w", workspace)
+                .param("eventIds", eventIds)
+                .param("leaseStart", OffsetDateTime.ofInstant(leaseStart, ZoneOffset.UTC))
+                .update();
+        assertThat(updated).isEqualTo(eventIds.size());
     }
 
     // ---- fixture generation --------------------------------------------------------------------
@@ -346,6 +403,82 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
         } while (fetched > 0);
     }
 
+    private static final int MAX_TRANSIENT_RETRY_ROUNDS = 3;
+
+    /**
+     * Requeues and redrains a workspace's leftover FAILED rows through the real claim -> normalize ->
+     * apply pipeline (no bypass), up to {@link #MAX_TRANSIENT_RETRY_ROUNDS} times, until none remain.
+     * Only {@code TRANSIENT} failures (see {@link StripeWebhookFailureKind}) are eligible -- an
+     * {@code UNSUPPORTED}/{@code LEGACY} failure means a genuine normalization bug, not a replayable
+     * race, and fails the test immediately rather than being requeued. A round that does not reduce the
+     * stuck count also fails the test immediately, so a truly stuck backlog cannot be masked as "just
+     * needs one more retry." Never touches rows that are genuinely PENDING (e.g. intentionally
+     * lease-skipped in the crash/interruption test below) -- it only ever requeues rows that are
+     * actually FAILED.
+     */
+    private void retryTransientFailuresToZero(UUID workspace, int replicaCount, int batchSize, int maxBatchesPerTick) {
+        int previousStuck = Integer.MAX_VALUE;
+        for (int round = 1; round <= MAX_TRANSIENT_RETRY_ROUNDS; round++) {
+            List<FailedEvent> failed = failedEventsForWorkspace(workspace);
+            if (failed.isEmpty()) {
+                return;
+            }
+            List<FailedEvent> nonTransient = failed.stream()
+                    .filter(e -> !"TRANSIENT".equals(e.failureKind()))
+                    .toList();
+            assertThat(nonTransient)
+                    .as("only TRANSIENT failures are eligible for bounded replay -- UNSUPPORTED/LEGACY indicates a real normalization bug")
+                    .isEmpty();
+            System.out.printf(
+                    "TRANSIENT retry round %d: %d failure(s) for workspace %s, requeuing and redraining: %s%n",
+                    round, failed.size(), workspace, failed);
+            if (failed.size() >= previousStuck) {
+                fail(
+                        "bounded TRANSIENT replay made no progress: round %d still has %d stuck event(s) (previous round had %d): %s"
+                                .formatted(round, failed.size(), previousStuck, failed));
+            }
+            previousStuck = failed.size();
+            requeueFailedEventsForWorkspace(workspace);
+            drainConcurrently(replicaCount, batchSize, maxBatchesPerTick);
+        }
+        assertThat(failedEventsForWorkspace(workspace))
+                .as("still FAILED after %d bounded TRANSIENT replay round(s)", MAX_TRANSIENT_RETRY_ROUNDS)
+                .isEmpty();
+    }
+
+    /** {@link #retryTransientFailuresToZero}, then asserts the workspace has nothing pending/failed at all -- for callers that expect full convergence, not a partial (e.g. lease-boundary) outstanding subset. */
+    private void convergeThroughBoundedTransientReplay(UUID workspace, int replicaCount, int batchSize, int maxBatchesPerTick) {
+        retryTransientFailuresToZero(workspace, replicaCount, batchSize, maxBatchesPerTick);
+        assertThat(pendingOrFailedCountForWorkspace(workspace))
+                .as("still pending/failed after bounded TRANSIENT replay")
+                .isZero();
+    }
+
+    private record FailedEvent(String stripeEventId, String failureKind, String lastError) {}
+
+    private List<FailedEvent> failedEventsForWorkspace(UUID workspace) {
+        return jdbc().sql(
+                        "SELECT stripe_event_id, failure_kind, last_error FROM stripe_webhook_events "
+                                + "WHERE workspace_id = :w AND processing_state = 'FAILED'")
+                .param("w", workspace)
+                .query((rs, rowNum) -> new FailedEvent(
+                        rs.getString("stripe_event_id"), rs.getString("failure_kind"), rs.getString("last_error")))
+                .list();
+    }
+
+    /** Scoped sibling of {@link #requeueFailedEvents()}: only this workspace's FAILED rows, mirroring the real replay endpoint's transition. */
+    private int requeueFailedEventsForWorkspace(UUID workspace) {
+        // failure_kind/last_error must be cleared in the same statement as the processing_state flip --
+        // chk_stripe_webhook_events_failure_kind_consistency (V12) requires
+        // (processing_state = 'FAILED') = (failure_kind IS NOT NULL), and StripeWebhookReplayService's
+        // real replay transition clears both together for exactly this reason.
+        return jdbc().sql(
+                        "UPDATE stripe_webhook_events SET processing_state = 'PENDING', failure_kind = NULL, last_error = NULL, last_attempted_at = NULL "
+                                + "WHERE workspace_id = :w AND processing_state = 'FAILED'")
+                .param("w", workspace)
+                .update();
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             latch.await(5, TimeUnit.SECONDS);
@@ -386,7 +519,13 @@ class StripeReplayLoadIntegrationTests extends AbstractBillingLedgerIntegrationT
 
     /** Requeues every currently-FAILED event (across all workspaces) back to PENDING, mirroring the real replay endpoint's transition. */
     private int requeueFailedEvents() {
-        return jdbc().sql("UPDATE stripe_webhook_events SET processing_state = 'PENDING', last_attempted_at = NULL WHERE processing_state = 'FAILED'")
+        // See requeueFailedEventsForWorkspace's comment: failure_kind/last_error must be cleared in the
+        // same statement as the processing_state flip, or chk_stripe_webhook_events_failure_kind_consistency
+        // (V12) rejects the row. Latent bug fixed alongside the scoped sibling above -- this whole-table
+        // version had never actually requeued a genuinely FAILED row in a run that exercised this line
+        // until now.
+        return jdbc().sql(
+                        "UPDATE stripe_webhook_events SET processing_state = 'PENDING', failure_kind = NULL, last_error = NULL, last_attempted_at = NULL WHERE processing_state = 'FAILED'")
                 .update();
     }
 

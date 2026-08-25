@@ -54,6 +54,25 @@ const SUSTAINED_START = WARMUP_DURATION;
 const BURST_START = SUSTAINED_START + SUSTAINED_DURATION;
 const RECOVERY_START = BURST_START + BURST_DURATION;
 
+// #93's recovery requirement is "ingestion recovers once the fixed windows permit it" -- not
+// "every request succeeds the instant burst traffic stops." IngestionRateLimiter
+// (apps/api/src/main/java/com/mrrorigin/tracking/IngestionRateLimiter.java) is an intentional,
+// unchanged-for-#93 wall-clock-aligned fixed-window limiter (window boundaries fall on the epoch
+// minute, not on each key's first use), so a burst that saturates whichever 60s window(s) it lands
+// in leaves that same window still exhausted for however much of it remains once recovery traffic
+// starts -- carry-over 429s in that leftover time are the documented contract working as designed,
+// not a failure. Recovery's 120s is split in two to measure that honestly instead of asserting
+// success across the whole phase (which conflates "expected carry-over" with "actually failed to
+// recover"): the first RECOVERY_CARRYOVER_DURATION seconds can carry over throttling from the
+// window burst exhausted (every such 429 must still carry a valid Retry-After -- the limiter's
+// documented contract always holds, carry-over or not), and the last
+// RECOVERY_VERIFY_DURATION seconds is a guaranteed-fresh-window segment (60s >= the 60s window
+// length, so at least one full window boundary has passed since recovery began) where >95% 2xx is
+// still required exactly as before.
+const RECOVERY_CARRYOVER_DURATION = 60;
+const RECOVERY_VERIFY_DURATION =
+  RECOVERY_DURATION - RECOVERY_CARRYOVER_DURATION;
+
 // Global metrics (every request, every phase).
 const acceptedDuration = new Trend("mrr_ingestion_accepted_duration", true);
 const serverErrorRate = new Rate("mrr_ingestion_server_error_rate");
@@ -81,9 +100,31 @@ const burstMissingRetryAfter = new Counter(
 const burstUnexpected5xx = new Counter(
   "mrr_ingestion_burst_unexpected_5xx_total",
 );
-const recoverySuccessRate = new Rate("mrr_ingestion_recovery_success_rate");
+// Whole-phase recovery success rate is kept as an informational metric (no threshold) -- it mixes
+// expected carry-over throttling with genuine recovery, so it is not itself a pass/fail signal.
+// See RECOVERY_CARRYOVER_DURATION/RECOVERY_VERIFY_DURATION above for the two metrics that are.
+const recoveryOverallSuccessRate = new Rate(
+  "mrr_ingestion_recovery_overall_success_rate",
+);
+// Every 429 in the carry-over segment must still carry a valid Retry-After -- IngestionRateLimiter's
+// documented contract holds for carry-over throttling exactly as it does for burst throttling.
+const recoveryCarryoverMissingRetryAfter = new Counter(
+  "mrr_ingestion_recovery_carryover_missing_retry_after_total",
+);
+const recoveryCarryoverUnexpected5xx = new Counter(
+  "mrr_ingestion_recovery_carryover_unexpected_5xx_total",
+);
+// The actual pass/fail recovery signal: once at least one full fixed window has elapsed since
+// recovery-rate traffic began, ingestion must actually succeed at >95%, not just "not crash."
+const recoveryVerifySuccessRate = new Rate(
+  "mrr_ingestion_recovery_verify_success_rate",
+);
 
 export const options = {
+  // #93 requires measured p95/p99 evidence, not just threshold pass/fail -- k6's default
+  // summaryTrendStats (avg/min/med/max/p90/p95) doesn't include p99's actual computed value anywhere
+  // in the exported summary JSON even though a p99 threshold can reference it, so add it explicitly.
+  summaryTrendStats: ["avg", "min", "med", "max", "p(90)", "p(95)", "p(99)"],
   scenarios: {
     warmup: {
       executor: "ramping-arrival-rate",
@@ -141,8 +182,18 @@ export const options = {
     mrr_ingestion_burst_missing_retry_after_total: ["count==0"],
     // Burst must degrade into controlled 429s, never 5xx/DB contention -- #93's explicit target.
     mrr_ingestion_burst_unexpected_5xx_total: ["count==0"],
-    // Ingestion must actually recover once the fixed window clears.
-    mrr_ingestion_recovery_success_rate: ["rate>0.95"],
+    // Carry-over 429s (the leftover part of whichever wall-clock window burst exhausted) are the
+    // fixed-window limiter's documented contract working as designed -- see RECOVERY_CARRYOVER_DURATION
+    // above -- but every one of them must still carry a valid Retry-After, and must never be a 5xx.
+    mrr_ingestion_recovery_carryover_missing_retry_after_total: ["count==0"],
+    mrr_ingestion_recovery_carryover_unexpected_5xx_total: ["count==0"],
+    // The actual recovery pass/fail signal: once a full fixed window has elapsed since recovery
+    // traffic began, ingestion must actually succeed at >95%, not just "not crash." (Architect
+    // decision on #93, 2026-08-24: this replaces the previous whole-phase
+    // mrr_ingestion_recovery_success_rate threshold, which counted expected carry-over 429s as
+    // failures and was therefore stricter than #93's actual "recovers once the fixed windows permit
+    // it" requirement.)
+    mrr_ingestion_recovery_verify_success_rate: ["rate>0.95"],
   },
 };
 
@@ -258,7 +309,24 @@ export default function () {
       burstUnexpected5xx.add(1);
     }
   } else if (phase === "recovery") {
-    recoverySuccessRate.add(accepted);
+    recoveryOverallSuccessRate.add(accepted);
+    // exec.scenario.progress is k6's own authoritative 0..1 fraction of this scenario's configured
+    // duration elapsed -- not reconstructed from wall-clock timestamps -- so this splits the recovery
+    // phase into its carry-over and fresh-window-verification segments the same principled way phase
+    // itself is derived from exec.scenario.name above, rather than approximating elapsed time from
+    // iteration counts or Date.now().
+    const elapsedInPhase = exec.scenario.progress * RECOVERY_DURATION;
+    if (elapsedInPhase < RECOVERY_CARRYOVER_DURATION) {
+      if (res.status === 429) {
+        if (!res.headers["Retry-After"]) {
+          recoveryCarryoverMissingRetryAfter.add(1);
+        }
+      } else if (res.status >= 500) {
+        recoveryCarryoverUnexpected5xx.add(1);
+      }
+    } else {
+      recoveryVerifySuccessRate.add(accepted);
+    }
   }
 
   check(res, {

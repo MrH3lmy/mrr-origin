@@ -39,14 +39,33 @@ BASELINE_EVENTS="$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c \
     "SELECT count(*) FROM tracking_event_envelopes WHERE workspace_id IN (SELECT id FROM workspaces WHERE slug LIKE 'loadtest-ws-%');")"
 
 echo "==> Running k6 ingestion load test against ${MRRORIGIN_BASE_URL} (~15 minutes: warm-up, sustained, burst, recovery)"
+# k6 exits 99 when a threshold is crossed (e.g. a real perf-target miss), which set -e would treat as
+# fatal and abort the script *before* the correctness verification below ever runs -- a failed
+# performance threshold must not suppress correctness evidence (#93 architect decision, 2026-08-24).
+# So: capture k6's own exit code without letting set -e kill the script, run verification
+# unconditionally on whatever k6 produced, and only then propagate k6's failure -- after
+# verification has had its say. A verification failure itself still aborts immediately, at its own
+# command, with set -e restored below.
+set +e
 MRRORIGIN_BASE_URL="$MRRORIGIN_BASE_URL" k6 run \
     --summary-export "$SUMMARY_OUTPUT" \
     "${SCRIPT_DIR}/ingestion-load-test.js"
+K6_EXIT_CODE=$?
+set -e
 
-EXPECTED_EVENTS="$(jq -r '.metrics.mrr_ingestion_accepted_events_total.values.count // 0' "$SUMMARY_OUTPUT")"
+# No .values wrapper in this k6 version's --summary-export schema -- metrics are flat objects
+# ({"count": N, "rate": N}), confirmed against a real summary file. A latent bug (the .values path
+# always silently fell back to 0 via `// 0`) that was never exercised before the fix above let this
+# script reach verification after a k6 threshold failure for the first time.
+EXPECTED_EVENTS="$(jq -r '.metrics.mrr_ingestion_accepted_events_total.count // 0' "$SUMMARY_OUTPUT")"
 
 echo "==> Verifying tenant isolation/routing and reconciling this run's event delta (baseline=${BASELINE_EVENTS}, expecting +${EXPECTED_EVENTS})"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v baseline_events="$BASELINE_EVENTS" -v expected_events="$EXPECTED_EVENTS" \
     -f "${SCRIPT_DIR}/verify-ingestion-tenant-isolation.sql"
 
 echo "==> Done. k6 summary written to ${SUMMARY_OUTPUT} (git-ignored; copy the numbers you want to keep into docs/operations/load-readiness.md, do not commit the raw file)."
+
+if [ "$K6_EXIT_CODE" -ne 0 ]; then
+    echo "==> k6 recorded threshold failures (exit ${K6_EXIT_CODE}) even though correctness verification above passed. Treating this run as FAILED overall -- see the k6 output/summary for which threshold(s) missed." >&2
+    exit "$K6_EXIT_CODE"
+fi
