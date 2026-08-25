@@ -279,22 +279,22 @@ procedure.
 
 At minimum, verify these failure classes against the application's documented contract:
 
-| Case | Expected behavior |
-| --- | --- |
-| Missing/invalid/expired user authentication | `401` |
-| Authenticated non-member workspace access | Concealed `404` or documented denial |
-| Insufficient workspace role | Documented `403`/concealed denial |
-| Invalid/revoked ingestion key | `401` |
-| Blocked tracker origin | Documented `4xx` |
-| Malformed ingestion payload | `400` |
-| Duplicate/conflicting identity/session/event input | Idempotent result or documented `409` |
-| Rate limit exceeded | `429` with `Retry-After` |
-| Invalid/replayed OAuth state | Documented `4xx` |
-| Invalid Stripe webhook signature | Documented `4xx` |
-| Unsupported billing shape | Explicit unsupported state; not accidental `500` |
-| Unknown recovery target | `404` |
-| Invalid recovery state | Documented `409`/`4xx` |
-| Application defect, database outage, unhandled exception | Unexpected `5xx`; record incident |
+| Case                                                     | Expected behavior                                |
+| -------------------------------------------------------- | ------------------------------------------------ |
+| Missing/invalid/expired user authentication              | `401`                                            |
+| Authenticated non-member workspace access                | Concealed `404` or documented denial             |
+| Insufficient workspace role                              | Documented `403`/concealed denial                |
+| Invalid/revoked ingestion key                            | `401`                                            |
+| Blocked tracker origin                                   | Documented `4xx`                                 |
+| Malformed ingestion payload                              | `400`                                            |
+| Duplicate/conflicting identity/session/event input       | Idempotent result or documented `409`            |
+| Rate limit exceeded                                      | `429` with `Retry-After`                         |
+| Invalid/replayed OAuth state                             | Documented `4xx`                                 |
+| Invalid Stripe webhook signature                         | Documented `4xx`                                 |
+| Unsupported billing shape                                | Explicit unsupported state; not accidental `500` |
+| Unknown recovery target                                  | `404`                                            |
+| Invalid recovery state                                   | Documented `409`/`4xx`                           |
+| Application defect, database outage, unhandled exception | Unexpected `5xx`; record incident                |
 
 - [ ] Confirm expected client/security failures do not masquerade as server incidents.
 - [ ] Record every unexpected `5xx` with timestamp, safe symptom, affected step, and incident ID.
