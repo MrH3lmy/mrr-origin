@@ -1,6 +1,8 @@
 # Private beta workspace evidence — `[participant alias]`
 
-Copy once per real beta workspace. Blank fields mean “not recorded” and must be resolved to an
+Create one private copy per real beta workspace **only in the access-controlled evidence store
+defined by the operating framework**. Never commit a filled copy to this public repository or post
+it to a GitHub issue or pull request. Blank fields mean “not recorded” and must be resolved to an
 observed value, `not observed`, `not supplied`, or `not applicable`. Never include credentials,
 webhook bodies, raw emails, payment details, customer identifiers, or interviewee names.
 
@@ -9,6 +11,8 @@ webhook bodies, raw emails, payment details, customer identifiers, or interviewe
 - Participant alias:
 - Workspace UUID:
 - Evidence-record owner:
+- Private-store access group / approval record:
+- Retention deadline / deletion owner:
 - Release SHA / environment:
 - Guided or self-serve (chosen before start):
 - Invitation / consent timestamps (UTC):
@@ -114,3 +118,4 @@ Repeat rows for each real question. A correct “not answerable” is evidence.
 - Incident IDs / linked issues:
 - Founder confirmation or correction of interpreted findings:
 - Caveats for aggregate review:
+- Deletion completed_at / confirmed by (complete by the registered deadline):

@@ -1,15 +1,22 @@
 # Private beta final review — `[review date]`
 
-This is a blank decision record, not evidence. Populate it only from completed workspace evidence
-records. Keep issue #29 open through architecture/product review and do not update `PRODUCT.md` or
-`ROADMAP.md` until real evidence supports the accepted decision.
+This is a blank decision record, not evidence. Populate it only from completed records held in the
+private evidence store, using the sanitization rules in the operating framework. The public review
+must contain only de-identified aggregate evidence: never include workspace UUIDs, re-identifiable
+aliases, founder-level timelines or price responses, raw notes, small-cell disclosures, or links to
+private records. Keep issue #29 open through architecture/product review and do not update
+`PRODUCT.md` or `ROADMAP.md` until real evidence supports the accepted decision.
 
 ## Review control
 
 - Release SHA(s), environment, beta dates:
-- Pre-registered definitions (onboarded, engaged, meaningful data, return window):
+- Pre-registered guided-stage assignment/rule and allowed standard help:
+- Pre-registered transition criterion and whether/when it was met:
+- Pre-registered self-serve-stage assignment/rule and allowed support:
+- Pre-registered definitions (onboarded, engaged, meaningful data, observation/return window):
 - Protocol deviations and missing records:
-- Evidence-record aliases included/excluded and reasons:
+- Number of private evidence records included/excluded and sanitized reasons (no aliases):
+- Private-record retention deadline and deletion status (aggregate status only):
 
 ## Cohort flow (raw counts)
 
@@ -90,9 +97,9 @@ Do not count internal/test workspaces. Explain attrition at every stage.
 
 ## Public V1 proposal (evidence-linked)
 
-| Scope item / positioning claim | Include, change, or defer | Workspace evidence aliases / counts | Reason and caveat |
-| ------------------------------ | ------------------------- | ----------------------------------- | ----------------- |
-|                                |                           |                                     |                   |
+| Scope item / positioning claim | Include, change, or defer | Sanitized aggregate evidence / counts | Reason and caveat |
+| ------------------------------ | ------------------------- | ------------------------------------- | ----------------- |
+|                                |                           |                                       |                   |
 
 ### Proposed V1 scope
 
