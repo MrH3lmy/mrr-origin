@@ -53,7 +53,11 @@ MRRORIGIN_BASE_URL="$MRRORIGIN_BASE_URL" k6 run \
 K6_EXIT_CODE=$?
 set -e
 
-EXPECTED_EVENTS="$(jq -r '.metrics.mrr_ingestion_accepted_events_total.values.count // 0' "$SUMMARY_OUTPUT")"
+# No .values wrapper in this k6 version's --summary-export schema -- metrics are flat objects
+# ({"count": N, "rate": N}), confirmed against a real summary file. A latent bug (the .values path
+# always silently fell back to 0 via `// 0`) that was never exercised before the fix above let this
+# script reach verification after a k6 threshold failure for the first time.
+EXPECTED_EVENTS="$(jq -r '.metrics.mrr_ingestion_accepted_events_total.count // 0' "$SUMMARY_OUTPUT")"
 
 echo "==> Verifying tenant isolation/routing and reconciling this run's event delta (baseline=${BASELINE_EVENTS}, expecting +${EXPECTED_EVENTS})"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v baseline_events="$BASELINE_EVENTS" -v expected_events="$EXPECTED_EVENTS" \
