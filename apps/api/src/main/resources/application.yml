@@ -26,6 +26,27 @@ spring:
             - ${OIDC_AUDIENCE:mrr-origin-api}
 
 mrrorigin:
+  secrets:
+    # ADR-0012 / #102: when enabled, production secrets are resolved from AWS Secrets Manager at
+    # startup and take precedence over any same-named environment variable, so the existing
+    # ${STRIPE_CONNECT_LIVE_SECRET_KEY:}-style placeholders below resolve to the AWS-sourced value
+    # with no change to any consumer. Inert by default -- local development and CI never set
+    # MRRORIGIN_SECRETS_PROVIDER, so nothing here is contacted and plaintext env vars are used
+    # exactly as before.
+    #
+    # aws.mappings is intentionally NOT set here: it is a list of {target-property, secret-id} pairs
+    # and is deployment-owned configuration, never hardcoded in this repo (no AWS account ID, secret
+    # ARN, or region belongs in source control). Configure it at deploy time using Spring Boot's
+    # standard indexed environment-variable list binding, e.g.:
+    #   MRRORIGIN_SECRETS_AWS_MAPPINGS_0_TARGETPROPERTY=STRIPE_CONNECT_LIVE_SECRET_KEY
+    #   MRRORIGIN_SECRETS_AWS_MAPPINGS_0_SECRETID=<arn-or-name-of-that-secret-in-aws-secrets-manager>
+    #   MRRORIGIN_SECRETS_AWS_MAPPINGS_1_TARGETPROPERTY=STRIPE_CONNECT_LIVE_WEBHOOK_SECRET
+    #   MRRORIGIN_SECRETS_AWS_MAPPINGS_1_SECRETID=<...>
+    # See docs/security/aws-secrets-manager-setup.md for the full mapping contract and the realistic
+    # target-property list.
+    provider: ${MRRORIGIN_SECRETS_PROVIDER:none}
+    aws:
+      region: ${MRRORIGIN_SECRETS_AWS_REGION:}
   tracking:
     rate-limit:
       # #65: DB-backed per-ingestion-key ceiling on the public ingestion endpoint.
