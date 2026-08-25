@@ -28,6 +28,11 @@ The beta operator must complete these gates before inviting a founder:
 6. Define the observation window and follow-up dates for that workspace before starting. The length
    is a **decision required**; retain the same window where possible and report exceptions.
 
+Before the first founder invitation, run the
+[pre-beta production-like smoke test](pre-beta-smoke-test.md) against one exact release SHA and post
+its READY / NOT READY verdict on issue #29. The smoke-test workspace is operational evidence only and
+never counts toward the founder cohort.
+
 ## A. Cohort definition
 
 ### Qualifies
