@@ -8,34 +8,9 @@ remains open until real workspaces meet its acceptance criteria and `PRODUCT.md`
 are updated from that evidence.
 
 Record only observed facts or a founder's own words. Use `not observed`, `not supplied`, or
-`not applicable` rather than estimating. Never infer willingness to pay from activity.
-
-### Evidence storage and privacy boundary
-
-This repository and its GitHub issues and pull requests are public. **Never commit a filled
-per-founder/per-workspace record or interview note here, and never post one to a GitHub issue or pull
-request.** The repository contains blank templates and may later contain only a sanitized aggregate
-review. Store completed records in an access-controlled private evidence store chosen before
-recruitment. The store must have:
-
-- a named evidence owner and an explicit access list limited to people running or reviewing the
-  beta;
-- access logging or another reviewable access history where the chosen store supports it;
-- no credentials, webhook bodies, raw emails, payment details, Stripe customer identifiers, or
-  beta-user customer-identifying data; use the workspace UUID and a separately controlled founder
-  alias only where operationally necessary; and
-- a retention deadline recorded before recruitment. **Decision required before recruitment:** set
-  the shortest period that supports follow-up and the final decision, then delete per-workspace
-  records and interview notes by that deadline (or earlier on a valid deletion request), record the
-  deletion, and remove access promptly when a reviewer no longer needs it.
-
-Public GitHub may receive only sanitized incident summaries that cannot identify a founder or their
-customers. The final review may copy aggregate numerators/denominators, distributions that do not
-single out a workspace, themes, sanitized caveats, and short non-identifying quotes only when the
-founder consented to quotation. It must not contain workspace UUIDs, aliases that can be mapped back
-to founders, row-level timelines, raw interview notes, founder-specific price responses, or links to
-the private evidence store. Small-cell results that could identify a founder must be generalized or
-withheld with the omission reported.
+`not applicable` rather than estimating. Never infer willingness to pay from activity. Do not put
+credentials, webhook bodies, raw email addresses, payment details, or customer-identifying data in
+these files or GitHub issues. Store a workspace UUID and a separately controlled founder alias.
 
 ## Before recruitment
 
@@ -46,35 +21,12 @@ The beta operator must complete these gates before inviting a founder:
 2. Confirm the production environment exposes the documented metrics and alerts, and that the
    operator can follow the observability and recovery runbooks.
 3. Run `cd apps/api && mvn verify` and `pnpm check` against the release candidate.
-4. Complete and post the sanitized pre-registration block below on #29. Store its private-store and
-   retention details privately; post only the non-sensitive definitions and completion status.
-5. Create blank evidence records from `workspace-evidence-template.md` in the private evidence store;
-   do not copy completed records back into the repository.
-
-### Required pre-registration: guided, then self-serve
-
-Issue #29 requires a sequential beta: guided onboarding first, then self-serve. Before recruitment,
-post the following non-sensitive definitions on #29 for review and freeze them for the beta cycle.
-Every blank is a **decision required before recruitment**; this framework intentionally supplies no
-new threshold. Do not select or revise definitions after seeing outcomes.
-
-- **Guided stage:** number/rule for assigning the first founders; what standard operator help is
-  allowed; what counts as an intervention beyond that standard help.
-- **Transition criterion:** observable evidence required to finish the guided stage and begin
-  self-serve, including how unresolved blocking incidents prevent transition.
-- **Self-serve stage:** number/rule for assigning the remaining founders; normal documentation and
-  standard support route allowed; what assistance invalidates or deviates from self-serve.
-- **Engaged:** observable actions and/or completed applicable tasks required for the denominator in
-  #29's “engaged beta workspaces” criterion.
-- **Observation/return window:** start event, duration, follow-up timing, and what makes a founder
-  eligible for the full return denominator.
-- **Evidence governance:** private-store owner, access approvers/readers, retention deadline and
-  deletion owner (record these privately; post only that each field is set).
-
-Record stage assignment before each invitation. Do not move a founder between stages to improve a
-result. Report exceptions and protocol deviations in the final review. If the transition criterion
-is not met, remain in guided evaluation or make an explicit reviewed iteration decision; do not
-quietly start self-serve.
+4. Create a blank evidence record from `workspace-evidence-template.md`; assign a non-identifying
+   participant alias and workspace UUID.
+5. Choose **guided** or **self-serve** before onboarding begins. Do not reclassify a guided attempt
+   as self-serve after the founder needs help.
+6. Define the observation window and follow-up dates for that workspace before starting. The length
+   is a **decision required**; retain the same window where possible and report exceptions.
 
 ## A. Cohort definition
 
@@ -265,25 +217,21 @@ recovery/runbook used; owner; linked engineering issue; resolution; recurrence; 
 1. **This documentation slice:** keep this runbook and the two raw templates versioned and review
    them on #29 before broad implementation. No production code, telemetry, admin tooling, or product
    scope change is required to collect the defined evidence.
+2. **Production secrets decision (separate blocker issue required):** select and document a
+   production KMS/secrets-manager approach in an ADR, then update the private-beta security
+   checklist. This is already an open gate, not a claim that #28 is incomplete.
+3. **Production identity-provider decision (separate blocker issue required):** select the OIDC
+   provider/configuration, document the decision at the appropriate architecture/operations level,
+   and update the security checklist.
+4. **Repository security settings (repo-admin action):** enable/verify Dependabot alerts and security
+   updates plus native secret-scanning push protection, recording completion on the security
+   checklist. Track this as one admin blocker if it cannot be completed immediately.
+5. **Release/operator verification:** verify the already-delivered #28 observability, load, and
+   recovery artifacts in the actual beta environment. Create an engineering issue only for a
+   concrete failed check; do not reopen technical-readiness work speculatively.
 
-The following is the launch-gate register. Rows 9, 11, 13, and 14 of the existing
-[private-beta security checklist](../security/private-beta-checklist.md#private-beta-security-checklist)
-are the concrete trackers inherited from the #27/PR #80 close-out; an extra issue would duplicate
-those deliberately checklist-owned decisions/actions. #27 and #28 remain complete and must not be
-reopened.
-
-| Gate                                                            | Type / owner                                                                                       | Tracking source                                                                  | Completion evidence before first invitation                                                                                                                                                                     |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Production secrets/KMS selection                                | Architecture decision followed by engineering/configuration; repository owner names decision owner | Security checklist row 13 and ADR-0003                                           | Accepted ADR identifies the production secret store and handling; checklist row 13 updated to done; deployed configuration is verified without exposing a secret                                                |
-| Production identity-provider selection                          | Product/infrastructure configuration decision; repository owner names operator                     | Security checklist row 14 and `ARCHITECTURE.md` deferred decision                | Provider and production OIDC configuration documented; checklist row 14 updated to done; operator verifies sign-in and tenant-scoped access in beta environment                                                 |
-| Dependabot/security updates and secret-scanning push protection | Repository-admin action, not engineering work                                                      | Security checklist rows 9 and 11                                                 | Repository admin verifies all named GitHub settings and records date/actor-safe evidence in the checklist                                                                                                       |
-| Beta-environment/operator verification                          | Operator action; engineering only if a concrete check fails                                        | #29 pre-recruitment gate; observability and recovery runbooks are the procedures | Operator records release SHA/date and pass/fail for metric exposition, alert loading/routing, dashboard availability, and one safe recovery/runbook walkthrough; failed checks link a new narrowly scoped issue |
-
-The #29 architecture-review comment must record each gate's owner, status, and safe evidence link or
-date before recruitment. Do not put deployment secrets or private evidence-store details in that
-public comment. A gate that fails due to a concrete code/documentation defect gets the smallest new
-engineering issue at that time; a pending decision or admin/operator action stays with its tracker
-above rather than creating a speculative implementation issue.
+The blocker issues should state outcome and acceptance evidence, not prescribe an unreviewed vendor.
+None should be folded into this documentation PR.
 
 ### Nice after beta starts (evidence-gated)
 
