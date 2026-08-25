@@ -175,15 +175,26 @@ before if the event had already partially applied, or exactly the rows the event
 if it hadn't — never more rows than a single clean application would produce, because normalization
 upserts by `(workspace_id, stripe_*_id)`, not insert-only.
 
-**Known limitation (flagged, not fixed by this runbook):** normalized billing state produced by
-webhook replay is not currently used to (re)compute `customer_mrr_movements` /
-`customer_mrr_snapshots` — `RevenueCalculationService`, the only production entry point for that
-calculation, is not invoked from webhook or backfill normalization today (discovered during #81;
-tracked as its own piece of work in #83). If a replayed event's business data implies an MRR change,
-that change will not appear in revenue reporting until #83 closes. Do not attempt to work around this by manually
-invoking `RevenueCalculationService` outside of a reviewed code path — it requires a correctly
-constructed `SubscriptionState`, and an ad hoc call is exactly how a real duplicate/incorrect
-movement gets created.
+**MRR recomputation on replay (#83 / PR #85; ADR-0010, ADR-0011):** normalized billing state
+produced by webhook replay does (re)compute `customer_mrr_movements` / `customer_mrr_snapshots`.
+Every accepted `customer.subscription.*` normalization calls `BillingMrrRecalculationPort
+#recalculateSubscription`, which drives `RevenueCalculationService.recordAndReplay` in the same
+database transaction as the ledger write (`BillingMrrRecalculationAdapter`) — so a replayed
+subscription event recomputes MRR as part of normalization, not as a separate manual step. Supported
+customer-level `customer.discount.*` normalization is wired the same way: `CustomerDiscountMrrRecalculationService`
+fans the discount out to each affected `active`/`past_due` subscription and calls the identical
+recalculation port per subscription.
+
+Replay stays duplicate-safe because recalculation keys off deterministic source references, not
+insert-only appends: `revenue_subscription_states` upserts `ON CONFLICT (workspace_id,
+source_billing_reference) DO NOTHING`, so replaying the same event a second time recomputes the
+identical reference and no-ops rather than creating a second movement/snapshot.
+
+Do not manually invoke `RevenueCalculationService` outside of these reviewed code paths — it
+requires a correctly constructed `SubscriptionState`, and an ad hoc call is exactly how a real
+duplicate/incorrect movement gets created. If MRR output looks stale or wrong after a replay, use the
+replay/recovery procedure in this section (and the row-count check in "After replaying" above) rather
+than calling the revenue engine directly.
 
 **When not to replay:** if `lastError` shows a permanent data problem (e.g. the event references an
 object your Stripe connection can no longer see, such as after the connected account itself changed
