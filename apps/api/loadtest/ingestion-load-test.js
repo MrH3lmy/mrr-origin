@@ -70,7 +70,8 @@ const RECOVERY_START = BURST_START + BURST_DURATION;
 // length, so at least one full window boundary has passed since recovery began) where >95% 2xx is
 // still required exactly as before.
 const RECOVERY_CARRYOVER_DURATION = 60;
-const RECOVERY_VERIFY_DURATION = RECOVERY_DURATION - RECOVERY_CARRYOVER_DURATION;
+const RECOVERY_VERIFY_DURATION =
+  RECOVERY_DURATION - RECOVERY_CARRYOVER_DURATION;
 
 // Global metrics (every request, every phase).
 const acceptedDuration = new Trend("mrr_ingestion_accepted_duration", true);
