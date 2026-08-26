@@ -5,11 +5,52 @@ fixed schedule (see each section) and immediately on suspected compromise. Nothi
 application code — every secret is already read from environment configuration
 (`apps/api/src/main/resources/application.yml`); rotation is an infrastructure/operations action.
 
-None of these secrets are currently in a dedicated KMS/secrets manager — they are process
-environment variables, per the deferred decision noted in `docs/security/threat-model.md` §3.
-Selecting and migrating to a KMS is a private-beta gate (see `docs/security/private-beta-checklist.md`);
-until then, "the secret store" below means wherever the deployment's environment variables are
-managed (e.g. the hosting provider's encrypted config/secrets feature) — never a committed file.
+**Store and startup behavior (ADR-0012):** production secrets are resolved from **AWS Secrets
+Manager**, accessed only via Render's OIDC-federated workload identity (no static AWS access key) —
+see `docs/security/aws-secrets-manager-setup.md` for the external AWS/Render setup and ADR-0012 for
+the full decision. "The secret store" below now means AWS Secrets Manager for any deployment running
+with `MRRORIGIN_SECRETS_PROVIDER=aws-secrets-manager`. Resolution happens once, at application
+startup — a running instance never re-fetches a secret mid-lifetime, and startup fails closed
+(refuses to start) if a required secret cannot be resolved, with no plaintext fallback. **Local
+development is unaffected** and continues to use plaintext local environment variables, since
+`MRRORIGIN_SECRETS_PROVIDER` is never set there.
+
+Until a given deployment is actually running with AWS Secrets Manager enabled, "the secret store" for
+that deployment still means wherever its environment variables are managed — never a committed file.
+This distinction matters for #102: implementation merging does not by itself make AWS Secrets Manager
+"the secret store" for the beta environment — that only becomes true once the beta deployment is
+actually configured and verified per `docs/security/aws-secrets-manager-setup.md`.
+
+## AWS Secrets Manager rotation, rollback, and audit verification
+
+Applies to any deployment running with `MRRORIGIN_SECRETS_PROVIDER=aws-secrets-manager` (ADR-0012).
+This section describes the mechanics common to every secret class below; each class's own section
+still says _which_ value to rotate and on what cadence.
+
+- **Rotation/re-resolution:** update the secret's value in AWS Secrets Manager (console, CLI, or the
+  provider's own rotation tooling), then redeploy or restart the Render service. Resolution happens
+  once at startup — a running instance does not notice a Secrets Manager update until it restarts, by
+  design (ADR-0012's "no per-request dependency on the secret store" model). "Store the new
+  value/credentials in the secret store" in the sections below means this AWS Secrets Manager update,
+  not an environment variable, for any deployment running with AWS resolution enabled.
+- **Fail-closed behavior to expect:** if the new value is entered incorrectly (wrong secret ARN
+  configured, access revoked before the new value is confirmed working, etc.), the next restart fails
+  to start rather than starting with a stale or empty value — this is the intended behavior, not a
+  bug. Diagnose via the failed instance's startup log (`AwsSecretsManagerEnvironmentPostProcessor`
+  logs the target property and secret ID it failed to resolve, never the value).
+- **Rollback:** because the AWS Secrets Manager entry is the authoritative value, not the running
+  instance's memory, rollback means restoring the previous value in AWS Secrets Manager (Secrets
+  Manager retains prior versions by default — use `PreviousVersion`/version staging rather than
+  re-typing the old value by hand where possible) and redeploying/restarting again. There is no
+  in-process rollback path, consistent with secrets never being cached anywhere but process memory for
+  a single instance's lifetime.
+- **Audit verification:** after any rotation, confirm the change in **two** places, not one: (1) AWS
+  CloudTrail shows the expected `PutSecretValue`/version-stage change made by the operator's own
+  identity (not the application's role, which only ever calls `GetSecretValue`), and (2) after
+  redeploy, CloudTrail shows the application's dedicated IAM role successfully calling
+  `GetSecretValue`/`kms:Decrypt` against the new version. Record both observations in the
+  incident/ops log alongside the rotation entry required below. See
+  `docs/security/aws-secrets-manager-setup.md` §6 for the CloudTrail setup this depends on.
 
 ## Stripe platform secret key
 
