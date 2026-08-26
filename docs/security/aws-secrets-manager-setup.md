@@ -136,6 +136,13 @@ On the Render web service running the API:
   list binding (see `apps/api/src/main/resources/application.yml`'s `mrrorigin.secrets` block for the
   exact contract). This repository requires this configuration to be entirely deployment-owned — no
   index, target property, or secret ID is hardcoded in source control.
+- **Also set `MRRORIGIN_SECRETS_AWS_REQUIRED_TARGET_PROPERTIES`** (comma-separated target-property
+  names) to every target property listed above that this deployment considers a mandatory production
+  secret. This is not optional bookkeeping: it is what actually prevents a forgotten mapping from
+  silently resolving from a stray plaintext environment variable instead of failing startup — see
+  ADR-0012 §"Implementation contract". A target property intentionally left out of both this list and
+  the mappings above (e.g. a test-mode Stripe secret on a live-only deployment) is treated as genuinely
+  optional and will not block startup.
 
 ## Realistic target-property list
 

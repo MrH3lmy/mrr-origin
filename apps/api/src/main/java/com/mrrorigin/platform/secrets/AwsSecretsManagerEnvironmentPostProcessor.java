@@ -79,7 +79,8 @@ public final class AwsSecretsManagerEnvironmentPostProcessor implements Environm
 
         SecretResolver resolver = new SecretResolver(log);
         try (SecretsManagerGateway gateway = gatewayFactory.apply(properties.aws().region())) {
-            Map<String, Object> resolved = resolver.resolve(properties.aws().mappings(), gateway);
+            Map<String, Object> resolved = resolver.resolve(
+                    properties.aws().mappings(), properties.aws().requiredTargetProperties(), gateway);
             environment.getPropertySources().addFirst(new MapPropertySource(PROPERTY_SOURCE_NAME, resolved));
         } catch (SecretResolutionException e) {
             throw e;

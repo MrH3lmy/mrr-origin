@@ -80,6 +80,72 @@ class AwsSecretsManagerEnvironmentPostProcessorTests {
     }
 
     @Test
+    void requiredTargetPropertyOmittedFromMappingsFailsClosedEvenWhenAPlaintextEnvVarExists() {
+        var environment = new StandardEnvironment();
+        // A stray plaintext DATABASE_PASSWORD exists in the environment (e.g. a leftover process env
+        // var) -- it must never be allowed to silently satisfy a declared-required production secret
+        // just because that secret's AWS mapping was omitted.
+        environment
+                .getPropertySources()
+                .addLast(new MapPropertySource("stray-env-like-source", Map.of("DATABASE_PASSWORD", "plaintext_should_never_be_used")));
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("mrrorigin.secrets.provider", "aws-secrets-manager");
+        props.put("mrrorigin.secrets.aws.required-target-properties", "STRIPE_CONNECT_LIVE_SECRET_KEY,DATABASE_PASSWORD");
+        props.put("mrrorigin.secrets.aws.mappings[0].target-property", "STRIPE_CONNECT_LIVE_SECRET_KEY");
+        props.put("mrrorigin.secrets.aws.mappings[0].secret-id", "prod/stripe/live-secret");
+        environment.getPropertySources().addLast(new MapPropertySource("test", props));
+        Function<String, SecretsManagerGateway> gatewayFactory =
+                region -> throwingGateway("must not call the gateway when a required target property is unmapped");
+        var postProcessor = new AwsSecretsManagerEnvironmentPostProcessor(log, gatewayFactory);
+
+        assertThatThrownBy(() -> postProcessor.postProcessEnvironment(environment, application))
+                .isInstanceOf(SecretResolutionException.class)
+                .hasMessageContaining("DATABASE_PASSWORD")
+                .hasMessageContaining("required-target-properties");
+        assertThat(environment.getPropertySources().contains(AwsSecretsManagerEnvironmentPostProcessor.PROPERTY_SOURCE_NAME))
+                .isFalse();
+    }
+
+    @Test
+    void requiredTargetPropertyOmittedFromMappingsFailsClosedWithNoPlaintextEnvVarEither() {
+        var environment = new StandardEnvironment();
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("mrrorigin.secrets.provider", "aws-secrets-manager");
+        props.put("mrrorigin.secrets.aws.required-target-properties", "DATABASE_PASSWORD");
+        props.put("mrrorigin.secrets.aws.mappings[0].target-property", "STRIPE_CONNECT_LIVE_SECRET_KEY");
+        props.put("mrrorigin.secrets.aws.mappings[0].secret-id", "prod/stripe/live-secret");
+        environment.getPropertySources().addLast(new MapPropertySource("test", props));
+        Function<String, SecretsManagerGateway> gatewayFactory =
+                region -> throwingGateway("must not call the gateway when a required target property is unmapped");
+        var postProcessor = new AwsSecretsManagerEnvironmentPostProcessor(log, gatewayFactory);
+
+        assertThatThrownBy(() -> postProcessor.postProcessEnvironment(environment, application))
+                .isInstanceOf(SecretResolutionException.class)
+                .hasMessageContaining("DATABASE_PASSWORD");
+        assertThat(environment.getProperty("DATABASE_PASSWORD")).isNull();
+    }
+
+    @Test
+    void allRequiredTargetPropertiesMappedStartsSuccessfullyAndOptionalOnesMayStayAbsent() {
+        var environment = new StandardEnvironment();
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("mrrorigin.secrets.provider", "aws-secrets-manager");
+        // Only the live Stripe secret is required (e.g. a live-only beta); the test-mode Stripe secret
+        // is neither required nor mapped, and must not block startup by its mere absence.
+        props.put("mrrorigin.secrets.aws.required-target-properties", "STRIPE_CONNECT_LIVE_SECRET_KEY");
+        props.put("mrrorigin.secrets.aws.mappings[0].target-property", "STRIPE_CONNECT_LIVE_SECRET_KEY");
+        props.put("mrrorigin.secrets.aws.mappings[0].secret-id", "prod/stripe/live-secret");
+        environment.getPropertySources().addLast(new MapPropertySource("test", props));
+        var fakeGateway = fakeGateway(Map.of("prod/stripe/live-secret", "sk_live_FROM_AWS_SECRETS_MANAGER"));
+        var postProcessor = new AwsSecretsManagerEnvironmentPostProcessor(log, region -> fakeGateway);
+
+        postProcessor.postProcessEnvironment(environment, application);
+
+        assertThat(environment.getProperty("STRIPE_CONNECT_LIVE_SECRET_KEY")).isEqualTo("sk_live_FROM_AWS_SECRETS_MANAGER");
+        assertThat(environment.getProperty("STRIPE_CONNECT_TEST_SECRET_KEY")).isNull();
+    }
+
+    @Test
     void failsClosedWhenEnabledWithNoMappingsConfigured() {
         var environment = new StandardEnvironment();
         environment.getPropertySources().addLast(new MapPropertySource("test", Map.of("mrrorigin.secrets.provider", "aws-secrets-manager")));

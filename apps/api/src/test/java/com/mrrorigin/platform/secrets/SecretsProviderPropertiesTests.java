@@ -16,6 +16,7 @@ class SecretsProviderPropertiesTests {
         assertThat(properties.provider()).isEqualTo("none");
         assertThat(properties.awsSecretsManagerEnabled()).isFalse();
         assertThat(properties.aws().mappings()).isEmpty();
+        assertThat(properties.aws().requiredTargetProperties()).isEmpty();
     }
 
     @Test
@@ -38,16 +39,23 @@ class SecretsProviderPropertiesTests {
 
     @Test
     void nullMappingsListNormalizesToEmptyNotNull() {
-        var aws = new SecretsProviderProperties.Aws("us-east-1", null);
+        var aws = new SecretsProviderProperties.Aws("us-east-1", null, null);
 
         assertThat(aws.mappings()).isNotNull().isEmpty();
+    }
+
+    @Test
+    void nullRequiredTargetPropertiesNormalizesToEmptyNotNull() {
+        var aws = new SecretsProviderProperties.Aws("us-east-1", null, null);
+
+        assertThat(aws.requiredTargetProperties()).isNotNull().isEmpty();
     }
 
     @Test
     void mappingsListIsDefensivelyCopied() {
         var mutable = new java.util.ArrayList<SecretsProviderProperties.Mapping>();
         mutable.add(new SecretsProviderProperties.Mapping("STRIPE_CONNECT_LIVE_SECRET_KEY", "secret-id"));
-        var aws = new SecretsProviderProperties.Aws("us-east-1", mutable);
+        var aws = new SecretsProviderProperties.Aws("us-east-1", mutable, null);
 
         mutable.clear();
 
@@ -55,11 +63,23 @@ class SecretsProviderPropertiesTests {
     }
 
     @Test
+    void requiredTargetPropertiesListIsDefensivelyCopied() {
+        var mutable = new java.util.ArrayList<String>();
+        mutable.add("DATABASE_PASSWORD");
+        var aws = new SecretsProviderProperties.Aws("us-east-1", null, mutable);
+
+        mutable.clear();
+
+        assertThat(aws.requiredTargetProperties()).containsExactly("DATABASE_PASSWORD");
+    }
+
+    @Test
     void mappingsSurviveOrderAndContent() {
         var mappings = List.of(
                 new SecretsProviderProperties.Mapping("STRIPE_CONNECT_LIVE_SECRET_KEY", "prod/stripe/live-secret"),
                 new SecretsProviderProperties.Mapping("DATABASE_PASSWORD", "prod/db/password"));
-        var properties = new SecretsProviderProperties("aws-secrets-manager", new SecretsProviderProperties.Aws(null, mappings));
+        var properties = new SecretsProviderProperties(
+                "aws-secrets-manager", new SecretsProviderProperties.Aws(null, mappings, null));
 
         assertThat(properties.aws().mappings()).containsExactlyElementsOf(mappings);
     }

@@ -14,6 +14,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * see {@code application.yml}'s {@code mrrorigin.secrets} block and
  * {@code docs/security/aws-secrets-manager-setup.md} for why the mapping list is deployment-owned
  * configuration (no AWS account ID, secret ARN, or region belongs in source control).
+ *
+ * <p>{@code aws.requiredTargetProperties} is what actually guarantees no plaintext fallback: it is the
+ * deployment-declared list of target properties that this deployment's production secrets MUST come
+ * from AWS Secrets Manager. {@link SecretResolver} fails startup if any of these is missing from
+ * {@code aws.mappings} -- regardless of whether a same-named plaintext environment variable happens to
+ * exist -- rather than silently letting an omitted mapping fall through to that plaintext value. A
+ * target property not listed here is treated as genuinely optional for this deployment (e.g. a
+ * test-mode-only Stripe secret on a live-only beta) and may remain unmapped.
  */
 @ConfigurationProperties(prefix = "mrrorigin.secrets")
 public record SecretsProviderProperties(String provider, Aws aws) {
@@ -22,16 +30,17 @@ public record SecretsProviderProperties(String provider, Aws aws) {
 
     public SecretsProviderProperties {
         provider = (provider == null || provider.isBlank()) ? "none" : provider;
-        aws = aws == null ? new Aws(null, null) : aws;
+        aws = aws == null ? new Aws(null, null, null) : aws;
     }
 
     boolean awsSecretsManagerEnabled() {
         return AWS_SECRETS_MANAGER.equals(provider);
     }
 
-    public record Aws(String region, List<Mapping> mappings) {
+    public record Aws(String region, List<Mapping> mappings, List<String> requiredTargetProperties) {
         public Aws {
             mappings = mappings == null ? List.of() : List.copyOf(mappings);
+            requiredTargetProperties = requiredTargetProperties == null ? List.of() : List.copyOf(requiredTargetProperties);
         }
     }
 

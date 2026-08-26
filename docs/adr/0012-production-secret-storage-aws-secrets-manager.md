@@ -120,6 +120,16 @@ Render web service (API)
   secret the same way once #103 introduces a concrete property for it. Inventing a property name for a
   secret that does not yet exist in this codebase would violate #102's own "do not invent credentials
   or secret names" instruction, so none is added here.
+- **`mrrorigin.secrets.aws.required-target-properties`** is a separate, deployment-declared list of
+  target properties this deployment considers mandatory production secrets. `SecretResolver` fails
+  startup immediately — before any AWS Secrets Manager call — if a required property has no
+  corresponding entry in `mappings`, regardless of whether a same-named plaintext environment variable
+  happens to exist. Without this, simply omitting a target property from `mappings` (e.g. forgetting
+  `DATABASE_PASSWORD` while still mapping the Stripe secrets) would let that property silently resolve
+  from whatever lower-precedence source has it — a stray environment variable or an `application.yml`
+  default — which is exactly the plaintext-fallback path this ADR is meant to close. A target property
+  neither mapped nor listed as required is treated as genuinely optional for that deployment (e.g. a
+  test-mode-only Stripe secret on a live-only beta) and may remain absent without failing startup.
 - Resolved values are injected into the Spring `Environment` as a property source at the highest
   precedence, using the **same property names** the existing `${STRIPE_CONNECT_LIVE_SECRET_KEY:}`-style
   placeholders in `application.yml` already reference. Every existing configuration consumer

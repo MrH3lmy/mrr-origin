@@ -44,6 +44,14 @@ mrrorigin:
     #   MRRORIGIN_SECRETS_AWS_MAPPINGS_1_SECRETID=<...>
     # See docs/security/aws-secrets-manager-setup.md for the full mapping contract and the realistic
     # target-property list.
+    #
+    # aws.required-target-properties is also NOT set here, for the same reason, but is what actually
+    # guarantees no plaintext fallback: it is the deployment's declared list of target properties that
+    # MUST come from AWS Secrets Manager. Startup fails if a required property has no mapping above --
+    # even if a same-named plaintext environment variable exists -- so a secret can never silently
+    # resolve from plaintext just because its mapping was forgotten. A single comma-separated env var,
+    # e.g.:
+    #   MRRORIGIN_SECRETS_AWS_REQUIRED_TARGET_PROPERTIES=STRIPE_CONNECT_LIVE_SECRET_KEY,STRIPE_CONNECT_LIVE_WEBHOOK_SECRET,DATABASE_PASSWORD,POSTMARK_SERVER_TOKEN
     provider: ${MRRORIGIN_SECRETS_PROVIDER:none}
     aws:
       region: ${MRRORIGIN_SECRETS_AWS_REGION:}
