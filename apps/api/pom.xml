@@ -143,6 +143,25 @@
                     <excludedGroups>${excluded.groups}</excludedGroups>
                 </configuration>
             </plugin>
+            <!-- Exact-release-SHA traceability (private-beta readiness, #104): records the building
+                 git commit into git.properties so /actuator/info can report which commit a running
+                 instance was built from, the mechanism the pre-beta smoke test's "confirm the
+                 deployed artifacts can be mapped back to the recorded SHA" precondition depends on. -->
+            <plugin>
+                <groupId>io.github.git-commit-id</groupId>
+                <artifactId>git-commit-id-maven-plugin</artifactId>
+                <version>10.0.1</version>
+                <configuration>
+                    <generateGitPropertiesFile>true</generateGitPropertiesFile>
+                    <includeOnlyProperties>
+                        <includeOnlyProperty>^git.commit.id\.(abbrev|full)$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.commit.time$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.branch$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.dirty$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.build.time$</includeOnlyProperty>
+                    </includeOnlyProperties>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>

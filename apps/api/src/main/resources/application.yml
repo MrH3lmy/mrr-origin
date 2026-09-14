@@ -132,3 +132,10 @@ management:
     metrics:
       export:
         enabled: true
+  # Release-SHA traceability (private-beta readiness, #104): report the building commit at
+  # /actuator/info so a deployed instance's exact release SHA can be verified without shell access.
+  # `git.properties` is generated at build time by the git-commit-id-maven-plugin; commit/branch
+  # metadata is not sensitive and contains no secret, credential, or tenant data.
+  info:
+    git:
+      mode: full
