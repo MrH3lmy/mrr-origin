@@ -127,9 +127,12 @@ class IngestionMetricsIntegrationTests extends AbstractTrackingIntegrationTest {
         String key = issueKey(workspaceId, projectId);
         allowDomain(workspaceId, projectId, "app.example");
 
-        // Seed session-1, bound to seed-visitor.
+        // Seed session-1, bound to seed-visitor. Relative to now (not a fixed calendar date): only
+        // the events' order matters here, and EventIngestionService rejects anything more than 30
+        // days old, so a hardcoded past date eventually ages out of that window.
+        OffsetDateTime seedTime = OffsetDateTime.now();
         mockMvc.perform(ingest(key, "https://app.example",
-                        pageViewBatch("seed", "seed-event", "seed-visitor", "2026-08-11T12:00:00Z")))
+                        pageViewBatch("seed", "seed-event", "seed-visitor", seedTime.toString())))
                 .andExpect(status().isOk());
 
         double acceptedBefore = counter("mrrorigin.ingestion.events", "result", "accepted");
@@ -137,11 +140,11 @@ class IngestionMetricsIntegrationTests extends AbstractTrackingIntegrationTest {
         String conflicting = """
                 {"version":1,"batchId":"rollback-metrics","events":[
                   {"eventId":"first","visitorId":"other-visitor","sessionId":"session-2",\
-                   "type":"page_view","occurredAt":"2026-08-11T12:00:01Z","payload":{}},
+                   "type":"page_view","occurredAt":"%s","payload":{}},
                   {"eventId":"second","visitorId":"yet-another-visitor","sessionId":"session-1",\
-                   "type":"page_view","occurredAt":"2026-08-11T12:00:02Z","payload":{}}
+                   "type":"page_view","occurredAt":"%s","payload":{}}
                 ]}
-                """;
+                """.formatted(seedTime.plusSeconds(1), seedTime.plusSeconds(2));
 
         mockMvc.perform(ingest(key, "https://app.example", conflicting))
                 .andExpect(status().isConflict())
