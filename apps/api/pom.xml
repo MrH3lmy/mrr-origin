@@ -143,6 +143,46 @@
                     <excludedGroups>${excluded.groups}</excludedGroups>
                 </configuration>
             </plugin>
+            <!-- Exact-release-SHA traceability (private-beta readiness, #104): records the building
+                 git commit into git.properties so /actuator/info can report which commit a running
+                 instance was built from, the mechanism the pre-beta smoke test's "confirm the
+                 deployed artifacts can be mapped back to the recorded SHA" precondition depends on. -->
+            <plugin>
+                <groupId>io.github.git-commit-id</groupId>
+                <artifactId>git-commit-id-maven-plugin</artifactId>
+                <version>10.0.1</version>
+                <!-- Explicit execution of the "revision" goal, bound to "initialize" so git.properties
+                     exists before process-resources copies it to target/classes. The plugin also
+                     auto-registers its own unnamed "default" execution when none is declared; giving
+                     this execution the same id ("default") overrides that implicit one instead of
+                     running the goal twice (verified: exactly one "git-commit-id:revision" execution
+                     appears in `mvn compile` output with this id, versus two distinct executions,
+                     "default" and this one, when a different id was used). -->
+                <executions>
+                    <execution>
+                        <id>default</id>
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>revision</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <generateGitPropertiesFile>true</generateGitPropertiesFile>
+                    <!-- "full" (not the plugin's default "flat") so the full 40-character commit hash
+                         is generated under the property name git.commit.id.full rather than git.commit.id,
+                         required for the includeOnlyProperty regex below to actually match it, and
+                         for /actuator/info to expose git.commit.id.full as documented. -->
+                    <commitIdGenerationMode>full</commitIdGenerationMode>
+                    <includeOnlyProperties>
+                        <includeOnlyProperty>^git.commit.id\.(full|abbrev)$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.commit.time$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.branch$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.dirty$</includeOnlyProperty>
+                        <includeOnlyProperty>^git.build.time$</includeOnlyProperty>
+                    </includeOnlyProperties>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>
