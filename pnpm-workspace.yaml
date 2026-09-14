@@ -8,3 +8,10 @@ allowBuilds:
   esbuild: true
   sharp: true
   unrs-resolver: true
+
+overrides:
+  # GHSA-2883-xcg3-v3hh: js-yaml <4.3.2 lets an empty YAML merge source bypass maxTotalMergeKeys,
+  # allowing unbounded CPU use. Pulled in transitively and deeply (eslint's own dependency chain,
+  # not a direct dependency of this repo); force the patched version workspace-wide until eslint's
+  # own tree picks it up.
+  js-yaml: ">=4.3.2"
